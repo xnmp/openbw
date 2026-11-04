@@ -41,3 +41,16 @@ else()
   target_compile_definitions(openbw-player PRIVATE OPENBW_NO_SDL_MIXER)
   message(STATUS "openbw-player: SDL2_mixer not found, building without sound")
 endif()
+
+# Headless auto-observer evaluation (see observer-eval/); not built by default.
+add_executable(openbw-observer-eval EXCLUDE_FROM_ALL
+  "${CMAKE_CURRENT_LIST_DIR}/observer-eval/observer_eval.cpp"
+  "${OPENBW_DIR}/ui/sdl2.cpp"
+)
+target_include_directories(openbw-observer-eval PRIVATE
+  "${OPENBW_DIR}"
+  "${OPENBW_DIR}/ui"
+  ${SDL2_INCLUDE_DIRS}
+)
+target_compile_definitions(openbw-observer-eval PRIVATE OPENBW_ENABLE_UI OPENBW_NO_SDL_IMAGE OPENBW_NO_SDL_MIXER)
+target_link_libraries(openbw-observer-eval PRIVATE ${SDL2_LIBRARIES})

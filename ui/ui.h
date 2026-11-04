@@ -2154,8 +2154,8 @@ struct ui_functions: ui_util_functions {
 
 	// ---- Single-unit console, laid out like Brood War's own status panel ----
 	// Under the wireframe: shields, hp, energy. Beside it: name, owner, kills, resource or
-	// supply text, then status icons from unit/cmdbtns/cmdicons.grp: armor, weapons and
-	// shields carry their upgrade level, interceptors/scarabs/mines their count. Below
+	// supply text, then status icons from unit/cmdbtns/cmdicons.grp: armor, shields and
+	// weapons carry their upgrade level, interceptors/scarabs/mines their count. Below
 	// those, any training queue, research, upgrade, add-on or construction progress.
 	struct panel_line {
 		a_string text;
@@ -2241,9 +2241,10 @@ struct ui_functions: ui_util_functions {
 			ci.icons.push_back(level_icon(ut->armor_upgrade, -1));
 			auto* gw = unit_ground_weapon(armed);
 			auto* aw = unit_air_weapon(armed);
+			// Brood War's order: armor, shields, weapons, then special counts.
+			if (v.has_shields) ci.icons.push_back(level_icon(UpgradeTypes::Protoss_Plasma_Shields, -1));
 			if (gw) ci.icons.push_back({gw->icon, player_upgrade_level(u->owner, gw->damage_upgrade) > 0 ? player_upgrade_level(u->owner, gw->damage_upgrade) : -1});
 			if (aw && aw != gw) ci.icons.push_back({aw->icon, player_upgrade_level(u->owner, aw->damage_upgrade) > 0 ? player_upgrade_level(u->owner, aw->damage_upgrade) : -1});
-			if (v.has_shields) ci.icons.push_back(level_icon(UpgradeTypes::Protoss_Plasma_Shields, -1));
 			if (unit_is_carrier(u)) ci.icons.push_back({(int)UnitTypes::Protoss_Interceptor, (int)unit_interceptor_count(u)});
 			if (unit_is_reaver(u)) ci.icons.push_back({(int)UnitTypes::Protoss_Scarab, (int)unit_scarab_count(u)});
 			if (unit_is_vulture(u) && player_has_researched(u->owner, TechTypes::Spider_Mines)) {
@@ -2612,11 +2613,25 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// ---- Auto observer ('o') ----
-	// Steers the camera to where the action is: recent damage (hp + shields lost, found by
-	// comparing units between observer ticks, plus the hp left on units that die) and army
-	// supply in a view-sized window, weighted towards places where two sides' armies meet.
-	// See observer_retarget/observer_step for how it avoids darting about; it pauses for a
-	// few seconds after a manual camera move.
+	// Two layers, as in esports auto-directors: choosing the scene runs on game time
+	// (every 8 frames), moving the camera runs on real time, so motion feels the same at
+	// any playback speed.
+	//
+	// Interest of a view-sized window (observer_window, on the interest grid below):
+	//  - recent damage: hp + shields lost, from comparing units between ticks plus the hp
+	//    left on units that die, with a 2 game-second half-life;
+	//  - a fight: the second-largest side's army supply in the window;
+	//  - a fight about to happen: the same, counting armies up to about a view away;
+	//  - presence: total army supply;
+	//  - a quiet-time part: scouting workers early on and buildings under construction.
+	//    It wears off the longer a shot lasts and counts less where the camera has been
+	//    recently, so a quiet game tours the bases instead of staring at one spot.
+	// Choice (observer_retarget): a shot lasts at least observer_min_shot_s of real time
+	// (less once its fight is over); another place must beat it by 80% for 1.5 game
+	// seconds. Motion (observer_step): follow the shot's weighted centre through a dead zone
+	// with a critically damped spring; cut instead when the target is most of a view away,
+	// as a human observer clicks the minimap. It steps back for a few seconds after a
+	// manual camera move.
 	bool auto_observer = false;
 	struct damage_event {
 		xy pos;
@@ -2628,10 +2643,16 @@ struct ui_functions: ui_util_functions {
 	int observer_last_frame = -1;
 	int observer_tick_frame = -1000;
 	bool observer_has_target = false;
-	xy observer_target;
-	double observer_cx = 0, observer_cy = 0;
+	xy observer_target;                  // the shown scene's centre, updated on game ticks
+	double observer_sx = 0, observer_sy = 0;  // observer_target smoothed in real time
+	double observer_cx = 0, observer_cy = 0, observer_vx = 0, observer_vy = 0;
+	bool observer_cut_pending = false;
 	xy observer_last_screen_pos;
 	std::chrono::high_resolution_clock::time_point observer_manual_until, observer_last_switch, observer_last_update;
+	static constexpr double observer_min_shot_s = 2.5;
+
+	// Playback speed (1 = Fastest); 0 while paused.
+	double observer_speed() const { return is_paused ? 0.0 : (double)game_speed.raw_value / 256.0; }
 
 	int unit_hp_total(const unit_t* u) const {
 		return (int)u->hp.integer_part() + (u->unit_type->has_shield ? (int)u->shield_points.integer_part() : 0);
@@ -2666,103 +2687,224 @@ struct ui_functions: ui_util_functions {
 		observer_last_frame = st.current_frame;
 	}
 
-	struct observer_unit {
-		xy pos;
-		int owner;
-		int supply_half;
+	// Interest heatmap: a grid of 128 px cells. Each observer tick rebuilds per-cell army
+	// supply per player, decayed damage, scouts and construction sites, takes window sums
+	// with summed-area tables, and keeps a per-window score smoothed over ~1 game second,
+	// so decisions follow sustained interest rather than single volleys.
+	static constexpr int observer_cell = 128;
+	int observer_gw = 0, observer_gh = 0;
+	a_vector<double> observer_smooth_action;  // per window centre cell
+	int observer_smooth_frame = -1;
+
+	struct observer_interest {
+		double action = 0;  // damage, fights and armies
+		double quiet = 0;   // scouting and construction
+		xy centre;
 	};
 
-	a_vector<observer_unit> observer_army() const {
-		a_vector<observer_unit> r;
+	struct observer_grid {
+		int w = 0, h = 0;
+		// summed-area tables, (w+1) x (h+1)
+		std::array<a_vector<int>, 8> supply;
+		a_vector<double> damage, wx, wy, wsum;
+		a_vector<int> scouts, builds;
+		size_t at(int x, int y) const { return (size_t)y * (w + 1) + x; }
+		template<typename T>
+		static T rect_sum(const a_vector<T>& t, const observer_grid& g, int x0, int y0, int x1, int y1) {
+			// inclusive cell range, clipped
+			x0 = std::max(0, x0); y0 = std::max(0, y0); x1 = std::min(g.w - 1, x1); y1 = std::min(g.h - 1, y1);
+			if (x0 > x1 || y0 > y1) return T();
+			return t[g.at(x1 + 1, y1 + 1)] - t[g.at(x0, y1 + 1)] - t[g.at(x1 + 1, y0)] + t[g.at(x0, y0)];
+		}
+	};
+
+	template<typename T>
+	static void observer_integrate(a_vector<T>& t, int w, int h) {
+		for (int y = 1; y <= h; ++y) for (int x = 1; x <= w; ++x) {
+			size_t i = (size_t)y * (w + 1) + x;
+			t[i] += t[i - 1] + t[i - (w + 1)] - t[i - (w + 1) - 1];
+		}
+	}
+
+	observer_grid observer_build_grid() const {
+		observer_grid g;
+		g.w = std::max(1, ((int)game_st.map_width + observer_cell - 1) / observer_cell);
+		g.h = std::max(1, ((int)game_st.map_height + observer_cell - 1) / observer_cell);
+		size_t n = (size_t)(g.w + 1) * (g.h + 1);
+		for (auto& v : g.supply) v.assign(n, 0);
+		g.damage.assign(n, 0); g.wx.assign(n, 0); g.wy.assign(n, 0); g.wsum.assign(n, 0);
+		g.scouts.assign(n, 0); g.builds.assign(n, 0);
+		auto cell = [&](xy p) {
+			int cx = std::max(0, std::min(g.w - 1, p.x / observer_cell)), cy = std::max(0, std::min(g.h - 1, p.y / observer_cell));
+			return g.at(cx + 1, cy + 1);
+		};
+		bool early = st.current_frame < 7500;  // about 5 game minutes: scouting matters
 		for (int i = 0; i != 8; ++i) {
+			xy home = game_st.start_locations[i];
 			for (unit_t* u : ptr(st.player_units[i])) {
-				if (ut_building(u) || ut_worker(u) || u_hallucination(u) || !u_completed(u)) continue;
-				if (u->status_flags & unit_t::status_flag_loaded) continue;
-				int s = (int)u->unit_type->supply_required.raw_value;
-				if (s <= 0) continue;
-				r.push_back({u->sprite->position, i, s});
+				if (u_hallucination(u) || (u->status_flags & unit_t::status_flag_loaded)) continue;
+				xy p = u->sprite->position;
+				size_t c = cell(p);
+				double w = 0;
+				if (ut_building(u)) {
+					if (u_completed(u) || unit_is(u, UnitTypes::Zerg_Creep_Colony)) continue;
+					++g.builds[c];
+					w = 1;
+				} else if (ut_worker(u)) {
+					if (!early || std::abs(p.x - home.x) + std::abs(p.y - home.y) <= 1600) continue;
+					++g.scouts[c];
+					w = 4;
+				} else {
+					if (!u_completed(u)) continue;
+					int s = (int)u->unit_type->supply_required.raw_value;
+					if (s <= 0) continue;
+					g.supply[i][c] += s;
+					w = s;
+				}
+				g.wx[c] += p.x * w; g.wy[c] += p.y * w; g.wsum[c] += w;
 			}
+		}
+		for (auto& d : observer_damage) {
+			double w = d.amount * std::exp2(-(st.current_frame - d.frame) / 48.0);
+			size_t c = cell(d.pos);
+			g.damage[c] += w;
+			g.wx[c] += d.pos.x * w * 0.5; g.wy[c] += d.pos.y * w * 0.5; g.wsum[c] += w * 0.5;
+		}
+		for (auto& v : g.supply) observer_integrate(v, g.w, g.h);
+		observer_integrate(g.damage, g.w, g.h); observer_integrate(g.wx, g.w, g.h);
+		observer_integrate(g.wy, g.w, g.h); observer_integrate(g.wsum, g.w, g.h);
+		observer_integrate(g.scouts, g.w, g.h); observer_integrate(g.builds, g.w, g.h);
+		return g;
+	}
+
+	// Instantaneous interest of the view-sized window centred on cell (cx, cy).
+	observer_interest observer_window(const observer_grid& g, int cx, int cy) const {
+		int hw = std::max(1, (int)(view_width * 2 / 5 + observer_cell / 2) / observer_cell);
+		int hh = std::max(1, (int)(view_height * 2 / 5 + observer_cell / 2) / observer_cell);
+		int nw = hw + std::max(1, (int)view_width / observer_cell), nh = hh + std::max(1, (int)view_height / observer_cell);
+		std::array<int, 8> side, near;
+		for (int i = 0; i != 8; ++i) {
+			side[i] = observer_grid::rect_sum(g.supply[i], g, cx - hw, cy - hh, cx + hw, cy + hh);
+			near[i] = observer_grid::rect_sum(g.supply[i], g, cx - nw, cy - nh, cx + nw, cy + nh);
+		}
+		// About to meet: the largest army in the window, against the strongest other army
+		// within about a view of it (not the midpoint between two distant armies).
+		int top = (int)(std::max_element(side.begin(), side.end()) - side.begin());
+		int enemy_near = 0;
+		for (int i = 0; i != 8; ++i) if (i != top) enemy_near = std::max(enemy_near, near[i]);
+		int approaching = std::min(side[top], enemy_near);
+		std::sort(side.begin(), side.end(), std::greater<int>());
+		int total = 0;
+		for (int v : side) total += v;
+		double damage = observer_grid::rect_sum(g.damage, g, cx - hw, cy - hh, cx + hw, cy + hh);
+		int scouts = observer_grid::rect_sum(g.scouts, g, cx - hw, cy - hh, cx + hw, cy + hh);
+		int builds = observer_grid::rect_sum(g.builds, g, cx - hw, cy - hh, cx + hw, cy + hh);
+		double wsum = observer_grid::rect_sum(g.wsum, g, cx - hw, cy - hh, cx + hw, cy + hh);
+		observer_interest r;
+		r.action = damage / 15.0 + 2.0 * (side[1] / 2.0) + 1.0 * (approaching / 2.0) + 0.15 * (total / 2.0);
+		r.quiet = 1.5 * std::min(scouts, 2) + 0.5 * std::min(builds, 3);
+		if (wsum > 0) {
+			r.centre = xy((int)(observer_grid::rect_sum(g.wx, g, cx - hw, cy - hh, cx + hw, cy + hh) / wsum),
+			              (int)(observer_grid::rect_sum(g.wy, g, cx - hw, cy - hh, cx + hw, cy + hh) / wsum));
+		} else {
+			r.centre = xy(cx * observer_cell + observer_cell / 2, cy * observer_cell + observer_cell / 2);
 		}
 		return r;
 	}
 
-	// Interest of a view-sized window centred at c; also returns the weighted centre of
-	// what it contains, so the camera can follow a moving fight.
-	double observer_score(xy c, const a_vector<observer_unit>& army, xy* centre_out) const {
-		int hw = view_width * 2 / 5, hh = view_height * 2 / 5;
-		std::array<int, 8> side{};
-		double wx = 0, wy = 0, wsum = 0, damage = 0;
-		for (auto& a : army) {
-			if (std::abs(a.pos.x - c.x) > hw || std::abs(a.pos.y - c.y) > hh) continue;
-			side[a.owner] += a.supply_half;
-			wx += a.pos.x * a.supply_half; wy += a.pos.y * a.supply_half; wsum += a.supply_half;
-		}
-		for (auto& d : observer_damage) {
-			if (std::abs(d.pos.x - c.x) > hw || std::abs(d.pos.y - c.y) > hh) continue;
-			double w = d.amount * std::exp2(-(st.current_frame - d.frame) / 48.0);
-			damage += w;
-			wx += d.pos.x * w * 0.5; wy += d.pos.y * w * 0.5; wsum += w * 0.5;
-		}
-		std::sort(side.begin(), side.end(), std::greater<int>());
-		int total = 0;
-		for (int s : side) total += s;
-		if (centre_out) *centre_out = wsum > 0 ? xy((int)(wx / wsum), (int)(wy / wsum)) : c;
-		return damage / 25.0 + 2.0 * (side[1] / 2.0) + 0.3 * (total / 2.0);
-	}
-
-	// Stability (so the camera does not dart about):
-	//  - the fight being shown is followed through a smoothed point, not the raw centroid;
-	//  - the camera only pans once that point leaves the middle of the view (dead zone)
-	//    and then eases back to centre, with a capped speed;
-	//  - a different spot must score 40% higher on two consecutive ticks, and the current
-	//    shot must have lasted 3 s of real time, before the camera cuts to it.
-	bool observer_panning = false;
 	int observer_challenger_ticks = 0;
 	xy observer_challenger;
+	std::chrono::high_resolution_clock::time_point observer_challenger_since;
+	double observer_shot_peak = 0;
+	struct observer_visit {
+		xy pos;
+		std::chrono::high_resolution_clock::time_point until;
+	};
+	a_vector<observer_visit> observer_visits;
+
+	double observer_recency(xy c, std::chrono::high_resolution_clock::time_point now) const {
+		for (auto& v : observer_visits) {
+			if (now < v.until && std::abs(v.pos.x - c.x) < (int)view_width && std::abs(v.pos.y - c.y) < (int)view_height) return 0.3;
+		}
+		return 1.0;
+	}
+
+	void observer_switch_to(xy target, std::chrono::high_resolution_clock::time_point now, double action = 0) {
+		if (observer_has_target) observer_visits.push_back({observer_target, now + std::chrono::seconds(20)});
+		observer_visits.erase(std::remove_if(observer_visits.begin(), observer_visits.end(),
+			[&](const observer_visit& v) { return v.until <= now; }), observer_visits.end());
+		observer_target = target;
+		observer_sx = target.x;
+		observer_sy = target.y;
+		observer_has_target = true;
+		observer_last_switch = now;
+		observer_challenger_ticks = 0;
+		observer_shot_peak = action;
+		observer_cut_pending = true;
+	}
 
 	void observer_retarget(std::chrono::high_resolution_clock::time_point now) {
-		auto army = observer_army();
-		a_vector<xy> candidates;
-		size_t stride = std::max<size_t>(1, army.size() / 200);
-		for (size_t i = 0; i < army.size(); i += stride) candidates.push_back(army[i].pos);
-		size_t dstride = std::max<size_t>(1, observer_damage.size() / 100);
-		for (size_t i = 0; i < observer_damage.size(); i += dstride) candidates.push_back(observer_damage[i].pos);
-		double best = 0;
-		xy best_centre;
-		for (xy c : candidates) {
-			xy centre;
-			double sc = observer_score(c, army, &centre);
-			if (sc > best) { best = sc; best_centre = centre; }
+		auto g = observer_build_grid();
+		size_t cells = (size_t)g.w * g.h;
+		// Smooth each window's action score over ~1 game second (restart after a seek).
+		bool restart = observer_gw != g.w || observer_gh != g.h || observer_smooth_frame < 0 ||
+			st.current_frame < observer_smooth_frame || st.current_frame - observer_smooth_frame > 240;
+		double k = restart ? 1.0 : 1.0 - std::exp(-(st.current_frame - observer_smooth_frame) / 24.0);
+		if (restart) { observer_gw = g.w; observer_gh = g.h; observer_smooth_action.assign(cells, 0); }
+		observer_smooth_frame = st.current_frame;
+		a_vector<observer_interest> win(cells);
+		for (int cy = 0; cy != g.h; ++cy) for (int cx = 0; cx != g.w; ++cx) {
+			size_t i = (size_t)cy * g.w + cx;
+			win[i] = observer_window(g, cx, cy);
+			observer_smooth_action[i] += (win[i].action - observer_smooth_action[i]) * k;
+		}
+		double shot_s = observer_has_target ? std::chrono::duration<double>(now - observer_last_switch).count() : 0;
+		double best = 0, current = -1, current_action = 0, best_action = 0;
+		xy best_centre, current_centre = observer_target;
+		for (int cy = 0; cy != g.h; ++cy) for (int cx = 0; cx != g.w; ++cx) {
+			size_t i = (size_t)cy * g.w + cx;
+			xy c(cx * observer_cell + observer_cell / 2, cy * observer_cell + observer_cell / 2);
+			double a = observer_smooth_action[i];
+			double sc = a + win[i].quiet * observer_recency(c, now);
+			if (sc > best) { best = sc; best_centre = win[i].centre; best_action = a; }
+			// The shown scene is the best window within half a view of it, so it is judged
+			// like its challengers and tracked to where its action has moved. Its quiet part
+			// wears off over ~10 s, so quiet time moves on.
+			if (observer_has_target && std::abs(c.x - observer_target.x) <= (int)view_width / 2 && std::abs(c.y - observer_target.y) <= (int)view_height / 2) {
+				double cur = a + win[i].quiet * std::exp(-shot_s / 10.0);
+				if (cur > current) { current = cur; current_centre = win[i].centre; current_action = a; }
+			}
 		}
 		if (!observer_has_target) {
-			if (best > 0.5) {
-				observer_target = best_centre;
-				observer_has_target = true;
-				observer_last_switch = now;
-			}
+			if (best > 0.3) observer_switch_to(best_centre, now, best_action);
 			return;
 		}
-		xy centre;
-		double current = observer_score(observer_target, army, &centre);
-		// Follow the shown fight through a smoothed point.
+		observer_shot_peak = std::max(observer_shot_peak, current_action);
+		// Follow the shown scene through a smoothed point.
 		if (current > 0) {
-			observer_target.x += (centre.x - observer_target.x) * 3 / 10;
-			observer_target.y += (centre.y - observer_target.y) * 3 / 10;
+			observer_target.x += (current_centre.x - observer_target.x) * 2 / 10;
+			observer_target.y += (current_centre.y - observer_target.y) * 2 / 10;
 		}
-		bool elsewhere = std::abs(best_centre.x - observer_target.x) > view_width / 2 || std::abs(best_centre.y - observer_target.y) > view_height / 2;
-		if (elsewhere && best > current * 1.4 + 1.0) {
-			bool same_challenger = observer_challenger_ticks > 0 && std::abs(best_centre.x - observer_challenger.x) < view_width / 2 && std::abs(best_centre.y - observer_challenger.y) < view_height / 2;
-			observer_challenger_ticks = same_challenger ? observer_challenger_ticks + 1 : 1;
+		bool elsewhere = std::abs(best_centre.x - observer_target.x) > (int)view_width / 2 || std::abs(best_centre.y - observer_target.y) > (int)view_height / 2;
+		if (elsewhere && best > current * 1.8 + 0.5) {
+			bool same = observer_challenger_ticks > 0 && std::abs(best_centre.x - observer_challenger.x) < (int)view_width / 2 && std::abs(best_centre.y - observer_challenger.y) < (int)view_height / 2;
+			if (!same) observer_challenger_since = now;
+			observer_challenger_ticks = same ? observer_challenger_ticks + 1 : 1;
 			observer_challenger = best_centre;
 		} else {
 			observer_challenger_ticks = 0;
 		}
-		bool dwelt = now - observer_last_switch >= std::chrono::seconds(3);
-		if (observer_challenger_ticks >= 2 && dwelt) {
-			observer_target = observer_challenger;
-			observer_last_switch = now;
-			observer_challenger_ticks = 0;
-		}
+		// A challenger must lead for 2 ticks and 1.5 game seconds (at most 0.4 s of real
+		// time). Minimum shot lengths: a fight holds the camera for observer_min_shot_s, but
+		// one that has died down, or a quiet shot, gives way to a fight after 1 s; moving on
+		// from one quiet place to another waits 5 s, so a tour does not flicker.
+		bool over = observer_shot_peak > 4 && current_action < observer_shot_peak * 0.25;
+		bool quiet_shot = observer_shot_peak < 2;
+		bool challenger_action = best_action >= 2;
+		double min_shot = !challenger_action ? 5.0 : (over || quiet_shot) ? 1.5 : observer_min_shot_s;
+		double hold_s = std::min(0.4, 1.5 * 42.0 / 1000.0 / std::max(0.05, observer_speed()));
+		bool held = observer_challenger_ticks >= 2 && std::chrono::duration<double>(now - observer_challenger_since).count() >= hold_s;
+		if (held && shot_s >= min_shot) observer_switch_to(observer_challenger, now, best_action);
 	}
 
 	void observer_step(std::chrono::high_resolution_clock::time_point now, bool manual_move) {
@@ -2775,36 +2917,59 @@ struct ui_functions: ui_util_functions {
 			observer_tick_frame = st.current_frame;
 			observer_retarget(now);
 		}
-		if (!observer_has_target || now < observer_manual_until) return;
+		if (!observer_has_target || now < observer_manual_until) {
+			observer_vx = observer_vy = 0;
+			return;
+		}
 		if (screen_pos != observer_last_screen_pos) {
 			observer_cx = screen_pos.x + view_width / 2.0;
 			observer_cy = screen_pos.y + view_height / 2.0;
+			observer_vx = observer_vy = 0;
 		}
-		double dx = observer_target.x - observer_cx, dy = observer_target.y - observer_cy;
-		if (std::abs(dx) > 1.5 * view_width || std::abs(dy) > 1.5 * view_height) {
-			observer_cx = observer_target.x;  // far away: cut, like a human observer
-			observer_cy = observer_target.y;
+		// Where the camera can actually centre (the view stays inside the map).
+		double min_cx = view_width / 2.0, max_cx = std::max(min_cx, game_st.map_width - view_width / 2.0);
+		double min_cy = view_height / 2.0, max_cy = std::max(min_cy, game_st.map_height - view_height / 2.0);
+		// Smooth the scene centre over ~1.5 game seconds, kept between 0.15 and 0.5 s of real
+		// time: steady at slow playback, still keeping up with a fight at high speed.
+		{
+			double tau = std::max(0.15, std::min(0.5, 1.5 * 42.0 / 1000.0 / std::max(0.05, observer_speed())));
+			double k = 1.0 - std::exp(-std::max(0.0, std::min(dt, 0.25)) / tau);
+			observer_sx += (observer_target.x - observer_sx) * k;
+			observer_sy += (observer_target.y - observer_sy) * k;
+		}
+		double tx = std::max(min_cx, std::min(max_cx, observer_sx));
+		double ty = std::max(min_cy, std::min(max_cy, observer_sy));
+		double dx = tx - observer_cx, dy = ty - observer_cy;
+		bool far = std::abs(dx) > 0.8 * view_width || std::abs(dy) > 0.8 * view_height;
+		if (far && (observer_cut_pending || std::abs(dx) > 1.5 * view_width || std::abs(dy) > 1.5 * view_height)) {
+			observer_cx = tx;  // cut, like a human observer clicking the minimap
+			observer_cy = ty;
+			observer_vx = observer_vy = 0;
 			observer_panning = false;
 		} else {
-			// Dead zone: start panning when the target leaves the middle 40% of the view,
-			// stop once it is back within 5% of centre.
+			// Dead zone: start moving when the target leaves the middle 40% of the view,
+			// settle once it is back within 5% of centre.
 			bool outside = std::abs(dx) > view_width * 0.2 || std::abs(dy) > view_height * 0.2;
 			bool centred = std::abs(dx) < view_width * 0.05 && std::abs(dy) < view_height * 0.05;
 			if (outside) observer_panning = true;
 			if (centred) observer_panning = false;
-			if (observer_panning) {
-				double t = std::max(0.0, std::min(dt, 0.25));
-				double a = 1.0 - std::exp(-t / 0.4);
-				double mx = dx * a, my = dy * a;
-				double cap = 1.2 * std::max(view_width, view_height) * t;  // px this update
-				double len = std::hypot(mx, my);
-				if (len > cap && len > 0) { mx *= cap / len; my *= cap / len; }
-				observer_cx += mx;
-				observer_cy += my;
-			}
+			double t = std::max(0.0, std::min(dt, 0.1));
+			const double omega = 2.0 / 0.35;  // critically damped spring, ~0.35 s to settle
+			double ax = observer_panning ? omega * omega * dx : 0, ay = observer_panning ? omega * omega * dy : 0;
+			observer_vx += (ax - 2 * omega * observer_vx) * t;
+			observer_vy += (ay - 2 * omega * observer_vy) * t;
+			double cap = 1.5 * std::max(view_width, view_height);  // px per second
+			double speed = std::hypot(observer_vx, observer_vy);
+			if (speed > cap) { observer_vx *= cap / speed; observer_vy *= cap / speed; }
+			observer_cx += observer_vx * t;
+			observer_cy += observer_vy * t;
 		}
+		observer_cut_pending = false;
+		observer_cx = std::max(min_cx, std::min(max_cx, observer_cx));
+		observer_cy = std::max(min_cy, std::min(max_cy, observer_cy));
 		screen_pos = xy((int)std::lround(observer_cx - view_width / 2.0), (int)std::lround(observer_cy - view_height / 2.0));
 	}
+	bool observer_panning = false;
 
 	// ---- Graph panel ('g'): income and supply over game time ----
 	// Sampled once per game second as frames are simulated (playback, seeking and rewinds all
@@ -2825,9 +2990,9 @@ struct ui_functions: ui_util_functions {
 	a_vector<graph_sample> graph_samples;
 	bool show_graphs = false;
 	int graph_tab = 0;
-	// Time zoom: index into graph_windows_s; 0 = whole game.
+	// Time zoom: index into graph_window_seconds; 0 = whole game. Starts at the last 5 min.
 	static constexpr int graph_window_count = 7;
-	int graph_window = 0;
+	int graph_window = 2;
 	static int graph_window_seconds(int index) {
 		static const int s[graph_window_count] = {0, 600, 300, 120, 60, 30, 15};
 		return s[std::max(0, std::min(graph_window_count - 1, index))];
@@ -3243,6 +3408,7 @@ struct ui_functions: ui_util_functions {
 	void toggle_auto_observer() {
 		auto_observer = !auto_observer;
 		observer_has_target = false;
+		observer_visits.clear();
 		observer_last_frame = -1;
 		observer_manual_until = {};
 	}
@@ -3944,6 +4110,7 @@ struct ui_functions: ui_util_functions {
 		observer_damage.clear();
 		observer_last_frame = -1;
 		observer_has_target = false;
+		observer_visits.clear();
 		replay_frame = 0;
 		auto& game = *st.game;
 		st = state();

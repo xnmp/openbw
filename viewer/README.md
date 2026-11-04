@@ -6,7 +6,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Stats overlay**: minerals, gas, supply, army supply and worker supply for each player.
 - **Selection panel** laid out like the in-game console. Click a unit to see its wireframe,
   with shields, HP and energy below it. Beside the wireframe are its name, owner and kills,
-  and upgrade icons with their levels: armor, weapons, shields. Carriers, Reavers and
+  and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Carriers, Reavers and
   Vultures also show interceptor, scarab or mine counts. Buildings show the training queue
   and research, upgrade, add-on or construction progress bars. Mineral fields and geysers
   show resources left, supply buildings show supply totals, and transports show their cargo.
@@ -22,13 +22,17 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   only on the full panel.
   `r` switches supply, army and losses between supply and resource value (minerals + gas,
   with Zergling/Scourge pairs, morphs and Archons valued correctly).
-  Zoom the time axis from the whole game down to the last 15 s with `[` / `]` or the
-  mouse wheel over the panel. It covers the part of the game simulated so far, so seek to
+  It shows the last 5 minutes at first; zoom the time axis from the whole game down to
+  the last 15 s with `[` / `]` or the mouse wheel over the panel. It covers the part of the game simulated so far, so seek to
   the end to see the whole game.
-- **Auto observer** (`o`): the camera goes where the action is. It scores recent
-  damage, plus army supply where two sides' armies meet. It follows the current fight,
-  cuts to a clearly bigger one, and steps back for a few seconds when you move the
-  camera yourself.
+- **Auto observer** (`o`): the camera goes where the action is. A 128 px interest map,
+  smoothed over game time, scores recent damage, armies that are fighting or about to
+  meet, and army size; in quiet spells, scouting workers and new buildings, so the
+  camera tours the map rather than sitting still. A shot lasts at least a couple of
+  seconds and a new scene must be clearly better, so the camera does not dart about.
+  It cuts to distant scenes like a human observer and pans smoothly to nearby ones,
+  with timing that adapts to the playback speed. Moving the camera yourself pauses it
+  for a few seconds.
 - **Fog of war** (`f`, with the graphs closed): the combined vision of all players, drawn
   as Brood War does (explored ground dimmed, unexplored black, soft edges), on the
   minimap too.
@@ -109,3 +113,17 @@ Playback starts at 1×, so press `=` a few times.
   ramp, using the tables documented on
   [staredit.net](https://staredit.net/topic/18436/). Which hull section changes first
   is an approximation: the per-unit pattern is undocumented.
+
+## Tuning the auto observer
+
+`observer-eval/` measures the auto observer without watching: `openbw-observer-eval` plays a
+replay headlessly at a chosen playback speed with the observer on and logs the camera and
+every hp loss; `metrics.py` scores how much of the damage was on screen (against the most a
+single view could have caught) and how calm the camera was (cuts, short shots, panning,
+reversals).
+
+```sh
+cmake --build build --target openbw-observer-eval
+for s in 2 8 16; do xvfb-run -a ./build/openbw-observer-eval game.rep mpq-dir $s out-x$s.jsonl; done
+python3 viewer/observer-eval/metrics.py out-x*.jsonl
+```

@@ -8,7 +8,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   weapons (damage, upgrades, range, cooldown), kills, current order, training, research and
   upgrade progress, resources and status effects. Drag-select to get a grid of
   health-coloured wireframes. As in Brood War, a box that catches units leaves buildings out.
-- **Zoom** from the keyboard or mouse wheel, and **speed** controls.
+- **Zoom** from the keyboard or mouse wheel, and **speed** controls. The current speed (or Paused) shows above the progress bar.
 - **Sound** through SDL2_mixer, when it is installed.
 - **Edge panning**, and a game view capped at **16:9**, with black bars on ultrawide windows.
 

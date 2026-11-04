@@ -2190,6 +2190,40 @@ struct ui_functions: ui_util_functions {
 		return true;
 	}
 
+	// ---- Replay speed indicator, drawn crisp just above the progress bar ----
+	std::unique_ptr<native_window_drawing::surface> speed_surface;
+
+	// 1x is OpenBW's normal replay rate (42 ms per frame, Brood War's "Fastest").
+	a_string speed_label() const {
+		char buf[48];
+		int raw = (int)game_speed.raw_value, one = (int)fp8::integer(1).raw_value;
+		if (raw >= one) std::snprintf(buf, sizeof(buf), "%dx", raw / one);
+		else std::snprintf(buf, sizeof(buf), "1/%dx", one / std::max(1, raw));
+		return is_paused ? a_string("Paused  ") + buf : a_string("Speed ") + buf;
+	}
+
+	void draw_speed_indicator() {
+		auto area = get_replay_slider_area();
+		if (area == rect{} || replay_st.end_frame == 0) return;
+		a_string text = speed_label();
+		const int pad = 4;
+		int w = (int)text.size() * hud_font::cell_w + pad * 2, h = hud_font::cell_h + pad;
+		if (!speed_surface || speed_surface->w != w || speed_surface->h != h) {
+			speed_surface = native_window_drawing::create_rgba_surface(w, h);
+			speed_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)speed_surface->lock();
+		size_t pitch = speed_surface->pitch / 4;
+		for (int y = 0; y != h; ++y) for (int x = 0; x != w; ++x) buf[(size_t)y * pitch + x] = hud_rgba(8, 10, 16, 175);
+		if (is_paused) hud_text(buf, pitch, w, h, pad, pad / 2, text.c_str(), 255, 200, 90);
+		else hud_text(buf, pitch, w, h, pad, pad / 2, text.c_str(), 235, 235, 235);
+		speed_surface->unlock();
+		// Slider is in logical (pre-zoom) coordinates; right-align above it in window pixels.
+		int right = viewport_x + (int)(area.to.x * zoom);
+		int top = (int)(area.from.y * zoom);
+		speed_surface->blit(&*window_surface, std::max(viewport_x, right - w), std::max(0, top - h - 4));
+	}
+
 	a_vector<unit_id> current_selection;
 
 	bool current_selection_is_selected(unit_t* u) {
@@ -2555,6 +2589,7 @@ struct ui_functions: ui_util_functions {
 				draw_hud();
 				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + 8, 8);
 			}
+			if (draw_ui_elements) draw_speed_indicator();
 			if (show_selection_panel && draw_selection_panel()) {
 				int px = viewport_x + (viewport_w - panel_surface->w) / 2;
 				int py = window_surface->h - panel_surface->h - 8;

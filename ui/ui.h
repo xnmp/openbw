@@ -2839,12 +2839,18 @@ struct ui_functions: ui_util_functions {
 	bool graph_value_mode = false;  // 'r': supply <-> resource value (workers unaffected)
 	bool graph_derivative = false;  // 'd': plot the rate of change per minute instead
 	bool graph_difference = false;  // 'f': first player minus second instead of a line each
-	bool graph_minimized = false;   // 'm': compact panel in the game view's top-right corner
+	// 'm': minimized mode. The graphs then stay up as a compact panel in the top-right
+	// corner of the view, and 'g' (or a click) maximizes / minimizes instead of closing.
+	bool graph_minimized = false;
+	bool graph_expanded = false;  // minimized mode: the full panel is showing for now
+	bool graphs_visible() const { return show_graphs || graph_minimized; }
+	bool graph_mini() const { return graph_minimized && !graph_expanded; }
+	bool graph_full() const { return graphs_visible() && !graph_mini(); }
 	std::unique_ptr<native_window_drawing::surface> graph_surface;
 	rect graph_area_window;                                // panel rect in window pixels
 	std::array<rect, graph_tab_count> graph_tab_rects{};   // tab rects, panel-relative
 
-	bool graph_arrows_switch_tabs() const { return show_graphs && !graph_minimized; }
+	bool graph_arrows_switch_tabs() const { return graph_full(); }
 
 	void record_graph_sample() {
 		if (st.current_frame % graph_sample_interval != 0) return;
@@ -2987,7 +2993,7 @@ struct ui_functions: ui_util_functions {
 	// corner (no tabs or legend; keys and the mouse wheel still work, a click expands it).
 	void draw_graph_panel() {
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h;
-		const bool mini = graph_minimized;
+		const bool mini = graph_mini();
 		const int pad = mini ? 8 : 12;
 		int w, h;
 		if (mini) {
@@ -3019,7 +3025,7 @@ struct ui_functions: ui_util_functions {
 			std::snprintf(title, sizeof(title), "%s%s%s%s%s", graph_tab_name(graph_tab), graph_derivative ? " /min" : "",
 				difference ? " diff" : "", win_s ? ", " : "", win_s ? range : "");
 			hud_text(buf, pitch, w, h, pad, pad, title, 230, 230, 240);
-			const char* hint = "m: maximize";
+			const char* hint = "g: maximize";
 			hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(hint) * cw, pad, hint, 120, 130, 150);
 			ly = pad;
 		} else {
@@ -3035,7 +3041,7 @@ struct ui_functions: ui_util_functions {
 				hud_text(buf, pitch, w, h, tx + 8, pad + 4, label, active ? 255 : 160, active ? 255 : 170, active ? 255 : 190);
 				tx += tw + 6;
 			}
-			const char* keys = "[ ] zoom  m minimize  esc close";
+			const char* keys = graph_minimized ? "[ ] zoom  g minimize  m unpin" : "[ ] zoom  m minimize  esc close";
 			hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(keys) * cw, pad + 4, keys, 120, 130, 150);
 
 			// Legend, and the display modes on the right
@@ -3171,11 +3177,11 @@ struct ui_functions: ui_util_functions {
 	// Window-pixel click on the panel: switches tab, or expands the minimized panel;
 	// returns true if the click was inside.
 	bool graph_panel_click(int wx, int wy) {
-		if (!show_graphs) return false;
+		if (!graphs_visible()) return false;
 		auto& a = graph_area_window;
 		if (wx < a.from.x || wx >= a.to.x || wy < a.from.y || wy >= a.to.y) return false;
-		if (graph_minimized) {
-			graph_minimized = false;
+		if (graph_mini()) {
+			graph_expanded = true;
 			return true;
 		}
 		int x = wx - a.from.x, y = wy - a.from.y;
@@ -3227,7 +3233,7 @@ struct ui_functions: ui_util_functions {
 		add("muted", "Mute sound", "m", true, std::make_pair(std::function<bool()>([this] { return global_volume == 0; }),
 			std::function<void()>([this] { toggle_mute(); })));
 		add("graphs", "Graphs", "g", false, flag(show_graphs));
-		add("graph_minimized", "Graphs: minimized", "m (graphs open)", true, flag(graph_minimized));
+		add("graph_minimized", "Graphs: minimized in the corner", "m (graphs open)", true, flag(graph_minimized));
 		add("graph_value", "Graphs: resource value, not supply", "r (graphs open)", true, flag(graph_value_mode));
 		add("graph_derivative", "Graphs: rate of change", "d (graphs open)", true, flag(graph_derivative));
 		add("graph_difference", "Graphs: players' difference", "f (graphs open)", true, flag(graph_difference));
@@ -3589,7 +3595,7 @@ struct ui_functions: ui_util_functions {
 		if (wnd) {
 			native_window::event_t e;
 			while (wnd.peek_message(e)) {
-				if (e.type == native_window::event_t::type_mouse_wheel && show_graphs && graph_area_window.from.x <= e.mouse_x && e.mouse_x < graph_area_window.to.x && graph_area_window.from.y <= e.mouse_y && e.mouse_y < graph_area_window.to.y) {
+				if (e.type == native_window::event_t::type_mouse_wheel && graphs_visible() && graph_area_window.from.x <= e.mouse_x && e.mouse_x < graph_area_window.to.x && graph_area_window.from.y <= e.mouse_y && e.mouse_y < graph_area_window.to.y) {
 					step_graph_window(e.wheel_y > 0 ? +1 : -1);
 					continue;
 				}
@@ -3684,35 +3690,42 @@ struct ui_functions: ui_util_functions {
 					if (e.sym == 'b') show_all_health_bars = !show_all_health_bars;
 					if (e.sym == 'i') show_selection_panel = !show_selection_panel;
 					if (e.sym == 'g') {
-						if (show_graphs && graph_minimized) graph_minimized = false;  // restore, don't close
+						if (graph_minimized) graph_expanded = !graph_expanded;  // maximize / minimize
 						else show_graphs = !show_graphs;
 					}
 					if (e.sym == 27 && show_settings_menu) show_settings_menu = false;  // Esc: menu first
-					else if (e.sym == 27 && show_graphs) show_graphs = false;
+					else if (e.sym == 27 && graph_minimized && graph_expanded) graph_expanded = false;
+					else if (e.sym == 27 && show_graphs && !graph_minimized) show_graphs = false;
 					if (e.sym == '/' && (wnd.get_key_state(225) || wnd.get_key_state(229))) show_settings_menu = !show_settings_menu;  // '?'
 					if (e.sym == '?') show_settings_menu = !show_settings_menu;  // layouts that report '?' itself
-					if (show_graphs && e.sym == ']') step_graph_window(+1);
-					if (show_graphs && e.sym == 'r') graph_value_mode = !graph_value_mode;
+					// Graph keys act only while the full panel shows; on the minimized panel d, f and
+					// m keep their other meanings (slow down, fog, mute).
+					if (graph_full() && e.sym == ']') step_graph_window(+1);
+					if (graph_full() && e.sym == 'r') graph_value_mode = !graph_value_mode;
 					if (e.sym == 'o') toggle_auto_observer();
-					if (show_graphs && e.sym == '[') step_graph_window(-1);
+					if (graph_full() && e.sym == '[') step_graph_window(-1);
 					if (e.sym == '\t') {
 						bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
 						if (shift) two_colour_mode = !two_colour_mode;
-						else if (show_graphs) graph_tab = (graph_tab + 1) % graph_tab_count;
+						else if (graph_full()) graph_tab = (graph_tab + 1) % graph_tab_count;
 					}
-					if (show_graphs && e.sym >= '1' && e.sym < '1' + graph_tab_count) graph_tab = e.sym - '1';
+					if (graph_full() && e.sym >= '1' && e.sym < '1' + graph_tab_count) graph_tab = e.sym - '1';
 					if (graph_arrows_switch_tabs() && (e.scancode == 79 || e.scancode == 80)) {  // right / left
 						graph_tab = (graph_tab + (e.scancode == 79 ? 1 : graph_tab_count - 1)) % graph_tab_count;
 					}
 					if (e.sym == 'f') {
-						if (show_graphs) graph_difference = !graph_difference;
+						if (graph_full()) graph_difference = !graph_difference;
 						else show_fog = !show_fog;
 					}
-					if (show_graphs && e.sym == 'm') graph_minimized = !graph_minimized;
+					if (graph_full() && e.sym == 'm') {
+						graph_minimized = !graph_minimized;
+						graph_expanded = false;
+						if (!graph_minimized) show_graphs = true;  // unpinned: stay open, full size
+					}
 					else if (e.sym == 'm') toggle_mute();
 					if (e.sym == 'a' || e.sym == 'u') step_speed(true);
-					if (e.sym == 'z' || (e.sym == 'd' && !show_graphs)) step_speed(false);
-					if (e.sym == 'd' && show_graphs) graph_derivative = !graph_derivative;
+					if (e.sym == 'z' || (e.sym == 'd' && !graph_full())) step_speed(false);
+					if (e.sym == 'd' && graph_full()) graph_derivative = !graph_derivative;
 					if (e.sym == '\b') {
 						int t = 5 * 1000 / 42;  // 5 game seconds at 42 ms per frame
 						if (replay_frame < t) replay_frame = 0;
@@ -3848,7 +3861,7 @@ struct ui_functions: ui_util_functions {
 				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + 8, 8);
 			}
 			if (draw_ui_elements) draw_replay_bar();
-			if (show_graphs) draw_graph_panel();
+			if (graphs_visible()) draw_graph_panel();
 			panel_area_window = rect{};
 			if (show_selection_panel && draw_selection_panel()) {
 				int px = std::max(viewport_x, viewport_x + (viewport_w - panel_surface->w) / 2);

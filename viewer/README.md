@@ -16,8 +16,10 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute, a
   smoothed over about 15 s), supply, army supply, workers and units lost over game time.
   `d` switches to the first derivative (change per minute). `f` plots the first player
-  minus the second, coloured by whoever is ahead. `m` shrinks the panel to the top-right
-  corner of the view; it keeps updating, and a click expands it again.
+  minus the second, coloured by whoever is ahead. `m` pins the graphs minimized in the
+  top-right corner of the view, where they keep updating; `g` or a click then maximizes /
+  minimizes them instead of closing them, and `m` on the full panel unpins. Graph keys act
+  only on the full panel.
   `r` switches supply, army and losses between supply and resource value (minerals + gas,
   with Zergling/Scourge pairs, morphs and Archons valued correctly).
   Zoom the time axis from the whole game down to the last 15 s with `[` / `]` or the
@@ -88,7 +90,7 @@ cmake --build build -j
 | `o` | auto observer on / off |
 | `[` / `]`, or the wheel over the graphs | zoom the graphs' time axis out / in |
 | `shift tab` | two-colour mode: the two players in red and teal (again to restore) |
-| `m` | graphs: minimize to the corner / restore (with the graphs closed, mute) |
+| `m` | full graph panel: pin minimized in the corner / unpin (otherwise mute) |
 
 Playback starts at 1×, so press `=` a few times.
 

@@ -3454,7 +3454,9 @@ struct ui_functions: ui_util_functions {
 	a_string settings_state() {
 		a_string s;
 		for (auto& v : viewer_settings()) if (v.persist) s += a_string(v.id) + "=" + (v.get() ? "1" : "0") + "\n";
-		return s;
+		char z[32];
+		std::snprintf(z, sizeof(z), "zoom=%g\n", zoom);
+		return s + z;
 	}
 
 	void load_settings() {
@@ -3468,6 +3470,12 @@ struct ui_functions: ui_util_functions {
 				char* eq = std::strchr(line, '=');
 				if (!eq) continue;
 				*eq = 0;
+				if (std::strcmp(line, "zoom") == 0) {
+					// Before the window exists, so set it directly; resize() applies it.
+					double z = std::atof(eq + 1);
+					if (z >= 0.5 && z <= 4.0) zoom = z;
+					continue;
+				}
 				bool want = eq[1] == '1';
 				for (auto& v : settings) {
 					if (v.persist && std::strcmp(v.id, line) == 0 && v.get() != want) v.toggle();

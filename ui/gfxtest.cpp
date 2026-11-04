@@ -654,6 +654,7 @@ int main(int argc, char** argv) {
 #ifndef EMSCRIPTEN
 	ui.load_replay_file(argc > 1 ? argv[1] : "maps/p49.rep");
 	ui.show_hud = true;  // stats overlay on by default in the interactive player ('?' menu toggles)
+	ui.zoom = 1.5;  // interactive default, closer to Brood War's view; the saved zoom overrides it
 	ui.load_settings();  // saved choices from the '?' menu / toggle keys override the defaults
 #endif
 
@@ -671,7 +672,7 @@ int main(int argc, char** argv) {
 #endif
 
 	ui.resize(screen_width, screen_height);
-	ui.screen_pos = {(int)ui.game_st.map_width / 2 - (int)screen_width / 2, (int)ui.game_st.map_height / 2 - (int)screen_height / 2};
+	ui.screen_pos = {(int)ui.game_st.map_width / 2 - (int)ui.view_width / 2, (int)ui.game_st.map_height / 2 - (int)ui.view_height / 2};
 
 	ui.set_image_data();
 

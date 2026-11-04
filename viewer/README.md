@@ -3,7 +3,8 @@
 A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openbw)'s
 `ui/gfxtest.cpp`, with additions for watching games:
 
-- **Stats overlay**: minerals, gas, supply, army supply and worker supply for each player.
+- **Stats overlay**: minerals, gas, supply, army supply and worker supply for each player
+  (on by default; turn it off in the `?` menu).
 - **Selection panel** laid out like the in-game console. Click a unit to see its wireframe,
   with shields, HP and energy below it. Beside the wireframe are its name, owner and kills,
   and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Carriers, Reavers and
@@ -84,7 +85,6 @@ cmake --build build -j
 | click or drag the replay bar | seek |
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |
-| `h` | toggle the stats overlay |
 | `b` | health bars under all units, or only selected ones (all by default) |
 | `i` | toggle the selection panel |
 | `g` / `esc` | toggle / close the graphs (`g` on the minimized panel restores it); `tab`, `←` / `→` or `1`-`5` (or click a tab) to switch |

@@ -3395,7 +3395,7 @@ struct ui_functions: ui_util_functions {
 		auto add = [&](const char* id, const char* label, const char* key, bool persist, std::pair<std::function<bool()>, std::function<void()>> f) {
 			r.push_back({id, label, key, persist, f.first, f.second});
 		};
-		add("hud", "Stats overlay", "h", true, flag(show_hud));
+		add("hud", "Stats overlay", "", true, flag(show_hud));  // menu only, no hotkey
 		add("selection_panel", "Selection panel", "i", true, flag(show_selection_panel));
 		add("health_bars", "Health bars under all units", "b", true, flag(show_all_health_bars));
 		add("fog", "Fog of war", "f", true, flag(show_fog));
@@ -3859,7 +3859,6 @@ struct ui_functions: ui_util_functions {
 						else if (minus) step_speed(false);
 						else if (plus) step_speed(true);
 					}
-					if (e.sym == 'h') show_hud = !show_hud;
 					if (e.sym == 'b') show_all_health_bars = !show_all_health_bars;
 					if (e.sym == 'i') show_selection_panel = !show_selection_panel;
 					if (e.sym == 'g') {

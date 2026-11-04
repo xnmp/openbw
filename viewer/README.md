@@ -30,6 +30,10 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Fog of war** (`f`, with the graphs closed): the combined vision of all players, drawn
   as Brood War does (explored ground dimmed, unexplored black, soft edges), on the
   minimap too.
+- **Settings menu** (`?`): checkboxes for every toggle (overlay, selection panel, health
+  bars, fog, two-colour mode, auto observer, mute, graph modes). Choices, whether made
+  there or with the keys, are saved to `$XDG_CONFIG_HOME/openbw-viewer/settings`
+  (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
 - **Replay bar** in the bottom-right corner: game timer, speed or pause state, and a seek bar.
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls.
 - **Sound** through SDL2_mixer, when it is installed.
@@ -64,6 +68,7 @@ cmake --build build -j
 
 | Key / mouse | Action |
 | --- | --- |
+| `?` | settings menu: a checkbox for every toggle below, plus a key summary |
 | `space` / `p` | pause |
 | `=` / `-` (also `a` / `z`) | faster / slower: ×2 per press, with 1.5× between 1× and 2× |
 | `ctrl =` / `ctrl -` / `ctrl 0` | zoom in / out / reset |

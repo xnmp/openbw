@@ -8,6 +8,13 @@
 #include "hud_font.h"
 #include "order_names.h"
 
+#include <functional>
+#ifdef _WIN32
+#include <direct.h>
+#elif !defined(EMSCRIPTEN)
+#include <sys/stat.h>
+#endif
+
 namespace bwgame {
 
 struct vr4_entry {
@@ -3179,6 +3186,198 @@ struct ui_functions: ui_util_functions {
 		return true;
 	}
 
+	// ---- Settings menu ('?'): a checkbox for every toggle, saved between sessions ----
+	// Click a row, or press its key as usual. Choices are saved to
+	// $XDG_CONFIG_HOME/openbw-viewer/settings (~/.config/... by default; %APPDATA% on
+	// Windows) whenever one changes, and loaded at startup.
+	bool show_settings_menu = false;
+	std::unique_ptr<native_window_drawing::surface> settings_surface;
+	rect settings_area_window;
+	a_vector<rect> settings_row_rects;  // panel-relative, one per setting
+
+	struct viewer_setting {
+		const char* id;     // name in the settings file
+		const char* label;
+		const char* key;
+		bool persist;
+		std::function<bool()> get;
+		std::function<void()> toggle;
+	};
+
+	void toggle_mute() {
+		if (global_volume) {
+			unmuted_volume = global_volume;
+			set_volume(0);
+		} else set_volume(unmuted_volume);
+	}
+
+	a_vector<viewer_setting> viewer_settings() {
+		auto flag = [](bool& b) { return std::make_pair(std::function<bool()>([&b] { return b; }), std::function<void()>([&b] { b = !b; })); };
+		a_vector<viewer_setting> r;
+		auto add = [&](const char* id, const char* label, const char* key, bool persist, std::pair<std::function<bool()>, std::function<void()>> f) {
+			r.push_back({id, label, key, persist, f.first, f.second});
+		};
+		add("hud", "Stats overlay", "h", true, flag(show_hud));
+		add("selection_panel", "Selection panel", "i", true, flag(show_selection_panel));
+		add("health_bars", "Health bars under all units", "b", true, flag(show_all_health_bars));
+		add("fog", "Fog of war", "f", true, flag(show_fog));
+		add("two_colour", "Two-colour mode (red / teal)", "shift tab", true, flag(two_colour_mode));
+		add("auto_observer", "Auto observer", "o", true, std::make_pair(std::function<bool()>([this] { return auto_observer; }),
+			std::function<void()>([this] { toggle_auto_observer(); })));
+		add("muted", "Mute sound", "m", true, std::make_pair(std::function<bool()>([this] { return global_volume == 0; }),
+			std::function<void()>([this] { toggle_mute(); })));
+		add("graphs", "Graphs", "g", false, flag(show_graphs));
+		add("graph_minimized", "Graphs: minimized", "m (graphs open)", true, flag(graph_minimized));
+		add("graph_value", "Graphs: resource value, not supply", "r (graphs open)", true, flag(graph_value_mode));
+		add("graph_derivative", "Graphs: rate of change", "d (graphs open)", true, flag(graph_derivative));
+		add("graph_difference", "Graphs: players' difference", "f (graphs open)", true, flag(graph_difference));
+		return r;
+	}
+
+	void toggle_auto_observer() {
+		auto_observer = !auto_observer;
+		observer_has_target = false;
+		observer_last_frame = -1;
+		observer_manual_until = {};
+	}
+
+	static a_string settings_file_path() {
+#ifdef EMSCRIPTEN
+		return {};
+#else
+#ifdef _WIN32
+		const char* base = std::getenv("APPDATA");
+		if (!base || !*base) return {};
+		return a_string(base) + "\\openbw-viewer\\settings";
+#else
+		const char* xdg = std::getenv("XDG_CONFIG_HOME");
+		const char* home = std::getenv("HOME");
+		a_string base = xdg && *xdg ? a_string(xdg) : home && *home ? a_string(home) + "/.config" : a_string();
+		if (base.empty()) return {};
+		return base + "/openbw-viewer/settings";
+#endif
+#endif
+	}
+
+	// Fingerprint of the persisted settings, to save only when one changes.
+	a_string settings_saved_state;
+
+	a_string settings_state() {
+		a_string s;
+		for (auto& v : viewer_settings()) if (v.persist) s += a_string(v.id) + "=" + (v.get() ? "1" : "0") + "\n";
+		return s;
+	}
+
+	void load_settings() {
+		a_string path = settings_file_path();
+		if (path.empty()) return;
+		FILE* f = std::fopen(path.c_str(), "r");
+		if (f) {
+			char line[128];
+			auto settings = viewer_settings();
+			while (std::fgets(line, sizeof(line), f)) {
+				char* eq = std::strchr(line, '=');
+				if (!eq) continue;
+				*eq = 0;
+				bool want = eq[1] == '1';
+				for (auto& v : settings) {
+					if (v.persist && std::strcmp(v.id, line) == 0 && v.get() != want) v.toggle();
+				}
+			}
+			std::fclose(f);
+		}
+		settings_saved_state = settings_state();
+	}
+
+	void save_settings_if_changed() {
+		a_string now = settings_state();
+		if (now == settings_saved_state) return;
+		settings_saved_state = now;
+		a_string path = settings_file_path();
+		if (path.empty()) return;
+		// Create the directory (one level below an existing config dir); failure just means
+		// the settings are not saved.
+		a_string dir = path.substr(0, path.find_last_of("/\\"));
+#ifdef _WIN32
+		_mkdir(dir.c_str());
+#elif !defined(EMSCRIPTEN)
+		mkdir(dir.c_str(), 0755);
+#endif
+		if (FILE* f = std::fopen(path.c_str(), "w")) {
+			std::fputs(now.c_str(), f);
+			std::fclose(f);
+		}
+	}
+
+	void draw_settings_menu() {
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 16, row_h = ch + 8;
+		auto settings = viewer_settings();
+		static const char* other_keys[] = {
+			"space / p   pause            = / -   faster / slower",
+			"backspace   rewind 5 s       ctrl = / - / 0   zoom",
+			"wheel       zoom             arrows / edges   scroll",
+			"[ ]         graph time zoom  tab, 1-5   graph tabs",
+		};
+		int label_cols = 0, key_cols = 0, other_cols = 0;
+		for (auto& v : settings) {
+			label_cols = std::max(label_cols, (int)std::strlen(v.label));
+			key_cols = std::max(key_cols, (int)std::strlen(v.key));
+		}
+		for (auto* s : other_keys) other_cols = std::max(other_cols, (int)std::strlen(s));
+		int w = pad * 2 + std::max((4 + label_cols + 3 + key_cols) * cw, other_cols * cw);
+		int h = pad * 2 + ch + 12 + (int)settings.size() * row_h + 12 + ch + 6 + (int)(sizeof(other_keys) / sizeof(*other_keys)) * ch;
+		if (!settings_surface || settings_surface->w != w || settings_surface->h != h) {
+			settings_surface = native_window_drawing::create_rgba_surface(w, h);
+			settings_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)settings_surface->lock();
+		size_t pitch = settings_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(8, 10, 16, 230));
+		bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(150, 140, 80, 255), hud_rgba(60, 56, 30, 255));
+		hud_text(buf, pitch, w, h, pad, pad, "Settings", 255, 240, 170);
+		const char* close = "? / esc close";
+		hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(close) * cw, pad, close, 120, 130, 150);
+		settings_row_rects.clear();
+		int y = pad + ch + 12;
+		for (auto& v : settings) {
+			bool on = v.get();
+			settings_row_rects.push_back(rect{{pad - 4, y}, {w - pad + 4, y + row_h}});
+			// Checkbox
+			int bx = pad, by = y + (row_h - 14) / 2;
+			fill_rgba(buf, pitch, w, h, bx, by, 14, 14, hud_rgba(20, 24, 34, 255));
+			bevel(buf, pitch, w, h, bx, by, 14, 14, hud_rgba(150, 140, 80, 255), hud_rgba(60, 56, 30, 255));
+			if (on) fill_rgba(buf, pitch, w, h, bx + 3, by + 3, 8, 8, hud_rgba(110, 230, 90, 255));
+			hud_text(buf, pitch, w, h, pad + 4 * cw, y + 4, v.label, on ? 240 : 160, on ? 240 : 165, on ? 240 : 180);
+			hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(v.key) * cw, y + 4, v.key, 120, 130, 150);
+			y += row_h;
+		}
+		y += 12;
+		hud_text(buf, pitch, w, h, pad, y, "Other keys", 255, 240, 170);
+		y += ch + 6;
+		for (auto* s : other_keys) {
+			hud_text(buf, pitch, w, h, pad, y, s, 150, 160, 180);
+			y += ch;
+		}
+		settings_surface->unlock();
+		int gx = viewport_x + (viewport_w - w) / 2, gy = std::max(8, (window_height - h) / 2);
+		settings_area_window = rect{{gx, gy}, {gx + w, gy + h}};
+		settings_surface->blit(&*window_surface, gx, gy);
+	}
+
+	// Click while the menu is open: toggles a row; any click inside is consumed.
+	bool settings_menu_click(int wx, int wy) {
+		if (!show_settings_menu) return false;
+		auto& a = settings_area_window;
+		if (wx < a.from.x || wx >= a.to.x || wy < a.from.y || wy >= a.to.y) return false;
+		int x = wx - a.from.x, y = wy - a.from.y;
+		auto settings = viewer_settings();
+		for (size_t i = 0; i != settings_row_rects.size() && i != settings.size(); ++i) {
+			auto& r = settings_row_rects[i];
+			if (x >= r.from.x && x < r.to.x && y >= r.from.y && y < r.to.y) settings[i].toggle();
+		}
+		return true;
+	}
+
 	// ---- Replay bar: game timer, speed and seek bar, bottom-right, drawn crisp ----
 	// Styled after Brood War's console: black panel, olive bevelled frame, hp-bar green
 	// progress, pale yellow timer text.
@@ -3399,6 +3598,7 @@ struct ui_functions: ui_util_functions {
 					step_zoom(e.wheel_y > 0 ? +1 : -1, std::max(0, std::min(viewport_w - 1, e.mouse_x - viewport_x)), e.mouse_y);
 					continue;
 				}
+				if (e.type == native_window::event_t::type_mouse_button_down && settings_menu_click(e.mouse_x, e.mouse_y)) continue;
 				if (e.type == native_window::event_t::type_mouse_button_down && graph_panel_click(e.mouse_x, e.mouse_y)) continue;
 				if (e.type == native_window::event_t::type_mouse_button_down && e.button == 1) {
 					bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
@@ -3487,15 +3687,13 @@ struct ui_functions: ui_util_functions {
 						if (show_graphs && graph_minimized) graph_minimized = false;  // restore, don't close
 						else show_graphs = !show_graphs;
 					}
-					if (e.sym == 27 && show_graphs) show_graphs = false;  // Esc
+					if (e.sym == 27 && show_settings_menu) show_settings_menu = false;  // Esc: menu first
+					else if (e.sym == 27 && show_graphs) show_graphs = false;
+					if (e.sym == '/' && (wnd.get_key_state(225) || wnd.get_key_state(229))) show_settings_menu = !show_settings_menu;  // '?'
+					if (e.sym == '?') show_settings_menu = !show_settings_menu;  // layouts that report '?' itself
 					if (show_graphs && e.sym == ']') step_graph_window(+1);
 					if (show_graphs && e.sym == 'r') graph_value_mode = !graph_value_mode;
-					if (e.sym == 'o') {
-						auto_observer = !auto_observer;
-						observer_has_target = false;
-						observer_last_frame = -1;
-						observer_manual_until = {};
-					}
+					if (e.sym == 'o') toggle_auto_observer();
 					if (show_graphs && e.sym == '[') step_graph_window(-1);
 					if (e.sym == '\t') {
 						bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
@@ -3511,12 +3709,7 @@ struct ui_functions: ui_util_functions {
 						else show_fog = !show_fog;
 					}
 					if (show_graphs && e.sym == 'm') graph_minimized = !graph_minimized;
-					else if (e.sym == 'm') {
-						if (global_volume) {
-							unmuted_volume = global_volume;
-							set_volume(0);
-						} else set_volume(unmuted_volume);
-					}
+					else if (e.sym == 'm') toggle_mute();
 					if (e.sym == 'a' || e.sym == 'u') step_speed(true);
 					if (e.sym == 'z' || (e.sym == 'd' && !show_graphs)) step_speed(false);
 					if (e.sym == 'd' && show_graphs) graph_derivative = !graph_derivative;
@@ -3663,6 +3856,8 @@ struct ui_functions: ui_util_functions {
 				panel_area_window = rect{{px, py}, {px + panel_surface->w, py + panel_surface->h}};
 				panel_surface->blit(&*window_surface, px, py);
 			}
+			if (show_settings_menu) draw_settings_menu();
+			save_settings_if_changed();
 			wnd.update_surface();
 		}
 	}

@@ -654,6 +654,7 @@ int main(int argc, char** argv) {
 #ifndef EMSCRIPTEN
 	ui.load_replay_file(argc > 1 ? argv[1] : "maps/p49.rep");
 	ui.show_hud = true;  // stats overlay on by default in the interactive player ('h' toggles)
+	ui.load_settings();  // saved choices from the '?' menu / toggle keys override the defaults
 #endif
 
 	auto& wnd = ui.wnd;

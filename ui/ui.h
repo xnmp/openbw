@@ -978,6 +978,28 @@ struct ui_functions: ui_util_functions {
 
 	}
 
+	// Shift+Tab: two-colour mode like the in-game toggle. The first two players render red
+	// and teal (a player who is already red keeps it). Display only: game state keeps the
+	// replay's own colours.
+	bool two_colour_mode = false;
+
+	int player_color(int owner) const {
+		if (owner < 0 || owner >= 12) return 0;
+		int own = st.players[owner].color;
+		if (!two_colour_mode || owner >= 8) return own;
+		std::array<int, 2> slots{-1, -1};
+		int n = 0;
+		for (int i = 0; i != 8 && n != 2; ++i) {
+			auto& pl = st.players[i];
+			if (pl.initially_active && (int)pl.race >= 0 && (int)pl.race <= 2) slots[n++] = i;
+		}
+		if (owner != slots[0] && owner != slots[1]) return own;
+		const int red = 0, teal = 2;
+		int red_player = slots[0];
+		if (slots[1] >= 0 && st.players[slots[1]].color == red && st.players[slots[0]].color != red) red_player = slots[1];
+		return owner == red_player ? red : teal;
+	}
+
 	a_vector<const unit_t*> current_selection_sprites_set = a_vector<const unit_t*>(2500);
 	a_vector<const sprite_t*> current_selection_sprites;
 
@@ -1016,7 +1038,7 @@ struct ui_functions: ui_util_functions {
 		width = std::min(width, screen_width - screen_x);
 		height = std::min(height, screen_height - screen_y);
 
-		size_t color_index = st.players[sprite->owner].color;
+		size_t color_index = player_color(sprite->owner);
 		uint8_t color = img.player_unit_colors.at(color_index)[0];
 		if (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) {
 			color = tileset_img.resource_minimap_color;
@@ -1212,7 +1234,7 @@ struct ui_functions: ui_util_functions {
 				draw_selection_circle(sprite, draw_selection_u, data, data_pitch);
 				draw_selection_u = nullptr;
 			}
-			draw_image(image, data, data_pitch, st.players[sprite->owner].color);
+			draw_image(image, data, data_pitch, player_color(sprite->owner));
 		}
 		if (draw_health_bars_u && !u_invincible(draw_health_bars_u)) {
 			draw_health_bars(sprite, draw_health_bars_u, data, data_pitch);
@@ -1371,7 +1393,7 @@ struct ui_functions: ui_util_functions {
 			--i;
 			for (unit_t* u : ptr(st.player_units[i])) {
 				if (!unit_visble_on_minimap(u)) continue;
-				int color = img.player_minimap_colors.at(st.players[u->owner].color);
+				int color = img.player_minimap_colors.at(player_color(u->owner));
 				size_t w = u->unit_type->placement_size.x / 32u;
 				size_t h = u->unit_type->placement_size.y / 32u;
 				if (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) {
@@ -1768,7 +1790,7 @@ struct ui_functions: ui_util_functions {
 			}
 			row.army = std::max(0, row.supply - row.workers);
 			if (palette && tileset_img.wpe.size() == 256 * 4) {
-				size_t ci = img.player_minimap_colors.at(pl.color);
+				size_t ci = img.player_minimap_colors.at(player_color(i));
 				row.r = tileset_img.wpe[4 * ci + 0];
 				row.g = tileset_img.wpe[4 * ci + 1];
 				row.b = tileset_img.wpe[4 * ci + 2];
@@ -2010,7 +2032,7 @@ struct ui_functions: ui_util_functions {
 
 	wire_rgb player_rgb(int owner) const {
 		if (owner < 0 || owner >= 8 || !palette || tileset_img.wpe.size() != 256 * 4) return {220, 220, 220};
-		size_t ci = img.player_minimap_colors.at(st.players[owner].color);
+		size_t ci = img.player_minimap_colors.at(player_color(owner));
 		return {tileset_img.wpe[4 * ci + 0], tileset_img.wpe[4 * ci + 1], tileset_img.wpe[4 * ci + 2]};
 	}
 
@@ -2193,6 +2215,28 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+	// Brood War style bar: black/olive bevelled frame and segmented "pips" like the unit hp
+	// bars, filled pips green with a highlight row on top and shade on the bottom.
+	void draw_bw_bar(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int bw, int bh, double frac, int pip_w) {
+		fill_rgba(buf, pitch, w, h, x, y, bw, bh, hud_rgba(0, 0, 0, 255));
+		fill_rgba(buf, pitch, w, h, x, y, bw, 1, hud_rgba(30, 34, 22, 255));
+		fill_rgba(buf, pitch, w, h, x, y + bh - 1, bw, 1, hud_rgba(110, 122, 80, 255));
+		fill_rgba(buf, pitch, w, h, x + bw - 1, y, 1, bh, hud_rgba(110, 122, 80, 255));
+		int ix = x + 2, iy = y + 2, iw = bw - 4, ih = bh - 4;
+		if (iw <= 0 || ih <= 0) return;
+		int filled_px = (int)std::lround(iw * std::max(0.0, std::min(1.0, frac)));
+		for (int px = 0; px < iw; px += pip_w + 1) {
+			int pw = std::min(pip_w, iw - px);
+			bool on = px < filled_px;
+			uint32_t top = on ? hud_rgba(168, 252, 140, 255) : hud_rgba(44, 50, 40, 255);
+			uint32_t mid = on ? hud_rgba(40, 204, 36, 255) : hud_rgba(28, 32, 26, 255);
+			uint32_t bot = on ? hud_rgba(16, 112, 16, 255) : hud_rgba(18, 20, 16, 255);
+			fill_rgba(buf, pitch, w, h, ix + px, iy, pw, ih, mid);
+			fill_rgba(buf, pitch, w, h, ix + px, iy, pw, 1, top);
+			if (ih > 2) fill_rgba(buf, pitch, w, h, ix + px, iy + ih - 1, pw, 1, bot);
+		}
+	}
+
 	void prepare_panel_surface(int w, int h) {
 		if (!panel_surface || panel_surface->w != w || panel_surface->h != h) {
 			panel_surface = native_window_drawing::create_rgba_surface(w, h);
@@ -2206,7 +2250,7 @@ struct ui_functions: ui_util_functions {
 		const int wire = 64 * scale;
 		const int icon_w = 36 * scale, icon_h = 34 * scale;
 		const int cargo_cell = 32 * scale + 4;
-		const int bar_h = 6 * scale;
+		const int bar_h = 8 * scale;
 		auto text_w = [&](const a_string& s) { return (int)s.size() * cw; };
 
 		int left_w = wire;
@@ -2282,8 +2326,7 @@ struct ui_functions: ui_util_functions {
 				y += icon_h;
 			}
 			y += 2;
-			fill_rgba(buf, pitch, w, h, x0, y, row_w, bar_h, hud_rgba(40, 44, 52, 255));
-			fill_rgba(buf, pitch, w, h, x0, y, (int)(row_w * p.frac), bar_h, hud_rgba(40, 200, 60, 255));
+			draw_bw_bar(buf, pitch, w, h, x0, y, row_w, bar_h, p.frac, 2 * scale + 1);
 			y += bar_h;
 		}
 		if (!ci.cargo.empty()) {
@@ -2596,18 +2639,11 @@ struct ui_functions: ui_util_functions {
 		if (is_paused) hud_text(buf, pitch, w, h, w - pad - (int)speed.size() * cw, pad - 2, speed.c_str(), 255, 190, 70);
 		else hud_text(buf, pitch, w, h, w - pad - (int)speed.size() * cw, pad - 2, speed.c_str(), 150, 230, 110);
 
-		// Track, inset
+		// Track: segmented like the in-game bars
 		int tx = pad, ty = pad + ch + 4;
-		fill_rgba(buf, pitch, w, h, tx, ty, bw, bh, hud_rgba(14, 18, 12, 255));
-		bevel(buf, pitch, w, h, tx, ty, bw, bh, hud_rgba(24, 28, 18, 255), hud_rgba(96, 108, 70, 255));
-		auto frame_x = [&](int frame) { return tx + 1 + (int)((int64_t)(bw - 2) * std::max(0, std::min(frame, replay_st.end_frame)) / replay_st.end_frame); };
+		draw_bw_bar(buf, pitch, w, h, tx, ty, bw, bh, (double)std::min(st.current_frame, replay_st.end_frame) / replay_st.end_frame, 3);
+		auto frame_x = [&](int frame) { return tx + 2 + (int)((int64_t)(bw - 4) * std::max(0, std::min(frame, replay_st.end_frame)) / replay_st.end_frame); };
 		int fx = frame_x(st.current_frame);
-		for (int y = ty + 1; y < ty + bh - 1; ++y) {
-			// vertical gradient like the in-game hp bars
-			int k = (y - ty) * 255 / std::max(1, bh);
-			int g = 230 - k * 110 / 255, r = 40 - k * 24 / 255;
-			fill_rgba(buf, pitch, w, h, tx + 1, y, fx - tx - 1, 1, hud_rgba(r, g, r, 255));
-		}
 		if (replay_frame != st.current_frame) {  // seek target while catching up
 			int sx = frame_x(replay_frame);
 			fill_rgba(buf, pitch, w, h, sx, ty - 2, 1, bh + 4, hud_rgba(248, 240, 170, 255));
@@ -2848,7 +2884,11 @@ struct ui_functions: ui_util_functions {
 					if (e.sym == 'h') show_hud = !show_hud;
 					if (e.sym == 'i') show_selection_panel = !show_selection_panel;
 					if (e.sym == 'g') show_graphs = !show_graphs;
-					if (show_graphs && e.sym == '\t') graph_tab = (graph_tab + 1) % graph_tab_count;
+					if (e.sym == '\t') {
+						bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
+						if (shift) two_colour_mode = !two_colour_mode;
+						else if (show_graphs) graph_tab = (graph_tab + 1) % graph_tab_count;
+					}
 					if (show_graphs && e.sym >= '1' && e.sym < '1' + graph_tab_count) graph_tab = e.sym - '1';
 					if (e.sym == 'm') {
 						if (global_volume) {

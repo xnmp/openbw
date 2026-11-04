@@ -58,6 +58,7 @@ cmake --build build -j
 | `h` | toggle the stats overlay |
 | `i` | toggle the selection panel |
 | `g` | toggle the graphs; `tab` or `1`-`4` (or click a tab) to switch |
+| `shift tab` | two-colour mode: the two players in red and teal (again to restore) |
 | `m` | mute |
 
 Playback starts at 1×, so press `=` a few times.

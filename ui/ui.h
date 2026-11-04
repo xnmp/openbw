@@ -1227,7 +1227,7 @@ struct ui_functions: ui_util_functions {
 
 	void draw_sprite(const sprite_t* sprite, uint8_t* data, size_t data_pitch) {
 		const unit_t* draw_selection_u = current_selection_sprites_set.at(sprite->index);
-		const unit_t* draw_health_bars_u = draw_selection_u;
+		const unit_t* draw_health_bars_u = draw_selection_u ? draw_selection_u : health_bar_sprites_set.at(sprite->index);
 		for (auto* image : ptr(reverse(sprite->images))) {
 			if (i_flag(image, image_t::flag_hidden)) continue;
 			if (draw_selection_u && image->modifier != 10) {
@@ -1242,6 +1242,12 @@ struct ui_functions: ui_util_functions {
 	}
 
 	a_vector<std::pair<uint32_t, const sprite_t*>> sorted_sprites;
+
+	// 'b': health bars under every player's units, not just the selected ones (on by default,
+	// like Remastered's "always show HP bars").
+	bool show_all_health_bars = true;
+	a_vector<const unit_t*> health_bar_sprites_set = a_vector<const unit_t*>(2500);
+	a_vector<const sprite_t*> health_bar_sprites;
 
 	void draw_sprites(uint8_t* data, size_t data_pitch) {
 
@@ -1273,9 +1279,22 @@ struct ui_functions: ui_util_functions {
 			current_selection_sprites.push_back(u->sprite);
 		}
 
+		if (show_all_health_bars) {
+			for (int i = 0; i != 8; ++i) {
+				for (unit_t* u : ptr(st.player_units[i])) {
+					if (!u->sprite || s_hidden(u->sprite)) continue;
+					health_bar_sprites_set.at(u->sprite->index) = u;
+					health_bar_sprites.push_back(u->sprite);
+				}
+			}
+		}
+
 		for (auto& v : sorted_sprites) {
 			draw_sprite(v.second, data, data_pitch);
 		}
+
+		for (auto* s : health_bar_sprites) health_bar_sprites_set.at(s->index) = nullptr;
+		health_bar_sprites.clear();
 
 		for (auto* s : current_selection_sprites) {
 			current_selection_sprites_set.at(s->index) = nullptr;
@@ -2925,7 +2944,8 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// One plotted line: player a's value, or a minus b in difference mode ('f'). The line
-	// takes a's colour where it is >= 0 and b's below zero, so the leader's colour shows.
+	// takes the colour of whoever is doing better: a's where it is >= 0 and b's below zero,
+	// reversed for losses.
 	struct graph_series {
 		int a = 0, b = -1;
 		bool gas = false;
@@ -2940,7 +2960,10 @@ struct ui_functions: ui_util_functions {
 		// Gas (income tab only) first, so the mineral lines draw over it.
 		for (int g = graph_tab == 0 ? 1 : 0; g >= 0; --g) {
 			if (graph_difference && rows.size() >= 2) {
-				out.push_back({rows[0].player, rows[1].player, g == 1, colour(rows[0], g == 1), colour(rows[1], g == 1)});
+				// Losses: more is worse, so the line takes the colour of whoever lost less.
+				bool lower_is_better = graph_tab == 4;
+				auto pos = colour(rows[lower_is_better ? 1 : 0], g == 1), neg = colour(rows[lower_is_better ? 0 : 1], g == 1);
+				out.push_back({rows[0].player, rows[1].player, g == 1, pos, neg});
 			} else {
 				for (auto& r : rows) out.push_back({r.player, -1, g == 1, colour(r, g == 1), colour(r, g == 1)});
 			}
@@ -2986,9 +3009,11 @@ struct ui_functions: ui_util_functions {
 		if (mini) {
 			graph_tab_rects.fill(rect{});
 			char title[96];
-			std::snprintf(title, sizeof(title), "%s%s%s", graph_tab_name(graph_tab), graph_derivative ? " /min" : "", difference ? " diff" : "");
+			std::snprintf(title, sizeof(title), "%s%s%s%s%s", graph_tab_name(graph_tab), graph_derivative ? " /min" : "",
+				difference ? " diff" : "", win_s ? ", " : "", win_s ? range : "");
 			hud_text(buf, pitch, w, h, pad, pad, title, 230, 230, 240);
-			hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(range) * cw, pad, range, 120, 130, 150);
+			const char* hint = "m: maximize";
+			hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(hint) * cw, pad, hint, 120, 130, 150);
 			ly = pad;
 		} else {
 			// Tabs
@@ -3456,8 +3481,12 @@ struct ui_functions: ui_util_functions {
 						else if (plus) step_speed(true);
 					}
 					if (e.sym == 'h') show_hud = !show_hud;
+					if (e.sym == 'b') show_all_health_bars = !show_all_health_bars;
 					if (e.sym == 'i') show_selection_panel = !show_selection_panel;
-					if (e.sym == 'g') show_graphs = !show_graphs;
+					if (e.sym == 'g') {
+						if (show_graphs && graph_minimized) graph_minimized = false;  // restore, don't close
+						else show_graphs = !show_graphs;
+					}
 					if (e.sym == 27 && show_graphs) show_graphs = false;  // Esc
 					if (show_graphs && e.sym == ']') step_graph_window(+1);
 					if (show_graphs && e.sym == 'r') graph_value_mode = !graph_value_mode;

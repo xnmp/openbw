@@ -74,8 +74,9 @@ cmake --build build -j
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |
 | `h` | toggle the stats overlay |
+| `b` | health bars under all units, or only selected ones (all by default) |
 | `i` | toggle the selection panel |
-| `g` / `esc` | toggle / close the graphs; `tab` or `1`-`5` (or click a tab) to switch |
+| `g` / `esc` | toggle / close the graphs (`g` on the minimized panel restores it); `tab`, `←` / `→` or `1`-`5` (or click a tab) to switch |
 | `r` | graphs: supply or resource value |
 | `d` | graphs: level or rate of change (with the graphs closed, `d` slows playback) |
 | `f` | graphs: players' difference or a line each (with the graphs closed, fog of war) |

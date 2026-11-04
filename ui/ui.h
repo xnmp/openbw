@@ -2463,8 +2463,8 @@ struct ui_functions: ui_util_functions {
 	// Steers the camera to where the action is: recent damage (hp + shields lost, found by
 	// comparing units between observer ticks, plus the hp left on units that die) and army
 	// supply in a view-sized window, weighted towards places where two sides' armies meet.
-	// It follows the current fight, cuts to another only when that scores clearly higher
-	// and the shot has lasted a moment, and pauses for a few seconds after a manual move.
+	// See observer_retarget/observer_step for how it avoids darting about; it pauses for a
+	// few seconds after a manual camera move.
 	bool auto_observer = false;
 	struct damage_event {
 		xy pos;
@@ -2558,6 +2558,16 @@ struct ui_functions: ui_util_functions {
 		return damage / 25.0 + 2.0 * (side[1] / 2.0) + 0.3 * (total / 2.0);
 	}
 
+	// Stability (so the camera does not dart about):
+	//  - the fight being shown is followed through a smoothed point, not the raw centroid;
+	//  - the camera only pans once that point leaves the middle of the view (dead zone)
+	//    and then eases back to centre, with a capped speed;
+	//  - a different spot must score 40% higher on two consecutive ticks, and the current
+	//    shot must have lasted 3 s of real time, before the camera cuts to it.
+	bool observer_panning = false;
+	int observer_challenger_ticks = 0;
+	xy observer_challenger;
+
 	void observer_retarget(std::chrono::high_resolution_clock::time_point now) {
 		auto army = observer_army();
 		a_vector<xy> candidates;
@@ -2569,23 +2579,37 @@ struct ui_functions: ui_util_functions {
 		xy best_centre;
 		for (xy c : candidates) {
 			xy centre;
-			double s = observer_score(c, army, &centre);
-			if (s > best) { best = s; best_centre = centre; }
+			double sc = observer_score(c, army, &centre);
+			if (sc > best) { best = sc; best_centre = centre; }
 		}
-		if (observer_has_target) {
-			xy centre;
-			double current = observer_score(observer_target, army, &centre);
-			bool held = now - observer_last_switch < std::chrono::milliseconds(2500);
-			if (best > current * 1.3 + 1.0 && !held) {
+		if (!observer_has_target) {
+			if (best > 0.5) {
 				observer_target = best_centre;
+				observer_has_target = true;
 				observer_last_switch = now;
-			} else if (current > 0) {
-				observer_target = centre;  // follow the fight in view
 			}
-		} else if (best > 0.5) {
-			observer_target = best_centre;
-			observer_has_target = true;
+			return;
+		}
+		xy centre;
+		double current = observer_score(observer_target, army, &centre);
+		// Follow the shown fight through a smoothed point.
+		if (current > 0) {
+			observer_target.x += (centre.x - observer_target.x) * 3 / 10;
+			observer_target.y += (centre.y - observer_target.y) * 3 / 10;
+		}
+		bool elsewhere = std::abs(best_centre.x - observer_target.x) > view_width / 2 || std::abs(best_centre.y - observer_target.y) > view_height / 2;
+		if (elsewhere && best > current * 1.4 + 1.0) {
+			bool same_challenger = observer_challenger_ticks > 0 && std::abs(best_centre.x - observer_challenger.x) < view_width / 2 && std::abs(best_centre.y - observer_challenger.y) < view_height / 2;
+			observer_challenger_ticks = same_challenger ? observer_challenger_ticks + 1 : 1;
+			observer_challenger = best_centre;
+		} else {
+			observer_challenger_ticks = 0;
+		}
+		bool dwelt = now - observer_last_switch >= std::chrono::seconds(3);
+		if (observer_challenger_ticks >= 2 && dwelt) {
+			observer_target = observer_challenger;
 			observer_last_switch = now;
+			observer_challenger_ticks = 0;
 		}
 	}
 
@@ -2604,14 +2628,28 @@ struct ui_functions: ui_util_functions {
 			observer_cx = screen_pos.x + view_width / 2.0;
 			observer_cy = screen_pos.y + view_height / 2.0;
 		}
-		double tx = observer_target.x, ty = observer_target.y;
-		double dist = std::hypot(tx - observer_cx, ty - observer_cy);
-		if (dist > 1.5 * std::max(view_width, view_height)) {
-			observer_cx = tx; observer_cy = ty;  // far away: cut, like a human observer
+		double dx = observer_target.x - observer_cx, dy = observer_target.y - observer_cy;
+		if (std::abs(dx) > 1.5 * view_width || std::abs(dy) > 1.5 * view_height) {
+			observer_cx = observer_target.x;  // far away: cut, like a human observer
+			observer_cy = observer_target.y;
+			observer_panning = false;
 		} else {
-			double a = 1.0 - std::exp(-std::max(0.0, std::min(dt, 0.25)) / 0.35);
-			observer_cx += (tx - observer_cx) * a;
-			observer_cy += (ty - observer_cy) * a;
+			// Dead zone: start panning when the target leaves the middle 40% of the view,
+			// stop once it is back within 5% of centre.
+			bool outside = std::abs(dx) > view_width * 0.2 || std::abs(dy) > view_height * 0.2;
+			bool centred = std::abs(dx) < view_width * 0.05 && std::abs(dy) < view_height * 0.05;
+			if (outside) observer_panning = true;
+			if (centred) observer_panning = false;
+			if (observer_panning) {
+				double t = std::max(0.0, std::min(dt, 0.25));
+				double a = 1.0 - std::exp(-t / 0.4);
+				double mx = dx * a, my = dy * a;
+				double cap = 1.2 * std::max(view_width, view_height) * t;  // px this update
+				double len = std::hypot(mx, my);
+				if (len > cap && len > 0) { mx *= cap / len; my *= cap / len; }
+				observer_cx += mx;
+				observer_cy += my;
+			}
 		}
 		screen_pos = xy((int)std::lround(observer_cx - view_width / 2.0), (int)std::lround(observer_cy - view_height / 2.0));
 	}
@@ -2621,7 +2659,7 @@ struct ui_functions: ui_util_functions {
 	// pass through record_graph_sample), so the graphs cover the part of the game simulated
 	// so far. The x axis spans the whole replay, or with time zoom ([ ] or the mouse wheel
 	// over the panel) only the last N game seconds up to the current frame. Income is the
-	// resources gathered over the trailing 15 game seconds, expressed per minute.
+	// gathering rate per minute, smoothed over roughly the last 15 game seconds.
 	struct graph_player_sample {
 		int minerals_gathered = 0, gas_gathered = 0, supply = 0, army = 0, workers = 0;
 		int value_total = 0, value_army = 0;   // resource value of units owned
@@ -2647,6 +2685,7 @@ struct ui_functions: ui_util_functions {
 	}
 	static constexpr int graph_tab_count = 5;
 	bool graph_value_mode = false;  // 'r': supply <-> resource value (workers unaffected)
+	bool graph_derivative = false;  // 'd': plot the rate of change per minute instead
 	std::unique_ptr<native_window_drawing::surface> graph_surface;
 	rect graph_area_window;                                // panel rect in window pixels
 	std::array<rect, graph_tab_count> graph_tab_rects{};   // tab rects, panel-relative
@@ -2665,9 +2704,10 @@ struct ui_functions: ui_util_functions {
 			p.army = row.army;
 			p.workers = row.workers;
 			p.value_total = p.value_army = 0;
+			// Units in production exist as incomplete units (Terran/Protoss training, morphs)
+			// or eggs, and count; queued ones do not exist yet. Workers count in the total.
 			for (unit_t* u : ptr(st.player_units[row.player])) {
 				if (ut_building(u) || u_hallucination(u)) continue;
-				if (!u_completed(u) && !unit_is_egg(u)) continue;
 				int v = unit_value(u);
 				p.value_total += v;
 				if (!ut_worker(u)) p.value_army += v;
@@ -2689,18 +2729,35 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// Value plotted for one player at sample index i (the second series is gas income).
+	// Income, and every series in derivative mode, is a per-minute rate: per-second deltas
+	// averaged with a Hann window over 24 s (similar noise to a 15 s box average). Plain box
+	// windows jitter, because mining arrives in 8-mineral trips that step in and out of it.
+	template<typename level_F>
+	double smoothed_rate(level_F&& level, size_t i) const {
+		const int window = 24;
+		double sum = 0, wsum = 0;
+		for (int k = 0; k != window && (size_t)k < i; ++k) {
+			size_t j = i - k;
+			if (!graph_samples[j].valid || !graph_samples[j - 1].valid) continue;
+			double wk = std::sin(3.14159265358979 * (k + 0.5) / window);
+			wk *= wk;
+			sum += wk * (level(j) - level(j - 1));
+			wsum += wk;
+		}
+		return wsum > 0 ? sum / wsum * (60.0 * 1000.0 / 42.0 / graph_sample_interval) : 0;
+	}
+
 	double graph_value(int tab, size_t i, int player, bool gas) const {
+		auto level = [&](size_t j) { return graph_level(tab, j, player, gas); };
+		auto shown = [&](size_t j) { return tab == 0 ? smoothed_rate(level, j) : level(j); };
+		return graph_derivative ? smoothed_rate(shown, i) : shown(i);
+	}
+
+	// Raw level: cumulative minerals/gas gathered for income, else the tab's quantity.
+	double graph_level(int tab, size_t i, int player, bool gas) const {
 		const auto& p = graph_samples[i].players[player];
 		switch (tab) {
-		case 0: {
-			const size_t window = 15;  // samples: 15 game seconds
-			size_t j = i >= window ? i - window : 0;
-			while (j < i && !graph_samples[j].valid) ++j;
-			if (j == i) return 0;
-			const auto& q = graph_samples[j].players[player];
-			double delta = gas ? p.gas_gathered - q.gas_gathered : p.minerals_gathered - q.minerals_gathered;
-			return delta * 60.0 / (double)(i - j);
-		}
+		case 0: return gas ? p.gas_gathered : p.minerals_gathered;
 		case 1: return graph_value_mode ? p.value_total : p.supply;
 		case 2: return graph_value_mode ? p.value_army : p.army;
 		case 3: return p.workers;
@@ -2708,10 +2765,10 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
-	static double nice_ceiling(double v) {
-		if (v <= 10) return 10;
+	// Smallest of 1, 2, 2.5, 5 x 10^k that is >= v (v > 0).
+	static double nice_step(double v) {
 		double mag = std::pow(10.0, std::floor(std::log10(v)));
-		for (double m : {1.0, 2.0, 2.5, 5.0, 10.0}) if (m * mag >= v) return m * mag;
+		for (double m : {1.0, 2.0, 2.5, 5.0, 10.0}) if (m * mag >= v - 1e-9) return m * mag;
 		return 10 * mag;
 	}
 
@@ -2763,7 +2820,8 @@ struct ui_functions: ui_util_functions {
 		}
 		char hint[128];
 		int win_s = graph_window_seconds(graph_window);
-		const char* mode = graph_value_mode ? "r: resources" : "r: supply";
+		char mode[48];
+		std::snprintf(mode, sizeof(mode), "%s  %s", graph_value_mode ? "r: resources" : "r: supply", graph_derivative ? "d: per minute" : "d: total");
 		if (win_s) std::snprintf(hint, sizeof(hint), "%s   last %d:%02d  [ ] zoom   esc close", mode, win_s / 60, win_s % 60);
 		else std::snprintf(hint, sizeof(hint), "%s   whole game  [ ] zoom   esc close", mode);
 		hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(hint) * cw, pad + 4, hint, 120, 130, 150);
@@ -2791,21 +2849,26 @@ struct ui_functions: ui_util_functions {
 		}
 		size_t n = std::min(graph_samples.size(), (size_t)x_to / graph_sample_interval + 1);
 		size_t i_from = (size_t)x_from / graph_sample_interval;
-		double vmax = 0;
+		double vmax = 0, vmin = 0;
 		for (size_t i = i_from; i < n; ++i) {
 			if (!graph_samples[i].valid) continue;
 			for (auto& row : rows) {
-				vmax = std::max(vmax, graph_value(graph_tab, i, row.player, false));
-				if (graph_tab == 0) vmax = std::max(vmax, graph_value(graph_tab, i, row.player, true));
+				for (int g = 0; g <= (graph_tab == 0 ? 1 : 0); ++g) {
+					double v = graph_value(graph_tab, i, row.player, g == 1);
+					vmax = std::max(vmax, v);
+					vmin = std::min(vmin, v);
+				}
 			}
 		}
-		vmax = nice_ceiling(vmax);
+		// One round step for the whole axis (about 4 intervals), ends snapped to it.
+		double ystep = nice_step(std::max(vmax - vmin, 4.0) / 4.0);
+		vmax = std::max(ystep, std::ceil(vmax / ystep) * ystep);
+		vmin = std::floor(vmin / ystep) * ystep;
 		auto to_x = [&](int frame) { return px0 + (int)((int64_t)(px1 - px0) * (frame - x_from) / std::max(1, x_to - x_from)); };
-		auto to_y = [&](double v) { return py1 - (int)((py1 - py0) * (v / vmax)); };
+		auto to_y = [&](double v) { return py1 - (int)((py1 - py0) * ((v - vmin) / (vmax - vmin))); };
 
 		// Grid and labels
-		for (int k = 0; k <= 4; ++k) {
-			double v = vmax * k / 4;
+		for (double v = vmin; v <= vmax + ystep * 0.01; v += ystep) {
 			int y = to_y(v);
 			fill_rgba(buf, pitch, w, h, px0, y, px1 - px0, 1, hud_rgba(60, 66, 80, 255));
 			char label[16];
@@ -2826,6 +2889,8 @@ struct ui_functions: ui_util_functions {
 				hud_text(buf, pitch, w, h, x - (int)std::strlen(label) * cw / 2, py1 + 4, label, 150, 160, 180);
 			}
 		}
+
+		if (vmin < 0) fill_rgba(buf, pitch, w, h, px0, to_y(0), px1 - px0, 1, hud_rgba(140, 150, 170, 255));
 
 		// Series
 		for (int series = graph_tab == 0 ? 1 : 0; series >= 0; --series) {
@@ -3190,7 +3255,8 @@ struct ui_functions: ui_util_functions {
 						} else set_volume(unmuted_volume);
 					}
 					if (e.sym == 'a' || e.sym == 'u') step_speed(true);
-					if (e.sym == 'z' || e.sym == 'd') step_speed(false);
+					if (e.sym == 'z' || (e.sym == 'd' && !show_graphs)) step_speed(false);
+					if (e.sym == 'd' && show_graphs) graph_derivative = !graph_derivative;
 					if (e.sym == '\b') {
 						int t = 5 * 1000 / 42;  // 5 game seconds at 42 ms per frame
 						if (replay_frame < t) replay_frame = 0;

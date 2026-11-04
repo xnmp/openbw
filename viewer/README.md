@@ -13,7 +13,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   Drag-select to get a grid of health-coloured wireframes. As in Brood War, a box that
   catches units leaves buildings out.
 - **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute, a
-  15-second moving average), supply, army supply, workers and units lost over game time.
+  smoothed over about 15 s), supply, army supply, workers and units lost over game time.
+  `d` switches to the first derivative (change per minute).
   `r` switches supply, army and losses between supply and resource value (minerals + gas,
   with Zergling/Scourge pairs, morphs and Archons valued correctly).
   Zoom the time axis from the whole game down to the last 15 s with `[` / `]` or the
@@ -67,6 +68,7 @@ cmake --build build -j
 | `i` | toggle the selection panel |
 | `g` / `esc` | toggle / close the graphs; `tab` or `1`-`5` (or click a tab) to switch |
 | `r` | graphs: supply or resource value |
+| `d` | graphs: level or rate of change (with the graphs closed, `d` slows playback) |
 | `o` | auto observer on / off |
 | `[` / `]`, or the wheel over the graphs | zoom the graphs' time axis out / in |
 | `shift tab` | two-colour mode: the two players in red and teal (again to restore) |
@@ -75,6 +77,10 @@ cmake --build build -j
 Playback starts at 1×, so press `=` a few times.
 
 ## Notes
+
+- Kill counts: upstream OpenBW never increments them; this fork credits the killing
+  unit (an Interceptor's or Scarab's kills go to its Carrier or Reaver). Kill counts are
+  display only, so replays still play back identically.
 
 - The overlay font in `ui/hud_font.h` is a bitmap rendering of JetBrains Mono Bold
   (SIL OFL 1.1, see `LICENSE-JetBrainsMono.txt`). Regenerate it with `gen_hud_font.py`.

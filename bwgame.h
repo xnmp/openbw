@@ -13637,7 +13637,11 @@ struct state_functions {
 			kill_unit(u);
 			// todo: units lost scores
 			if (source_unit && unit_target_is_enemy(source_unit, u)) {
-				// todo: kill scores
+				// Kill counts (shown in the unit info). Interceptor and scarab kills go to
+				// their carrier or reaver. todo: kill scores
+				unit_t* credit = source_unit;
+				if (unit_is_fighter(credit) && credit->fighter.parent) credit = credit->fighter.parent;
+				++credit->kill_count;
 			}
 		}
 	}

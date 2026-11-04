@@ -2388,6 +2388,234 @@ struct ui_functions: ui_util_functions {
 		return true;
 	}
 
+	// ---- Unit value and losses (graphs) ----
+	// Resource value of a unit: mineral + gas cost, with the units.dat quirks corrected:
+	// Zerglings and Scourge come two per egg, morphed units include their base unit, and
+	// Archons are listed at 0/0.
+	int unit_type_value(const unit_type_t* ut) const {
+		auto cost = [&](UnitTypes id) {
+			auto* t = get_unit_type(id);
+			return t->mineral_cost + t->gas_cost;
+		};
+		int v = ut->mineral_cost + ut->gas_cost;
+		switch (ut->id) {
+		case UnitTypes::Zerg_Zergling:
+		case UnitTypes::Zerg_Scourge: return v / 2;
+		case UnitTypes::Zerg_Lurker: return v + cost(UnitTypes::Zerg_Hydralisk);
+		case UnitTypes::Zerg_Guardian:
+		case UnitTypes::Zerg_Devourer: return v + cost(UnitTypes::Zerg_Mutalisk);
+		case UnitTypes::Protoss_Archon: return 2 * cost(UnitTypes::Protoss_High_Templar);
+		case UnitTypes::Protoss_Dark_Archon: return 2 * cost(UnitTypes::Protoss_Dark_Templar);
+		case UnitTypes::Zerg_Broodling: return 0;
+		default: return v;
+		}
+	}
+
+	// Eggs and cocoons are valued as what they will hatch into (both Zerglings of a pair).
+	const unit_type_t* egg_target(const unit_t* u) const {
+		if (unit_is_egg(u) && !u->build_queue.empty()) return u->build_queue.front();
+		return nullptr;
+	}
+	int unit_value(const unit_t* u) const {
+		if (auto* t = egg_target(u)) return unit_type_value(t) * (ut_two_units_in_one_egg(t) ? 2 : 1);
+		return unit_type_value(u->unit_type);
+	}
+	int unit_supply_half(const unit_t* u) const {
+		if (auto* t = egg_target(u)) return (int)t->supply_required.raw_value * (ut_two_units_in_one_egg(t) ? 2 : 1);
+		return (int)u->unit_type->supply_required.raw_value;
+	}
+
+	struct death_event {
+		int owner, supply_half, value;
+	};
+	// Keyed by (frame, unit id) so re-simulating after a rewind records each death once.
+	a_map<std::pair<int, uint32_t>, death_event> unit_deaths;
+
+	// A loss is a completed non-building unit dying. Refunded cancels never get here
+	// complete, hallucinations cost nothing, and units consumed by their own action
+	// (drone into extractor, launched nuke, scarab, mine, scanner) are not losses.
+	void record_unit_loss(const unit_t* u) {
+		if (u->owner < 0 || u->owner >= 8) return;
+		if (ut_building(u) || u_hallucination(u)) return;
+		if (!u_completed(u) && !unit_is_egg(u)) return;
+		if (u->user_action_flags & 4) return;
+		switch (u->unit_type->id) {
+		case UnitTypes::Protoss_Scarab:
+		case UnitTypes::Terran_Vulture_Spider_Mine:
+		case UnitTypes::Terran_Nuclear_Missile:
+		case UnitTypes::Spell_Scanner_Sweep:
+		case UnitTypes::Spell_Disruption_Web:
+		case UnitTypes::Spell_Dark_Swarm:
+			return;
+		default: break;
+		}
+		int value = unit_value(u), supply = unit_supply_half(u);
+		if (value <= 0 && supply <= 0) return;
+		unit_deaths[{st.current_frame, (uint32_t)get_unit_id(u).raw_value}] = {u->owner, supply, value};
+	}
+
+	void on_kill_unit(unit_t* u) override {
+		record_unit_loss(u);
+		observer_on_kill(u);
+	}
+
+	// ---- Auto observer ('o') ----
+	// Steers the camera to where the action is: recent damage (hp + shields lost, found by
+	// comparing units between observer ticks, plus the hp left on units that die) and army
+	// supply in a view-sized window, weighted towards places where two sides' armies meet.
+	// It follows the current fight, cuts to another only when that scores clearly higher
+	// and the shot has lasted a moment, and pauses for a few seconds after a manual move.
+	bool auto_observer = false;
+	struct damage_event {
+		xy pos;
+		int amount;
+		int frame;
+	};
+	a_vector<damage_event> observer_damage;
+	a_vector<std::pair<uint32_t, int>> observer_last_hp = a_vector<std::pair<uint32_t, int>>(2048);
+	int observer_last_frame = -1;
+	int observer_tick_frame = -1000;
+	bool observer_has_target = false;
+	xy observer_target;
+	double observer_cx = 0, observer_cy = 0;
+	xy observer_last_screen_pos;
+	std::chrono::high_resolution_clock::time_point observer_manual_until, observer_last_switch, observer_last_update;
+
+	int unit_hp_total(const unit_t* u) const {
+		return (int)u->hp.integer_part() + (u->unit_type->has_shield ? (int)u->shield_points.integer_part() : 0);
+	}
+
+	void observer_on_kill(const unit_t* u) {
+		if (u->owner < 0 || u->owner >= 8 || u_hallucination(u)) return;
+		auto uid = get_unit_id(u);
+		auto& e = observer_last_hp[uid.index() & 2047];
+		int remaining = e.first == (uint32_t)uid.raw_value ? e.second : unit_hp_total(u);
+		observer_damage.push_back({u->sprite->position, std::max(remaining, 20), st.current_frame});
+	}
+
+	void observer_scan_damage() {
+		if (st.current_frame == observer_last_frame) return;
+		bool rebase = observer_last_frame < 0 || st.current_frame < observer_last_frame || st.current_frame - observer_last_frame > 240;
+		if (rebase) observer_damage.clear();
+		for (int i = 0; i != 8; ++i) {
+			for (unit_t* u : ptr(st.player_units[i])) {
+				auto uid = get_unit_id(u);
+				auto& e = observer_last_hp[uid.index() & 2047];
+				int hp = unit_hp_total(u);
+				if (!rebase && e.first == (uint32_t)uid.raw_value && hp < e.second && !u_hallucination(u)) {
+					observer_damage.push_back({u->sprite->position, e.second - hp, st.current_frame});
+				}
+				e = {(uint32_t)uid.raw_value, hp};
+			}
+		}
+		int horizon = st.current_frame - 150;
+		observer_damage.erase(std::remove_if(observer_damage.begin(), observer_damage.end(),
+			[&](const damage_event& d) { return d.frame < horizon || d.frame > st.current_frame; }), observer_damage.end());
+		observer_last_frame = st.current_frame;
+	}
+
+	struct observer_unit {
+		xy pos;
+		int owner;
+		int supply_half;
+	};
+
+	a_vector<observer_unit> observer_army() const {
+		a_vector<observer_unit> r;
+		for (int i = 0; i != 8; ++i) {
+			for (unit_t* u : ptr(st.player_units[i])) {
+				if (ut_building(u) || ut_worker(u) || u_hallucination(u) || !u_completed(u)) continue;
+				if (u->status_flags & unit_t::status_flag_loaded) continue;
+				int s = (int)u->unit_type->supply_required.raw_value;
+				if (s <= 0) continue;
+				r.push_back({u->sprite->position, i, s});
+			}
+		}
+		return r;
+	}
+
+	// Interest of a view-sized window centred at c; also returns the weighted centre of
+	// what it contains, so the camera can follow a moving fight.
+	double observer_score(xy c, const a_vector<observer_unit>& army, xy* centre_out) const {
+		int hw = view_width * 2 / 5, hh = view_height * 2 / 5;
+		std::array<int, 8> side{};
+		double wx = 0, wy = 0, wsum = 0, damage = 0;
+		for (auto& a : army) {
+			if (std::abs(a.pos.x - c.x) > hw || std::abs(a.pos.y - c.y) > hh) continue;
+			side[a.owner] += a.supply_half;
+			wx += a.pos.x * a.supply_half; wy += a.pos.y * a.supply_half; wsum += a.supply_half;
+		}
+		for (auto& d : observer_damage) {
+			if (std::abs(d.pos.x - c.x) > hw || std::abs(d.pos.y - c.y) > hh) continue;
+			double w = d.amount * std::exp2(-(st.current_frame - d.frame) / 48.0);
+			damage += w;
+			wx += d.pos.x * w * 0.5; wy += d.pos.y * w * 0.5; wsum += w * 0.5;
+		}
+		std::sort(side.begin(), side.end(), std::greater<int>());
+		int total = 0;
+		for (int s : side) total += s;
+		if (centre_out) *centre_out = wsum > 0 ? xy((int)(wx / wsum), (int)(wy / wsum)) : c;
+		return damage / 25.0 + 2.0 * (side[1] / 2.0) + 0.3 * (total / 2.0);
+	}
+
+	void observer_retarget(std::chrono::high_resolution_clock::time_point now) {
+		auto army = observer_army();
+		a_vector<xy> candidates;
+		size_t stride = std::max<size_t>(1, army.size() / 200);
+		for (size_t i = 0; i < army.size(); i += stride) candidates.push_back(army[i].pos);
+		size_t dstride = std::max<size_t>(1, observer_damage.size() / 100);
+		for (size_t i = 0; i < observer_damage.size(); i += dstride) candidates.push_back(observer_damage[i].pos);
+		double best = 0;
+		xy best_centre;
+		for (xy c : candidates) {
+			xy centre;
+			double s = observer_score(c, army, &centre);
+			if (s > best) { best = s; best_centre = centre; }
+		}
+		if (observer_has_target) {
+			xy centre;
+			double current = observer_score(observer_target, army, &centre);
+			bool held = now - observer_last_switch < std::chrono::milliseconds(2500);
+			if (best > current * 1.3 + 1.0 && !held) {
+				observer_target = best_centre;
+				observer_last_switch = now;
+			} else if (current > 0) {
+				observer_target = centre;  // follow the fight in view
+			}
+		} else if (best > 0.5) {
+			observer_target = best_centre;
+			observer_has_target = true;
+			observer_last_switch = now;
+		}
+	}
+
+	void observer_step(std::chrono::high_resolution_clock::time_point now, bool manual_move) {
+		double dt = std::chrono::duration<double>(now - observer_last_update).count();
+		observer_last_update = now;
+		if (!auto_observer) return;
+		if (manual_move) observer_manual_until = now + std::chrono::seconds(4);
+		observer_scan_damage();
+		if (st.current_frame - observer_tick_frame >= 8 || st.current_frame < observer_tick_frame) {
+			observer_tick_frame = st.current_frame;
+			observer_retarget(now);
+		}
+		if (!observer_has_target || now < observer_manual_until) return;
+		if (screen_pos != observer_last_screen_pos) {
+			observer_cx = screen_pos.x + view_width / 2.0;
+			observer_cy = screen_pos.y + view_height / 2.0;
+		}
+		double tx = observer_target.x, ty = observer_target.y;
+		double dist = std::hypot(tx - observer_cx, ty - observer_cy);
+		if (dist > 1.5 * std::max(view_width, view_height)) {
+			observer_cx = tx; observer_cy = ty;  // far away: cut, like a human observer
+		} else {
+			double a = 1.0 - std::exp(-std::max(0.0, std::min(dt, 0.25)) / 0.35);
+			observer_cx += (tx - observer_cx) * a;
+			observer_cy += (ty - observer_cy) * a;
+		}
+		screen_pos = xy((int)std::lround(observer_cx - view_width / 2.0), (int)std::lround(observer_cy - view_height / 2.0));
+	}
+
 	// ---- Graph panel ('g'): income and supply over game time ----
 	// Sampled once per game second as frames are simulated (playback, seeking and rewinds all
 	// pass through record_graph_sample), so the graphs cover the part of the game simulated
@@ -2396,6 +2624,8 @@ struct ui_functions: ui_util_functions {
 	// resources gathered over the trailing 15 game seconds, expressed per minute.
 	struct graph_player_sample {
 		int minerals_gathered = 0, gas_gathered = 0, supply = 0, army = 0, workers = 0;
+		int value_total = 0, value_army = 0;   // resource value of units owned
+		int lost_supply_half = 0, lost_value = 0;  // cumulative units lost
 	};
 	struct graph_sample {
 		bool valid = false;
@@ -2415,7 +2645,8 @@ struct ui_functions: ui_util_functions {
 	void step_graph_window(int dir) {
 		graph_window = std::max(0, std::min(graph_window_count - 1, graph_window + dir));
 	}
-	static constexpr int graph_tab_count = 4;
+	static constexpr int graph_tab_count = 5;
+	bool graph_value_mode = false;  // 'r': supply <-> resource value (workers unaffected)
 	std::unique_ptr<native_window_drawing::surface> graph_surface;
 	rect graph_area_window;                                // panel rect in window pixels
 	std::array<rect, graph_tab_count> graph_tab_rects{};   // tab rects, panel-relative
@@ -2433,12 +2664,28 @@ struct ui_functions: ui_util_functions {
 			p.supply = row.supply;
 			p.army = row.army;
 			p.workers = row.workers;
+			p.value_total = p.value_army = 0;
+			for (unit_t* u : ptr(st.player_units[row.player])) {
+				if (ut_building(u) || u_hallucination(u)) continue;
+				if (!u_completed(u) && !unit_is_egg(u)) continue;
+				int v = unit_value(u);
+				p.value_total += v;
+				if (!ut_worker(u)) p.value_army += v;
+			}
+			p.lost_supply_half = p.lost_value = 0;
+		}
+		for (auto& d : unit_deaths) {
+			if (d.first.first > st.current_frame) break;
+			auto& p = s.players[d.second.owner];
+			p.lost_supply_half += d.second.supply_half;
+			p.lost_value += d.second.value;
 		}
 	}
 
-	static const char* graph_tab_name(int tab) {
-		static const char* names[graph_tab_count] = {"Income", "Supply", "Army supply", "Worker supply"};
-		return names[tab];
+	const char* graph_tab_name(int tab) const {
+		static const char* supply_names[graph_tab_count] = {"Income", "Supply", "Army supply", "Workers", "Supply lost"};
+		static const char* value_names[graph_tab_count] = {"Income", "Unit value", "Army value", "Workers", "Value lost"};
+		return graph_value_mode ? value_names[tab] : supply_names[tab];
 	}
 
 	// Value plotted for one player at sample index i (the second series is gas income).
@@ -2454,9 +2701,10 @@ struct ui_functions: ui_util_functions {
 			double delta = gas ? p.gas_gathered - q.gas_gathered : p.minerals_gathered - q.minerals_gathered;
 			return delta * 60.0 / (double)(i - j);
 		}
-		case 1: return p.supply;
-		case 2: return p.army;
-		default: return p.workers;
+		case 1: return graph_value_mode ? p.value_total : p.supply;
+		case 2: return graph_value_mode ? p.value_army : p.army;
+		case 3: return p.workers;
+		default: return graph_value_mode ? p.lost_value : p.lost_supply_half / 2.0;
 		}
 	}
 
@@ -2513,10 +2761,11 @@ struct ui_functions: ui_util_functions {
 			hud_text(buf, pitch, w, h, tx + 8, pad + 4, label, active ? 255 : 160, active ? 255 : 170, active ? 255 : 190);
 			tx += tw + 6;
 		}
-		char hint[96];
+		char hint[128];
 		int win_s = graph_window_seconds(graph_window);
-		if (win_s) std::snprintf(hint, sizeof(hint), "last %d:%02d  [ ] or wheel zoom   g close  tab/1-4 switch", win_s / 60, win_s % 60);
-		else std::snprintf(hint, sizeof(hint), "whole game  [ ] or wheel zoom   g close  tab/1-4 switch");
+		const char* mode = graph_value_mode ? "r: resources" : "r: supply";
+		if (win_s) std::snprintf(hint, sizeof(hint), "%s   last %d:%02d  [ ] zoom   esc close", mode, win_s / 60, win_s % 60);
+		else std::snprintf(hint, sizeof(hint), "%s   whole game  [ ] zoom   esc close", mode);
 		hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(hint) * cw, pad + 4, hint, 120, 130, 150);
 
 		auto rows = hud_rows();
@@ -2660,6 +2909,10 @@ struct ui_functions: ui_util_functions {
 
 		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(replay_st.end_frame);
 		hud_text(buf, pitch, w, h, pad, pad - 2, timer.c_str(), 248, 240, 170);
+		if (auto_observer) {
+			bool held = clock.now() < observer_manual_until;
+			hud_text(buf, pitch, w, h, pad + ((int)timer.size() + 2) * cw, pad - 2, held ? "AUTO (manual)" : "AUTO", held ? 150 : 120, held ? 150 : 220, held ? 150 : 255);
+		}
 		a_string speed = speed_label();
 		if (is_paused) hud_text(buf, pitch, w, h, w - pad - (int)speed.size() * cw, pad - 2, speed.c_str(), 255, 190, 70);
 		else hud_text(buf, pitch, w, h, w - pad - (int)speed.size() * cw, pad - 2, speed.c_str(), 150, 230, 110);
@@ -2822,6 +3075,7 @@ struct ui_functions: ui_util_functions {
 			is_drag_selecting = false;
 		};
 
+		xy camera_before_input = screen_pos;
 		if (wnd) {
 			native_window::event_t e;
 			while (wnd.peek_message(e)) {
@@ -2915,6 +3169,13 @@ struct ui_functions: ui_util_functions {
 					if (e.sym == 'g') show_graphs = !show_graphs;
 					if (e.sym == 27 && show_graphs) show_graphs = false;  // Esc
 					if (show_graphs && e.sym == ']') step_graph_window(+1);
+					if (show_graphs && e.sym == 'r') graph_value_mode = !graph_value_mode;
+					if (e.sym == 'o') {
+						auto_observer = !auto_observer;
+						observer_has_target = false;
+						observer_last_frame = -1;
+						observer_manual_until = {};
+					}
 					if (show_graphs && e.sym == '[') step_graph_window(-1);
 					if (e.sym == '\t') {
 						bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
@@ -3012,10 +3273,12 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 
+		observer_step(now, screen_pos != camera_before_input);
 		if (screen_pos.y + view_height > game_st.map_height) screen_pos.y = game_st.map_height - view_height;
 		if (screen_pos.y < 0) screen_pos.y = 0;
 		if (screen_pos.x + view_width > game_st.map_width) screen_pos.x = game_st.map_width - view_width;
 		if (screen_pos.x < 0) screen_pos.x = 0;
+		observer_last_screen_pos = screen_pos;
 
 		uint8_t* data = (uint8_t*)indexed_surface->lock();
 		draw_tiles(data, indexed_surface->pitch);
@@ -3133,6 +3396,10 @@ struct ui_functions: ui_util_functions {
 	void reset() {
 		apm = {};
 		graph_samples.clear();
+		unit_deaths.clear();
+		observer_damage.clear();
+		observer_last_frame = -1;
+		observer_has_target = false;
 		replay_frame = 0;
 		auto& game = *st.game;
 		st = state();

@@ -13,10 +13,16 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   Drag-select to get a grid of health-coloured wireframes. As in Brood War, a box that
   catches units leaves buildings out.
 - **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute, a
-  15-second moving average), supply, army supply and worker supply over game time.
+  15-second moving average), supply, army supply, workers and units lost over game time.
+  `r` switches supply, army and losses between supply and resource value (minerals + gas,
+  with Zergling/Scourge pairs, morphs and Archons valued correctly).
   Zoom the time axis from the whole game down to the last 15 s with `[` / `]` or the
   mouse wheel over the panel. It covers the part of the game simulated so far, so seek to
   the end to see the whole game.
+- **Auto observer** (`o`): the camera goes where the action is. It scores recent
+  damage, plus army supply where two sides' armies meet. It follows the current fight,
+  cuts to a clearly bigger one, and steps back for a few seconds when you move the
+  camera yourself.
 - **Replay bar** in the bottom-right corner: game timer, speed or pause state, and a seek bar.
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls.
 - **Sound** through SDL2_mixer, when it is installed.
@@ -59,7 +65,9 @@ cmake --build build -j
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | `h` | toggle the stats overlay |
 | `i` | toggle the selection panel |
-| `g` / `esc` | toggle / close the graphs; `tab` or `1`-`4` (or click a tab) to switch |
+| `g` / `esc` | toggle / close the graphs; `tab` or `1`-`5` (or click a tab) to switch |
+| `r` | graphs: supply or resource value |
+| `o` | auto observer on / off |
 | `[` / `]`, or the wheel over the graphs | zoom the graphs' time axis out / in |
 | `shift tab` | two-colour mode: the two players in red and teal (again to restore) |
 | `m` | mute |

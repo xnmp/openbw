@@ -2391,8 +2391,9 @@ struct ui_functions: ui_util_functions {
 	// ---- Graph panel ('g'): income and supply over game time ----
 	// Sampled once per game second as frames are simulated (playback, seeking and rewinds all
 	// pass through record_graph_sample), so the graphs cover the part of the game simulated
-	// so far; the x axis always spans the whole replay. Income is resources gathered over
-	// the trailing game minute, per minute.
+	// so far. The x axis spans the whole replay, or with time zoom ([ ] or the mouse wheel
+	// over the panel) only the last N game seconds up to the current frame. Income is the
+	// resources gathered over the trailing 15 game seconds, expressed per minute.
 	struct graph_player_sample {
 		int minerals_gathered = 0, gas_gathered = 0, supply = 0, army = 0, workers = 0;
 	};
@@ -2404,6 +2405,16 @@ struct ui_functions: ui_util_functions {
 	a_vector<graph_sample> graph_samples;
 	bool show_graphs = false;
 	int graph_tab = 0;
+	// Time zoom: index into graph_windows_s; 0 = whole game.
+	static constexpr int graph_window_count = 7;
+	int graph_window = 0;
+	static int graph_window_seconds(int index) {
+		static const int s[graph_window_count] = {0, 600, 300, 120, 60, 30, 15};
+		return s[std::max(0, std::min(graph_window_count - 1, index))];
+	}
+	void step_graph_window(int dir) {
+		graph_window = std::max(0, std::min(graph_window_count - 1, graph_window + dir));
+	}
 	static constexpr int graph_tab_count = 4;
 	std::unique_ptr<native_window_drawing::surface> graph_surface;
 	rect graph_area_window;                                // panel rect in window pixels
@@ -2435,7 +2446,7 @@ struct ui_functions: ui_util_functions {
 		const auto& p = graph_samples[i].players[player];
 		switch (tab) {
 		case 0: {
-			const size_t window = 60;  // samples = one game minute
+			const size_t window = 15;  // samples: 15 game seconds
 			size_t j = i >= window ? i - window : 0;
 			while (j < i && !graph_samples[j].valid) ++j;
 			if (j == i) return 0;
@@ -2502,7 +2513,10 @@ struct ui_functions: ui_util_functions {
 			hud_text(buf, pitch, w, h, tx + 8, pad + 4, label, active ? 255 : 160, active ? 255 : 170, active ? 255 : 190);
 			tx += tw + 6;
 		}
-		const char* hint = "g close  tab/1-4 switch";
+		char hint[96];
+		int win_s = graph_window_seconds(graph_window);
+		if (win_s) std::snprintf(hint, sizeof(hint), "last %d:%02d  [ ] or wheel zoom   g close  tab/1-4 switch", win_s / 60, win_s % 60);
+		else std::snprintf(hint, sizeof(hint), "whole game  [ ] or wheel zoom   g close  tab/1-4 switch");
 		hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(hint) * cw, pad + 4, hint, 120, 130, 150);
 
 		auto rows = hud_rows();
@@ -2519,9 +2533,17 @@ struct ui_functions: ui_util_functions {
 		int px0 = pad + 6 * cw, py0 = ly + ch + 10;
 		int px1 = w - pad, py1 = h - pad - ch - 4;
 		int end_frame = std::max(1, replay_st.end_frame);
-		size_t n = std::min(graph_samples.size(), (size_t)end_frame / graph_sample_interval + 1);
+		// Visible frame range: whole game, or the last win_s seconds ending at the current frame.
+		int x_from = 0, x_to = end_frame;
+		if (win_s) {
+			int span = win_s * 1000 / 42;
+			x_to = std::max(span, std::min(st.current_frame, end_frame));
+			x_from = x_to - span;
+		}
+		size_t n = std::min(graph_samples.size(), (size_t)x_to / graph_sample_interval + 1);
+		size_t i_from = (size_t)x_from / graph_sample_interval;
 		double vmax = 0;
-		for (size_t i = 0; i != n; ++i) {
+		for (size_t i = i_from; i < n; ++i) {
 			if (!graph_samples[i].valid) continue;
 			for (auto& row : rows) {
 				vmax = std::max(vmax, graph_value(graph_tab, i, row.player, false));
@@ -2529,7 +2551,7 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 		vmax = nice_ceiling(vmax);
-		auto to_x = [&](int frame) { return px0 + (int)((int64_t)(px1 - px0) * frame / end_frame); };
+		auto to_x = [&](int frame) { return px0 + (int)((int64_t)(px1 - px0) * (frame - x_from) / std::max(1, x_to - x_from)); };
 		auto to_y = [&](double v) { return py1 - (int)((py1 - py0) * (v / vmax)); };
 
 		// Grid and labels
@@ -2541,16 +2563,19 @@ struct ui_functions: ui_util_functions {
 			std::snprintf(label, sizeof(label), "%d", (int)std::lround(v));
 			hud_text(buf, pitch, w, h, px0 - 6 - (int)std::strlen(label) * cw, y - ch / 2, label, 150, 160, 180);
 		}
-		int minutes = end_frame * 42 / 60000;
-		int step = std::max(1, minutes / 10);
-		if (step > 1) step = step <= 2 ? 2 : step <= 5 ? 5 : 10;
-		for (int m = 0; m <= minutes; m += step) {
-			int frame = m * 60000 / 42;
-			int x = to_x(frame);
-			fill_rgba(buf, pitch, w, h, x, py0, 1, py1 - py0, hud_rgba(40, 44, 56, 255));
-			char label[16];
-			std::snprintf(label, sizeof(label), "%d:00", m);
-			hud_text(buf, pitch, w, h, x - (int)std::strlen(label) * cw / 2, py1 + 4, label, 150, 160, 180);
+		// Time ticks: the smallest step giving at most ~10 ticks across the visible range.
+		{
+			int range_s = (x_to - x_from) * 42 / 1000;
+			int step = 600;
+			for (int c : {5, 10, 15, 30, 60, 120, 300, 600}) if (range_s / c <= 10) { step = c; break; }
+			int first = (x_from * 42 / 1000 + step - 1) / step * step;
+			for (int t = first; t * 1000 / 42 <= x_to; t += step) {
+				int x = to_x(t * 1000 / 42);
+				fill_rgba(buf, pitch, w, h, x, py0, 1, py1 - py0, hud_rgba(40, 44, 56, 255));
+				char label[16];
+				std::snprintf(label, sizeof(label), "%d:%02d", t / 60, t % 60);
+				hud_text(buf, pitch, w, h, x - (int)std::strlen(label) * cw / 2, py1 + 4, label, 150, 160, 180);
+			}
 		}
 
 		// Series
@@ -2559,7 +2584,7 @@ struct ui_functions: ui_util_functions {
 				uint32_t px = series ? hud_rgba(row.r / 2 + 30, row.g / 2 + 30, row.b / 2 + 30, 255) : hud_rgba(row.r, row.g, row.b, 255);
 				bool have_prev = false;
 				int prev_x = 0, prev_y = 0;
-				for (size_t i = 0; i != n; ++i) {
+				for (size_t i = i_from; i < n; ++i) {
 					if (!graph_samples[i].valid) { have_prev = false; continue; }
 					int x = to_x((int)i * graph_sample_interval);
 					int y = to_y(graph_value(graph_tab, i, row.player, series == 1));
@@ -2800,6 +2825,10 @@ struct ui_functions: ui_util_functions {
 		if (wnd) {
 			native_window::event_t e;
 			while (wnd.peek_message(e)) {
+				if (e.type == native_window::event_t::type_mouse_wheel && show_graphs && graph_area_window.from.x <= e.mouse_x && e.mouse_x < graph_area_window.to.x && graph_area_window.from.y <= e.mouse_y && e.mouse_y < graph_area_window.to.y) {
+					step_graph_window(e.wheel_y > 0 ? +1 : -1);
+					continue;
+				}
 				if (e.type == native_window::event_t::type_mouse_wheel) {
 					// mouse_x/y are window pixels here (the anchor), not logical ones.
 					step_zoom(e.wheel_y > 0 ? +1 : -1, std::max(0, std::min(viewport_w - 1, e.mouse_x - viewport_x)), e.mouse_y);
@@ -2884,6 +2913,9 @@ struct ui_functions: ui_util_functions {
 					if (e.sym == 'h') show_hud = !show_hud;
 					if (e.sym == 'i') show_selection_panel = !show_selection_panel;
 					if (e.sym == 'g') show_graphs = !show_graphs;
+					if (e.sym == 27 && show_graphs) show_graphs = false;  // Esc
+					if (show_graphs && e.sym == ']') step_graph_window(+1);
+					if (show_graphs && e.sym == '[') step_graph_window(-1);
 					if (e.sym == '\t') {
 						bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
 						if (shift) two_colour_mode = !two_colour_mode;
@@ -2899,7 +2931,7 @@ struct ui_functions: ui_util_functions {
 					if (e.sym == 'a' || e.sym == 'u') step_speed(true);
 					if (e.sym == 'z' || e.sym == 'd') step_speed(false);
 					if (e.sym == '\b') {
-						int t = 5 * 42 / 1000;
+						int t = 5 * 1000 / 42;  // 5 game seconds at 42 ms per frame
 						if (replay_frame < t) replay_frame = 0;
 						else replay_frame -= t;
 					}

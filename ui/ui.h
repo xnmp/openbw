@@ -1399,41 +1399,34 @@ struct ui_functions: ui_util_functions {
 
 	int replay_frame = 0;
 
+	// The replay bar lives in window pixels (drawn crisp after scaling, see draw_replay_bar);
+	// this is its bottom-right placement there.
+	rect replay_bar_window_rect() const {
+		int w = std::max(160, std::min(440, viewport_w / 3));
+		int h = 14;
+		int x1 = viewport_x + viewport_w - 16, y1 = window_height - 14;
+		return rect{{x1 - w, y1 - h}, {x1, y1}};
+	}
+
+	// Same rect in logical (pre-zoom) coordinates, for mouse hit tests.
 	rect get_replay_slider_area() {
 #ifdef EMSCRIPTEN
 		return {};
 #endif
-		rect r;
-		int width = 192;
-		int height = 32;
-		r.from.x = (int)screen_width - 8 - width;
-		r.from.y = (int)screen_height - 8 - 128 - height;
-		r.to.x = r.from.x + width;
-		r.to.y = r.from.y + height;
+		if (window_height <= 0 || viewport_w <= 0) return {};
+		rect r = replay_bar_window_rect();
+		r.from.x = (int)((r.from.x - viewport_x) / zoom);
+		r.to.x = (int)((r.to.x - viewport_x) / zoom);
+		r.from.y = (int)(r.from.y / zoom);
+		r.to.y = (int)(r.to.y / zoom);
 		if (r.from.x < 0 || r.from.y < 0) return {};
 		return r;
 	}
 
 	void draw_ui(uint8_t* data, size_t data_pitch) {
-		auto area = get_replay_slider_area();
-		if (area == rect{}) return;
-		if (replay_st.end_frame == 0) return;
-		fill_rectangle(data, data_pitch, area, 1);
-		line_rectangle(data, data_pitch, area, 12);
-
-		int button_w = 16;
-		int button_h = 32;
-		int ow = (area.to.x - area.from.x) - button_w;
-		int ox = replay_frame * ow / replay_st.end_frame;
-
-		if (st.current_frame != replay_frame) {
-			int cox = st.current_frame * ow / replay_st.end_frame;
-			line_rectangle(data, data_pitch, rect{area.from + xy(cox + button_w / 2, 0), area.from + xy(cox + button_w / 2 + 1, button_h)}, 50);
-		}
-
-		fill_rectangle(data, data_pitch, rect{area.from + xy(ox, 0), area.from + xy(ox, 0) + xy(button_w, button_h)}, 10);
-		line_rectangle(data, data_pitch, rect{area.from + xy(ox, 0), area.from + xy(ox, 0) + xy(button_w, button_h)}, 51);
-
+		// The replay bar is drawn crisp in window pixels by draw_replay_bar().
+		(void)data;
+		(void)data_pitch;
 	}
 
 	virtual void draw_callback(uint8_t* data, size_t data_pitch) {
@@ -1747,6 +1740,7 @@ struct ui_functions: ui_util_functions {
 
 	struct hud_row {
 		a_string name;
+		int player = 0;
 		int race = 0;
 		int minerals = 0, gas = 0, supply = 0, supply_max = 0, army = 0, workers = 0;
 		int r = 255, g = 255, b = 255;
@@ -1762,6 +1756,7 @@ struct ui_functions: ui_util_functions {
 			hud_row row;
 			row.name = replay_st.player_name[i].empty() ? a_string("Player ") + std::to_string(i + 1).c_str() : replay_st.player_name[i];
 			row.race = race;
+			row.player = i;
 			row.minerals = st.current_minerals[i];
 			row.gas = st.current_gas[i];
 			int used = (int)st.supply_used[i][race].raw_value;
@@ -1822,8 +1817,8 @@ struct ui_functions: ui_util_functions {
 	// One selected unit: its large wireframe (unit/wirefram/wirefram.grp) beside its stats.
 	// Several: a grid of small wireframes (grpwire.grp). Drawn crisp after zoom scaling,
 	// bottom-centre of the game view. Wireframe pixels are palette *roles*, not colours:
-	// 208-211 (Zerg: 216-219) are four hull sections and 192/193 the outline, which carries
-	// the shield state on shielded units. The section damage colouring approximates Brood
+	// 208-211 are four hull sections and 192/193 the outline, which carries the shield state
+	// on shielded units; Zerg wireframes instead use 216-219 as a shading ramp. The section damage colouring approximates Brood
 	// War's: each section steps green -> yellow -> red as hp falls, in an order fixed per
 	// unit by its wireframe_randomizer.
 	bool show_selection_panel = true;
@@ -1915,7 +1910,14 @@ struct ui_functions: ui_util_functions {
 
 	wire_rgb wire_pixel_rgb(int index, const unit_vitals& v) const {
 		if (index >= 208 && index <= 211) return wire_section_rgb(wire_section_state(index - 208, v.hp, v.randomizer));
-		if (index >= 216 && index <= 219) return wire_section_rgb(wire_section_state(index - 216, v.hp, v.randomizer));
+		if (index >= 216 && index <= 219) {
+			// Zerg (and resource) wireframes are shaded silhouettes, not sections: 216..219 is a
+			// dark-to-bright ramp, tinted by overall health.
+			static const int shade[4] = {40, 58, 78, 100};
+			auto c = wire_section_rgb(overall_state(v.hp));
+			int k = shade[index - 216];
+			return {c.r * k / 100, c.g * k / 100, c.b * k / 100};
+		}
 		if (index == 192 || index == 193) {
 			if (v.has_shields) {
 				// Outline as the shield bar: bright blue full, dim blue partial, grey when down.
@@ -2090,9 +2092,11 @@ struct ui_functions: ui_util_functions {
 		}
 
 		if (u->owner != 11 && !ut_resource(u) && u_completed(u)) {
+			// Buildings point at upgrade 60, an unnamed placeholder whose icon index (0) is the
+			// Marine portrait; the game shows no armor icon for them, so skip unnamed upgrades.
 			auto level_icon = [&](UpgradeTypes upg, int fallback_icon) {
 				int icon = fallback_icon;
-				if ((int)upg >= 0 && (int)upg < (int)UpgradeTypes::None) icon = get_upgrade_type(upg)->icon;
+				if ((int)upg >= 0 && (int)upg < (int)UpgradeTypes::None && get_upgrade_type(upg)->label) icon = get_upgrade_type(upg)->icon;
 				int level = player_upgrade_level(u->owner, upg);
 				return console_icon{icon, level > 0 ? level : -1};
 			};
@@ -2341,8 +2345,217 @@ struct ui_functions: ui_util_functions {
 		return true;
 	}
 
-	// ---- Replay speed indicator, drawn crisp just above the progress bar ----
-	std::unique_ptr<native_window_drawing::surface> speed_surface;
+	// ---- Graph panel ('g'): income and supply over game time ----
+	// Sampled once per game second as frames are simulated (playback, seeking and rewinds all
+	// pass through record_graph_sample), so the graphs cover the part of the game simulated
+	// so far; the x axis always spans the whole replay. Income is resources gathered over
+	// the trailing game minute, per minute.
+	struct graph_player_sample {
+		int minerals_gathered = 0, gas_gathered = 0, supply = 0, army = 0, workers = 0;
+	};
+	struct graph_sample {
+		bool valid = false;
+		std::array<graph_player_sample, 8> players;
+	};
+	static constexpr int graph_sample_interval = 24;  // frames; ~1 game second at Fastest
+	a_vector<graph_sample> graph_samples;
+	bool show_graphs = false;
+	int graph_tab = 0;
+	static constexpr int graph_tab_count = 4;
+	std::unique_ptr<native_window_drawing::surface> graph_surface;
+	rect graph_area_window;                                // panel rect in window pixels
+	std::array<rect, graph_tab_count> graph_tab_rects{};   // tab rects, panel-relative
+
+	void record_graph_sample() {
+		if (st.current_frame % graph_sample_interval != 0) return;
+		size_t index = (size_t)st.current_frame / graph_sample_interval;
+		if (graph_samples.size() <= index) graph_samples.resize(index + 1);
+		graph_sample& s = graph_samples[index];
+		s.valid = true;
+		for (auto& row : hud_rows()) {
+			auto& p = s.players[row.player];
+			p.minerals_gathered = st.total_minerals_gathered[row.player];
+			p.gas_gathered = st.total_gas_gathered[row.player];
+			p.supply = row.supply;
+			p.army = row.army;
+			p.workers = row.workers;
+		}
+	}
+
+	static const char* graph_tab_name(int tab) {
+		static const char* names[graph_tab_count] = {"Income", "Supply", "Army supply", "Worker supply"};
+		return names[tab];
+	}
+
+	// Value plotted for one player at sample index i (the second series is gas income).
+	double graph_value(int tab, size_t i, int player, bool gas) const {
+		const auto& p = graph_samples[i].players[player];
+		switch (tab) {
+		case 0: {
+			const size_t window = 60;  // samples = one game minute
+			size_t j = i >= window ? i - window : 0;
+			while (j < i && !graph_samples[j].valid) ++j;
+			if (j == i) return 0;
+			const auto& q = graph_samples[j].players[player];
+			double delta = gas ? p.gas_gathered - q.gas_gathered : p.minerals_gathered - q.minerals_gathered;
+			return delta * 60.0 / (double)(i - j);
+		}
+		case 1: return p.supply;
+		case 2: return p.army;
+		default: return p.workers;
+		}
+	}
+
+	static double nice_ceiling(double v) {
+		if (v <= 10) return 10;
+		double mag = std::pow(10.0, std::floor(std::log10(v)));
+		for (double m : {1.0, 2.0, 2.5, 5.0, 10.0}) if (m * mag >= v) return m * mag;
+		return 10 * mag;
+	}
+
+	void graph_line(uint32_t* buf, size_t pitch, int w, int h, int x0, int y0, int x1, int y1, uint32_t px, int thickness) {
+		int dx = std::abs(x1 - x0), dy = -std::abs(y1 - y0);
+		int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx + dy;
+		for (;;) {
+			for (int ty = 0; ty != thickness; ++ty) for (int tx = 0; tx != thickness; ++tx) {
+				int X = x0 + tx, Y = y0 + ty;
+				if (X >= 0 && X < w && Y >= 0 && Y < h) buf[(size_t)Y * pitch + X] = px;
+			}
+			if (x0 == x1 && y0 == y1) break;
+			int e2 = 2 * err;
+			if (e2 >= dy) { err += dy; x0 += sx; }
+			if (e2 <= dx) { err += dx; y0 += sy; }
+		}
+	}
+
+	static a_string format_game_time(int frame) {
+		int secs = (int)(frame * 42 / 1000);
+		char buf[16];
+		std::snprintf(buf, sizeof(buf), "%d:%02d", secs / 60, secs % 60);
+		return buf;
+	}
+
+	void draw_graph_panel() {
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 12;
+		int w = std::max(320, std::min(viewport_w - 80, 1400));
+		int h = std::max(240, std::min(window_height * 3 / 5, 700));
+		if (!graph_surface || graph_surface->w != w || graph_surface->h != h) {
+			graph_surface = native_window_drawing::create_rgba_surface(w, h);
+			graph_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)graph_surface->lock();
+		size_t pitch = graph_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(8, 10, 16, 215));
+
+		// Tabs
+		int tx = pad;
+		for (int t = 0; t != graph_tab_count; ++t) {
+			char label[48];
+			std::snprintf(label, sizeof(label), "%d %s", t + 1, graph_tab_name(t));
+			int tw = (int)std::strlen(label) * cw + 16;
+			graph_tab_rects[t] = rect{{tx, pad}, {tx + tw, pad + ch + 8}};
+			bool active = t == graph_tab;
+			fill_rgba(buf, pitch, w, h, tx, pad, tw, ch + 8, active ? hud_rgba(60, 70, 100, 255) : hud_rgba(28, 32, 44, 255));
+			hud_text(buf, pitch, w, h, tx + 8, pad + 4, label, active ? 255 : 160, active ? 255 : 170, active ? 255 : 190);
+			tx += tw + 6;
+		}
+		const char* hint = "g close  tab/1-4 switch";
+		hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(hint) * cw, pad + 4, hint, 120, 130, 150);
+
+		auto rows = hud_rows();
+		// Legend
+		int ly = pad + ch + 16, lx = pad;
+		for (auto& row : rows) {
+			fill_rgba(buf, pitch, w, h, lx, ly + 6, 14, 4, hud_rgba(row.r, row.g, row.b, 255));
+			hud_text(buf, pitch, w, h, lx + 20, ly, row.name.c_str(), row.r, row.g, row.b);
+			lx += 20 + ((int)row.name.size() + 3) * cw;
+		}
+		if (graph_tab == 0) hud_text(buf, pitch, w, h, lx, ly, "solid: minerals/min  faint: gas/min", 150, 160, 180);
+
+		// Plot area
+		int px0 = pad + 6 * cw, py0 = ly + ch + 10;
+		int px1 = w - pad, py1 = h - pad - ch - 4;
+		int end_frame = std::max(1, replay_st.end_frame);
+		size_t n = std::min(graph_samples.size(), (size_t)end_frame / graph_sample_interval + 1);
+		double vmax = 0;
+		for (size_t i = 0; i != n; ++i) {
+			if (!graph_samples[i].valid) continue;
+			for (auto& row : rows) {
+				vmax = std::max(vmax, graph_value(graph_tab, i, row.player, false));
+				if (graph_tab == 0) vmax = std::max(vmax, graph_value(graph_tab, i, row.player, true));
+			}
+		}
+		vmax = nice_ceiling(vmax);
+		auto to_x = [&](int frame) { return px0 + (int)((int64_t)(px1 - px0) * frame / end_frame); };
+		auto to_y = [&](double v) { return py1 - (int)((py1 - py0) * (v / vmax)); };
+
+		// Grid and labels
+		for (int k = 0; k <= 4; ++k) {
+			double v = vmax * k / 4;
+			int y = to_y(v);
+			fill_rgba(buf, pitch, w, h, px0, y, px1 - px0, 1, hud_rgba(60, 66, 80, 255));
+			char label[16];
+			std::snprintf(label, sizeof(label), "%d", (int)std::lround(v));
+			hud_text(buf, pitch, w, h, px0 - 6 - (int)std::strlen(label) * cw, y - ch / 2, label, 150, 160, 180);
+		}
+		int minutes = end_frame * 42 / 60000;
+		int step = std::max(1, minutes / 10);
+		if (step > 1) step = step <= 2 ? 2 : step <= 5 ? 5 : 10;
+		for (int m = 0; m <= minutes; m += step) {
+			int frame = m * 60000 / 42;
+			int x = to_x(frame);
+			fill_rgba(buf, pitch, w, h, x, py0, 1, py1 - py0, hud_rgba(40, 44, 56, 255));
+			char label[16];
+			std::snprintf(label, sizeof(label), "%d:00", m);
+			hud_text(buf, pitch, w, h, x - (int)std::strlen(label) * cw / 2, py1 + 4, label, 150, 160, 180);
+		}
+
+		// Series
+		for (int series = graph_tab == 0 ? 1 : 0; series >= 0; --series) {
+			for (auto& row : rows) {
+				uint32_t px = series ? hud_rgba(row.r / 2 + 30, row.g / 2 + 30, row.b / 2 + 30, 255) : hud_rgba(row.r, row.g, row.b, 255);
+				bool have_prev = false;
+				int prev_x = 0, prev_y = 0;
+				for (size_t i = 0; i != n; ++i) {
+					if (!graph_samples[i].valid) { have_prev = false; continue; }
+					int x = to_x((int)i * graph_sample_interval);
+					int y = to_y(graph_value(graph_tab, i, row.player, series == 1));
+					if (have_prev) graph_line(buf, pitch, w, h, prev_x, prev_y, x, y, px, 2);
+					prev_x = x; prev_y = y; have_prev = true;
+				}
+			}
+		}
+
+		// Current position
+		int cx = to_x(std::min(st.current_frame, end_frame));
+		fill_rgba(buf, pitch, w, h, cx, py0, 1, py1 - py0, hud_rgba(255, 255, 255, 160));
+		a_string now = format_game_time(st.current_frame);
+		hud_text(buf, pitch, w, h, std::min(cx + 4, px1 - (int)now.size() * cw), py0, now.c_str(), 255, 255, 255);
+
+		graph_surface->unlock();
+		int gx = viewport_x + (viewport_w - w) / 2;
+		int gy = std::max(8, (window_height - h) / 2 - 40);
+		graph_area_window = rect{{gx, gy}, {gx + w, gy + h}};
+		graph_surface->blit(&*window_surface, gx, gy);
+	}
+
+	// Window-pixel click on the panel: switches tab; returns true if the click was inside.
+	bool graph_panel_click(int wx, int wy) {
+		if (!show_graphs) return false;
+		auto& a = graph_area_window;
+		if (wx < a.from.x || wx >= a.to.x || wy < a.from.y || wy >= a.to.y) return false;
+		int x = wx - a.from.x, y = wy - a.from.y;
+		for (int t = 0; t != graph_tab_count; ++t) {
+			auto& r = graph_tab_rects[t];
+			if (x >= r.from.x && x < r.to.x && y >= r.from.y && y < r.to.y) graph_tab = t;
+		}
+		return true;
+	}
+
+	// ---- Replay bar: game timer, speed and seek bar, bottom-right, drawn crisp ----
+	// Styled after Brood War's console: black panel, olive bevelled frame, hp-bar green
+	// progress, pale yellow timer text.
+	std::unique_ptr<native_window_drawing::surface> replay_bar_surface;
 
 	// 1x is OpenBW's normal replay rate (42 ms per frame, Brood War's "Fastest").
 	a_string speed_label() const {
@@ -2350,29 +2563,61 @@ struct ui_functions: ui_util_functions {
 		int raw = (int)game_speed.raw_value, one = (int)fp8::integer(1).raw_value;
 		if (raw >= one) std::snprintf(buf, sizeof(buf), "%dx", raw / one);
 		else std::snprintf(buf, sizeof(buf), "1/%dx", one / std::max(1, raw));
-		return is_paused ? a_string("Paused  ") + buf : a_string("Speed ") + buf;
+		return is_paused ? a_string("Paused ") + buf : a_string(buf);
 	}
 
-	void draw_speed_indicator() {
-		auto area = get_replay_slider_area();
-		if (area == rect{} || replay_st.end_frame == 0) return;
-		a_string text = speed_label();
-		const int pad = 4;
-		int w = (int)text.size() * hud_font::cell_w + pad * 2, h = hud_font::cell_h + pad;
-		if (!speed_surface || speed_surface->w != w || speed_surface->h != h) {
-			speed_surface = native_window_drawing::create_rgba_surface(w, h);
-			speed_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+	void bevel(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int rw, int rh, uint32_t light, uint32_t dark) {
+		fill_rgba(buf, pitch, w, h, x, y, rw, 1, light);
+		fill_rgba(buf, pitch, w, h, x, y, 1, rh, light);
+		fill_rgba(buf, pitch, w, h, x, y + rh - 1, rw, 1, dark);
+		fill_rgba(buf, pitch, w, h, x + rw - 1, y, 1, rh, dark);
+	}
+
+	void draw_replay_bar() {
+		if (replay_st.end_frame == 0) return;
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 8;
+		rect bar = replay_bar_window_rect();
+		int bw = bar.to.x - bar.from.x, bh = bar.to.y - bar.from.y;
+		int w = bw + pad * 2, h = ch + 6 + bh + pad * 2;
+		int ox = bar.from.x - pad, oy = bar.from.y - pad - ch - 6;
+		if (!replay_bar_surface || replay_bar_surface->w != w || replay_bar_surface->h != h) {
+			replay_bar_surface = native_window_drawing::create_rgba_surface(w, h);
+			replay_bar_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
 		}
-		uint32_t* buf = (uint32_t*)speed_surface->lock();
-		size_t pitch = speed_surface->pitch / 4;
-		for (int y = 0; y != h; ++y) for (int x = 0; x != w; ++x) buf[(size_t)y * pitch + x] = hud_rgba(8, 10, 16, 175);
-		if (is_paused) hud_text(buf, pitch, w, h, pad, pad / 2, text.c_str(), 255, 200, 90);
-		else hud_text(buf, pitch, w, h, pad, pad / 2, text.c_str(), 235, 235, 235);
-		speed_surface->unlock();
-		// Slider is in logical (pre-zoom) coordinates; right-align above it in window pixels.
-		int right = viewport_x + (int)(area.to.x * zoom);
-		int top = (int)(area.from.y * zoom);
-		speed_surface->blit(&*window_surface, std::max(viewport_x, right - w), std::max(0, top - h - 4));
+		uint32_t* buf = (uint32_t*)replay_bar_surface->lock();
+		size_t pitch = replay_bar_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 215));
+		bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
+		bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
+
+		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(replay_st.end_frame);
+		hud_text(buf, pitch, w, h, pad, pad - 2, timer.c_str(), 248, 240, 170);
+		a_string speed = speed_label();
+		if (is_paused) hud_text(buf, pitch, w, h, w - pad - (int)speed.size() * cw, pad - 2, speed.c_str(), 255, 190, 70);
+		else hud_text(buf, pitch, w, h, w - pad - (int)speed.size() * cw, pad - 2, speed.c_str(), 150, 230, 110);
+
+		// Track, inset
+		int tx = pad, ty = pad + ch + 4;
+		fill_rgba(buf, pitch, w, h, tx, ty, bw, bh, hud_rgba(14, 18, 12, 255));
+		bevel(buf, pitch, w, h, tx, ty, bw, bh, hud_rgba(24, 28, 18, 255), hud_rgba(96, 108, 70, 255));
+		auto frame_x = [&](int frame) { return tx + 1 + (int)((int64_t)(bw - 2) * std::max(0, std::min(frame, replay_st.end_frame)) / replay_st.end_frame); };
+		int fx = frame_x(st.current_frame);
+		for (int y = ty + 1; y < ty + bh - 1; ++y) {
+			// vertical gradient like the in-game hp bars
+			int k = (y - ty) * 255 / std::max(1, bh);
+			int g = 230 - k * 110 / 255, r = 40 - k * 24 / 255;
+			fill_rgba(buf, pitch, w, h, tx + 1, y, fx - tx - 1, 1, hud_rgba(r, g, r, 255));
+		}
+		if (replay_frame != st.current_frame) {  // seek target while catching up
+			int sx = frame_x(replay_frame);
+			fill_rgba(buf, pitch, w, h, sx, ty - 2, 1, bh + 4, hud_rgba(248, 240, 170, 255));
+		}
+		// Thumb
+		fill_rgba(buf, pitch, w, h, fx - 2, ty - 3, 5, bh + 6, hud_rgba(20, 24, 16, 255));
+		fill_rgba(buf, pitch, w, h, fx - 1, ty - 2, 3, bh + 4, hud_rgba(236, 244, 214, 255));
+
+		replay_bar_surface->unlock();
+		replay_bar_surface->blit(&*window_surface, ox, oy);
 	}
 
 	a_vector<unit_id> current_selection;
@@ -2445,18 +2690,14 @@ struct ui_functions: ui_util_functions {
 
 		auto move_replay_slider = [&](int mouse_x, int mouse_y) {
 			(void)mouse_y;
-			int x = mouse_x - replay_slider_area.from.x;
-			int button_w = 16;
-			x -= button_w / 2;
-			int ow = (replay_slider_area.to.x - replay_slider_area.from.x) - button_w;
-			if (x < 0) x = 0;
-			if (x >= ow) x = ow - 1;
-			replay_frame = x * replay_st.end_frame / ow;
+			int ow = std::max(1, replay_slider_area.to.x - replay_slider_area.from.x);
+			int x = std::max(0, std::min(ow, mouse_x - replay_slider_area.from.x));
+			replay_frame = (int)((int64_t)x * replay_st.end_frame / ow);
 		};
 
 		auto check_move_replay_slider = [&](auto& e) {
 			if (e.mouse_x >= replay_slider_area.from.x && e.mouse_x < replay_slider_area.to.x) {
-				if (e.mouse_y >= replay_slider_area.from.y && e.mouse_y < replay_slider_area.to.y) {
+				if (e.mouse_y >= replay_slider_area.from.y - 4 && e.mouse_y < replay_slider_area.to.y + 4) {
 					is_moving_replay_slider = true;
 					move_replay_slider(e.mouse_x, e.mouse_y);
 				}
@@ -2528,6 +2769,7 @@ struct ui_functions: ui_util_functions {
 					step_zoom(e.wheel_y > 0 ? +1 : -1, std::max(0, std::min(viewport_w - 1, e.mouse_x - viewport_x)), e.mouse_y);
 					continue;
 				}
+				if (e.type == native_window::event_t::type_mouse_button_down && graph_panel_click(e.mouse_x, e.mouse_y)) continue;
 				if (zoom != 1.0 || viewport_x != 0) {
 					e.mouse_x = (int)((e.mouse_x - viewport_x) / zoom);
 					e.mouse_y = (int)(e.mouse_y / zoom);
@@ -2605,6 +2847,9 @@ struct ui_functions: ui_util_functions {
 					}
 					if (e.sym == 'h') show_hud = !show_hud;
 					if (e.sym == 'i') show_selection_panel = !show_selection_panel;
+					if (e.sym == 'g') show_graphs = !show_graphs;
+					if (show_graphs && e.sym == '\t') graph_tab = (graph_tab + 1) % graph_tab_count;
+					if (show_graphs && e.sym >= '1' && e.sym < '1' + graph_tab_count) graph_tab = e.sym - '1';
 					if (e.sym == 'm') {
 						if (global_volume) {
 							unmuted_volume = global_volume;
@@ -2740,7 +2985,8 @@ struct ui_functions: ui_util_functions {
 				draw_hud();
 				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + 8, 8);
 			}
-			if (draw_ui_elements) draw_speed_indicator();
+			if (draw_ui_elements) draw_replay_bar();
+			if (show_graphs) draw_graph_panel();
 			if (show_selection_panel && draw_selection_panel()) {
 				int px = viewport_x + (viewport_w - panel_surface->w) / 2;
 				int py = window_surface->h - panel_surface->h - 8;
@@ -2814,6 +3060,7 @@ struct ui_functions: ui_util_functions {
 
 	void reset() {
 		apm = {};
+		graph_samples.clear();
 		replay_frame = 0;
 		auto& game = *st.game;
 		st = state();

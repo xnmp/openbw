@@ -102,6 +102,7 @@ struct main_t {
 			}
 			ui.replay_functions::next_frame();
 			for (auto& v : ui.apm) v.update(ui.st.current_frame);
+			ui.record_graph_sample();
 		};
 
 		if (!ui.is_done() || ui.st.current_frame != ui.replay_frame) {
@@ -656,7 +657,17 @@ int main(int argc, char** argv) {
 #endif
 
 	auto& wnd = ui.wnd;
-	wnd.create("test", 0, 0, screen_width, screen_height);
+#ifndef EMSCRIPTEN
+	a_string title = "OpenBW";
+	if (argc > 1) {
+		a_string path = argv[1];
+		auto slash = path.find_last_of("/\\");
+		title += " - " + (slash == a_string::npos ? path : path.substr(slash + 1));
+	}
+	wnd.create(title.c_str(), 0, 0, screen_width, screen_height);
+#else
+	wnd.create("OpenBW", 0, 0, screen_width, screen_height);
+#endif
 
 	ui.resize(screen_width, screen_height);
 	ui.screen_pos = {(int)ui.game_st.map_width / 2 - (int)screen_width / 2, (int)ui.game_st.map_height / 2 - (int)screen_height / 2};

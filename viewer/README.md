@@ -12,7 +12,11 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   show resources left, supply buildings show supply totals, and transports show their cargo.
   Drag-select to get a grid of health-coloured wireframes. As in Brood War, a box that
   catches units leaves buildings out.
-- **Zoom** from the keyboard or mouse wheel, and **speed** controls. The current speed (or Paused) shows above the progress bar.
+- **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute over
+  the trailing game minute), supply, army supply and worker supply over game time. It
+  covers the part of the game simulated so far, so seek to the end to fill it in.
+- **Replay bar** in the bottom-right corner: game timer, speed or pause state, and a seek bar.
+- **Zoom** from the keyboard or mouse wheel, and **speed** controls.
 - **Sound** through SDL2_mixer, when it is installed.
 - **Edge panning**, and a game view capped at **16:9**, with black bars on ultrawide windows.
 
@@ -49,10 +53,11 @@ cmake --build build -j
 | mouse wheel | zoom around the cursor |
 | arrows, or the mouse at a window edge | scroll |
 | `backspace` | rewind about 5 s |
-| click the progress bar | seek |
+| click or drag the replay bar | seek |
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | `h` | toggle the stats overlay |
 | `i` | toggle the selection panel |
+| `g` | toggle the graphs; `tab` or `1`-`4` (or click a tab) to switch |
 | `m` | mute |
 
 Playback starts at 1×, so press `=` a few times.

@@ -11,10 +11,13 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   and research, upgrade, add-on or construction progress bars. Mineral fields and geysers
   show resources left, supply buildings show supply totals, and transports show their cargo.
   Drag-select to get a grid of health-coloured wireframes. As in Brood War, a box that
-  catches units leaves buildings out.
+  catches units leaves buildings out. Click a wireframe in the grid to select just that unit,
+  `shift`-click to drop it, `ctrl`-click to keep only units of its type.
 - **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute, a
   smoothed over about 15 s), supply, army supply, workers and units lost over game time.
-  `d` switches to the first derivative (change per minute).
+  `d` switches to the first derivative (change per minute). `f` plots the first player
+  minus the second, coloured by whoever is ahead. `m` shrinks the panel to the top-right
+  corner of the view; it keeps updating, and a click expands it again.
   `r` switches supply, army and losses between supply and resource value (minerals + gas,
   with Zergling/Scourge pairs, morphs and Archons valued correctly).
   Zoom the time axis from the whole game down to the last 15 s with `[` / `]` or the
@@ -24,6 +27,9 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   damage, plus army supply where two sides' armies meet. It follows the current fight,
   cuts to a clearly bigger one, and steps back for a few seconds when you move the
   camera yourself.
+- **Fog of war** (`f`, with the graphs closed): the combined vision of all players, drawn
+  as Brood War does (explored ground dimmed, unexplored black, soft edges), on the
+  minimap too.
 - **Replay bar** in the bottom-right corner: game timer, speed or pause state, and a seek bar.
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls.
 - **Sound** through SDL2_mixer, when it is installed.
@@ -59,22 +65,24 @@ cmake --build build -j
 | Key / mouse | Action |
 | --- | --- |
 | `space` / `p` | pause |
-| `=` / `-` (also `a` / `z`) | faster / slower, ×2 per press |
+| `=` / `-` (also `a` / `z`) | faster / slower: ×2 per press, with 1.5× between 1× and 2× |
 | `ctrl =` / `ctrl -` / `ctrl 0` | zoom in / out / reset |
 | mouse wheel | zoom around the cursor |
-| arrows, or the mouse at a window edge | scroll |
+| arrows, or the mouse at the game view's edge | scroll (with the full graph panel open, `←` / `→` switch its tabs) |
 | `backspace` | rewind about 5 s |
 | click or drag the replay bar | seek |
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
+| click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |
 | `h` | toggle the stats overlay |
 | `i` | toggle the selection panel |
 | `g` / `esc` | toggle / close the graphs; `tab` or `1`-`5` (or click a tab) to switch |
 | `r` | graphs: supply or resource value |
 | `d` | graphs: level or rate of change (with the graphs closed, `d` slows playback) |
+| `f` | graphs: players' difference or a line each (with the graphs closed, fog of war) |
 | `o` | auto observer on / off |
 | `[` / `]`, or the wheel over the graphs | zoom the graphs' time axis out / in |
 | `shift tab` | two-colour mode: the two players in red and teal (again to restore) |
-| `m` | mute |
+| `m` | graphs: minimize to the corner / restore (with the graphs closed, mute) |
 
 Playback starts at 1×, so press `=` a few times.
 

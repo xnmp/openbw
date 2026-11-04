@@ -3,6 +3,8 @@
     python metrics.py out/*.jsonl
 
 eff        damage on screen / the most one view could have caught (per 2 s window)
+cerr       damage-weighted distance of damage from the view centre, in view sizes
+           (damage within 1.5 views of the camera): how well the action is centred
 empty      share of time with no player units in view
 dmg_on     damage on screen / all damage
 fights     damage episodes >= 300 hp; missed = never on screen; lat_med = median game
@@ -35,11 +37,15 @@ def score(path):
         i = bisect.bisect_right(frames, f) - 1
         return cam_at[frames[max(i, 0)]]
     tot = on = 0.0
+    cerr = cw = 0.0  # damage-weighted distance from view centre, for damage near the view
     margin = 0  # strictly within the view
     for f, x, y, a in dmg:
         cx, cy, _ = cam(f)
         tot += a
         if cx <= x < cx + vw and cy <= y < cy + vh: on += a
+        ex, ey = (x - cx - vw / 2) / vw, (y - cy - vh / 2) / vh
+        if abs(ex) < 1.5 and abs(ey) < 1.5:
+            cerr += a * math.hypot(ex, ey); cw += a
     # fights: cluster damage into episodes (gap > 5 s game time or > 1.5 views apart)
     eps = []
     for f, x, y, a in dmg:
@@ -88,7 +94,7 @@ def score(path):
         oracle += best
     empty = sum(1 for n, na in units if n == 0) / len(units)
     short = sum(1 for s in shots if s < 2.0)
-    return dict(eff=on / oracle if oracle else 0, empty=empty, dmg_on=on / tot if tot else 0, fights=len(big), missed=missed,
+    return dict(cerr=cerr / cw if cw else 0, eff=on / oracle if oracle else 0, empty=empty, dmg_on=on / tot if tot else 0, fights=len(big), missed=missed,
                 lat_med=sorted(lat)[len(lat)//2] if lat else None,
                 cuts_pm=cuts / T * 60, short_shots=short, moving=moving / len(cams),
                 pan_px_s=pan / T, reversals_pm=rev / T * 60, T=T)
@@ -96,6 +102,6 @@ def score(path):
 if __name__ == "__main__":
     for p in sys.argv[1:]:
         r = score(p)
-        print(f"{p.split('/')[-1]:20s} eff={r['eff']:.2f} empty={r['empty']:.2f} dmg_on={r['dmg_on']:.2f} fights={r['fights']} missed={r['missed']} lat_med={r['lat_med']} "
+        print(f"{p.split('/')[-1]:20s} eff={r['eff']:.2f} cerr={r['cerr']:.2f} empty={r['empty']:.2f} dmg_on={r['dmg_on']:.2f} fights={r['fights']} missed={r['missed']} lat_med={r['lat_med']} "
               f"cuts/min={r['cuts_pm']:.1f} short<2s={r['short_shots']} moving={r['moving']:.2f} pan={r['pan_px_s']:.0f}px/s rev/min={r['reversals_pm']:.1f}")
 

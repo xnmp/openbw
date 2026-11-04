@@ -2849,14 +2849,19 @@ struct ui_functions: ui_util_functions {
 		// Smooth each window's action score over ~1 game second (restart after a seek).
 		bool restart = observer_gw != g.w || observer_gh != g.h || observer_smooth_frame < 0 ||
 			st.current_frame < observer_smooth_frame || st.current_frame - observer_smooth_frame > 240;
-		double k = restart ? 1.0 : 1.0 - std::exp(-(st.current_frame - observer_smooth_frame) / 24.0);
+		// Rises within ~1/4 game second, so a new fight registers at once; falls over ~1 s,
+		// so a lull does not drop the scene.
+		int dframes = st.current_frame - observer_smooth_frame;
+		double k_up = restart ? 1.0 : 1.0 - std::exp(-dframes / 6.0);
+		double k_down = restart ? 1.0 : 1.0 - std::exp(-dframes / 24.0);
 		if (restart) { observer_gw = g.w; observer_gh = g.h; observer_smooth_action.assign(cells, 0); }
 		observer_smooth_frame = st.current_frame;
 		a_vector<observer_interest> win(cells);
 		for (int cy = 0; cy != g.h; ++cy) for (int cx = 0; cx != g.w; ++cx) {
 			size_t i = (size_t)cy * g.w + cx;
 			win[i] = observer_window(g, cx, cy);
-			observer_smooth_action[i] += (win[i].action - observer_smooth_action[i]) * k;
+			double d = win[i].action - observer_smooth_action[i];
+			observer_smooth_action[i] += d * (d > 0 ? k_up : k_down);
 		}
 		double shot_s = observer_has_target ? std::chrono::duration<double>(now - observer_last_switch).count() : 0;
 		double best = 0, current = -1, current_action = 0, best_action = 0;
@@ -2880,10 +2885,10 @@ struct ui_functions: ui_util_functions {
 			return;
 		}
 		observer_shot_peak = std::max(observer_shot_peak, current_action);
-		// Follow the shown scene through a smoothed point.
+		// Follow the shown scene (smoothed again in real time by observer_step).
 		if (current > 0) {
-			observer_target.x += (current_centre.x - observer_target.x) * 2 / 10;
-			observer_target.y += (current_centre.y - observer_target.y) * 2 / 10;
+			observer_target.x += (current_centre.x - observer_target.x) / 2;
+			observer_target.y += (current_centre.y - observer_target.y) / 2;
 		}
 		bool elsewhere = std::abs(best_centre.x - observer_target.x) > (int)view_width / 2 || std::abs(best_centre.y - observer_target.y) > (int)view_height / 2;
 		if (elsewhere && best > current * 1.8 + 0.5) {
@@ -2894,15 +2899,17 @@ struct ui_functions: ui_util_functions {
 		} else {
 			observer_challenger_ticks = 0;
 		}
-		// A challenger must lead for 2 ticks and 1.5 game seconds (at most 0.4 s of real
+		// A challenger must lead for 2 ticks and 0.75 game seconds (at most 0.25 s of real
 		// time). Minimum shot lengths: a fight holds the camera for observer_min_shot_s, but
-		// one that has died down, or a quiet shot, gives way to a fight after 1 s; moving on
-		// from one quiet place to another waits 5 s, so a tour does not flicker.
+		// one that has died down, a quiet shot, or one dwarfed by a new fight gives way after
+		// 1-1.5 s; moving on from one quiet place to another waits 5 s, so a tour does not
+		// flicker.
 		bool over = observer_shot_peak > 4 && current_action < observer_shot_peak * 0.25;
 		bool quiet_shot = observer_shot_peak < 2;
 		bool challenger_action = best_action >= 2;
-		double min_shot = !challenger_action ? 5.0 : (over || quiet_shot) ? 1.5 : observer_min_shot_s;
-		double hold_s = std::min(0.4, 1.5 * 42.0 / 1000.0 / std::max(0.05, observer_speed()));
+		bool dwarfed = best > current * 2.5 + 2;
+		double min_shot = !challenger_action ? 5.0 : dwarfed ? 1.0 : (over || quiet_shot) ? 1.5 : observer_min_shot_s;
+		double hold_s = std::min(0.25, 0.75 * 42.0 / 1000.0 / std::max(0.05, observer_speed()));
 		bool held = observer_challenger_ticks >= 2 && std::chrono::duration<double>(now - observer_challenger_since).count() >= hold_s;
 		if (held && shot_s >= min_shot) observer_switch_to(observer_challenger, now, best_action);
 	}
@@ -2929,10 +2936,10 @@ struct ui_functions: ui_util_functions {
 		// Where the camera can actually centre (the view stays inside the map).
 		double min_cx = view_width / 2.0, max_cx = std::max(min_cx, game_st.map_width - view_width / 2.0);
 		double min_cy = view_height / 2.0, max_cy = std::max(min_cy, game_st.map_height - view_height / 2.0);
-		// Smooth the scene centre over ~1.5 game seconds, kept between 0.15 and 0.5 s of real
+		// Smooth the scene centre over ~3/4 game second, kept between 0.1 and 0.3 s of real
 		// time: steady at slow playback, still keeping up with a fight at high speed.
 		{
-			double tau = std::max(0.15, std::min(0.5, 1.5 * 42.0 / 1000.0 / std::max(0.05, observer_speed())));
+			double tau = std::max(0.1, std::min(0.3, 0.75 * 42.0 / 1000.0 / std::max(0.05, observer_speed())));
 			double k = 1.0 - std::exp(-std::max(0.0, std::min(dt, 0.25)) / tau);
 			observer_sx += (observer_target.x - observer_sx) * k;
 			observer_sy += (observer_target.y - observer_sy) * k;
@@ -2947,14 +2954,14 @@ struct ui_functions: ui_util_functions {
 			observer_vx = observer_vy = 0;
 			observer_panning = false;
 		} else {
-			// Dead zone: start moving when the target leaves the middle 40% of the view,
+			// Dead zone: start moving when the target leaves the middle 30% of the view,
 			// settle once it is back within 5% of centre.
-			bool outside = std::abs(dx) > view_width * 0.2 || std::abs(dy) > view_height * 0.2;
+			bool outside = std::abs(dx) > view_width * 0.15 || std::abs(dy) > view_height * 0.15;
 			bool centred = std::abs(dx) < view_width * 0.05 && std::abs(dy) < view_height * 0.05;
 			if (outside) observer_panning = true;
 			if (centred) observer_panning = false;
 			double t = std::max(0.0, std::min(dt, 0.1));
-			const double omega = 2.0 / 0.35;  // critically damped spring, ~0.35 s to settle
+			const double omega = 2.0 / 0.25;  // critically damped spring, ~0.25 s to settle
 			double ax = observer_panning ? omega * omega * dx : 0, ay = observer_panning ? omega * omega * dy : 0;
 			observer_vx += (ax - 2 * omega * observer_vx) * t;
 			observer_vy += (ay - 2 * omega * observer_vy) * t;

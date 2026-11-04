@@ -4,10 +4,14 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 `ui/gfxtest.cpp`, with additions for watching games:
 
 - **Stats overlay**: minerals, gas, supply, army supply and worker supply for each player.
-- **Selection panel**: click a unit to see its wireframe, owner, HP, shields, energy, armor,
-  weapons (damage, upgrades, range, cooldown), kills, current order, training, research and
-  upgrade progress, resources and status effects. Drag-select to get a grid of
-  health-coloured wireframes. As in Brood War, a box that catches units leaves buildings out.
+- **Selection panel** laid out like the in-game console. Click a unit to see its wireframe,
+  with shields, HP and energy below it. Beside the wireframe are its name, owner and kills,
+  and upgrade icons with their levels: armor, weapons, shields. Carriers, Reavers and
+  Vultures also show interceptor, scarab or mine counts. Buildings show the training queue
+  and research, upgrade, add-on or construction progress bars. Mineral fields and geysers
+  show resources left, supply buildings show supply totals, and transports show their cargo.
+  Drag-select to get a grid of health-coloured wireframes. As in Brood War, a box that
+  catches units leaves buildings out.
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls. The current speed (or Paused) shows above the progress bar.
 - **Sound** through SDL2_mixer, when it is installed.
 - **Edge panning**, and a game view capped at **16:9**, with black bars on ultrawide windows.

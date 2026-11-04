@@ -1830,6 +1830,8 @@ struct ui_functions: ui_util_functions {
 	bool selection_panel_data_loaded = false;
 	grp_t wireframe_grp, group_wireframe_grp;
 	a_vector<bool> group_wireframe_valid;  // grpwire.grp frames for buildings etc. are "BLANK" art
+	grp_t cmdicons_grp;
+	std::array<uint8_t, 16> ticon_remap{};
 	string_table_data stat_txt;
 	std::unique_ptr<native_window_drawing::surface> panel_surface;
 
@@ -1843,6 +1845,12 @@ struct ui_functions: ui_util_functions {
 			group_wireframe_valid.clear();
 			for (auto& f : group_wireframe_grp.frames) group_wireframe_valid.push_back(frame_has_wireframe_roles(f));
 			load_data_file(stat_txt.data, "rez/stat_txt.tbl");
+			load_data_file(data, "unit/cmdbtns/cmdicons.grp");
+			cmdicons_grp = read_grp(data_loading::data_reader_le(data.data(), data.data() + data.size()));
+			load_data_file(data, "unit/cmdbtns/ticon.pcx");
+			auto ticon = load_pcx_data(data);
+			if (ticon.data.size() < 16) error("ticon.pcx too small");
+			std::copy(ticon.data.begin(), ticon.data.begin() + 16, ticon_remap.begin());
 			selection_panel_data_loaded = true;
 		} catch (const std::exception& e) {
 			ui::log("selection panel disabled: %s\n", e.what());
@@ -2004,121 +2012,181 @@ struct ui_functions: ui_util_functions {
 		return {tileset_img.wpe[4 * ci + 0], tileset_img.wpe[4 * ci + 1], tileset_img.wpe[4 * ci + 2]};
 	}
 
+	// ---- Single-unit console, laid out like Brood War's own status panel ----
+	// Under the wireframe: shields, hp, energy. Beside it: name, owner, kills, resource or
+	// supply text, then status icons from unit/cmdbtns/cmdicons.grp: armor, weapons and
+	// shields carry their upgrade level, interceptors/scarabs/mines their count. Below
+	// those, any training queue, research, upgrade, add-on or construction progress.
 	struct panel_line {
 		a_string text;
 		wire_rgb rgb{230, 230, 230};
 	};
+	struct console_icon {
+		int frame;          // cmdicons.grp frame
+		int number = -1;    // drawn bottom-right when >= 0
+	};
+	struct console_progress {
+		a_vector<int> frames;  // first is the item in progress; the rest are queued
+		double frac = 0;
+		a_string label;        // used when there is no icon (construction)
+	};
+	struct console_info {
+		a_vector<panel_line> vitals, lines;
+		a_vector<console_icon> icons;
+		a_vector<console_progress> progress;
+		a_vector<const unit_t*> cargo;
+	};
 
-	static int pct(int done, int total) {
+	static double progress_frac(int done, int total) {
 		if (total <= 0) return 0;
-		return std::max(0, std::min(100, 100 * done / total));
+		return std::max(0.0, std::min(1.0, (double)done / total));
 	}
 
-	a_string weapon_line(const char* slot, const unit_t* u, const weapon_type_t* w, int max_hits) const {
-		int base = w->damage_amount, bonus = (int)weapon_damage_amount(w, u->owner).integer_part() - base;
-		char buf[160];
-		int hits = std::max(1, max_hits) * std::max(1, w->bullet_count);
-		std::snprintf(buf, sizeof(buf), "%s: %s  %d%s%s  rng %d  cd %d", slot, stat_text(w->label).c_str(), base,
-			bonus ? (a_string(" (+") + std::to_string(bonus).c_str() + ")").c_str() : "",
-			hits > 1 ? (a_string(" x") + std::to_string(hits).c_str()).c_str() : "",
-			weapon_max_range(u, w) / 32, w->cooldown);
-		return buf;
-	}
-
-	a_vector<panel_line> unit_panel_lines(const unit_t* u) const {
-		a_vector<panel_line> lines;
-		char buf[160];
-		auto add = [&](a_string s, wire_rgb c = {230, 230, 230}) { lines.push_back({std::move(s), c}); };
+	console_info console_info_of(const unit_t* u) const {
+		console_info ci;
+		char buf[96];
 		const unit_type_t* ut = u->unit_type;
-		add(stat_text((int)ut->id + 1), {255, 255, 255});
-		add(player_label(u->owner), player_rgb(u->owner));
 		auto v = vitals_of(u);
-		std::snprintf(buf, sizeof(buf), "HP %d/%d", (int)u->hp.ceil().integer_part(), (int)ut->hitpoints.integer_part());
-		add(buf, wire_section_rgb(overall_state(v.hp)));
 		if (v.has_shields) {
-			std::snprintf(buf, sizeof(buf), "Shields %d/%d  (armor %d)", (int)u->shield_points.integer_part(), ut->shield_points,
-				player_upgrade_level(u->owner, UpgradeTypes::Protoss_Plasma_Shields));
-			add(buf, {110, 160, 255});
+			std::snprintf(buf, sizeof(buf), "%d/%d", (int)u->shield_points.integer_part(), ut->shield_points);
+			ci.vitals.push_back({buf, {225, 225, 225}});
 		}
-		if (ut_has_energy(u)) {
-			std::snprintf(buf, sizeof(buf), "Energy %d/%d", (int)u->energy.integer_part(), (int)unit_max_energy(u).integer_part());
-			add(buf, {200, 120, 255});
+		if (!ut_resource(u) && !(ut->flags & unit_type_t::flag_invincible)) {
+			std::snprintf(buf, sizeof(buf), "%d/%d", (int)u->hp.ceil().integer_part(), (int)ut->hitpoints.integer_part());
+			ci.vitals.push_back({buf, wire_section_rgb(overall_state(v.hp))});
+		}
+		if (ut_has_energy(u) && u_completed(u)) {
+			std::snprintf(buf, sizeof(buf), "%d/%d", (int)u->energy.integer_part(), (int)unit_max_energy(u).integer_part());
+			ci.vitals.push_back({buf, {225, 225, 225}});
+		}
+
+		ci.lines.push_back({stat_text((int)ut->id + 1), {255, 255, 255}});
+		if (u->owner != 11) ci.lines.push_back({player_label(u->owner), player_rgb(u->owner)});
+		const unit_t* armed = u->subunit ? u->subunit : u;
+		bool has_weapon = unit_ground_weapon(armed) || unit_air_weapon(armed) || unit_is_carrier(u) || unit_is_reaver(u);
+		if (has_weapon && u_completed(u)) {
+			std::snprintf(buf, sizeof(buf), "Kills: %d", u->kill_count);
+			ci.lines.push_back({buf});
 		}
 		if (ut_resource(u)) {
-			std::snprintf(buf, sizeof(buf), "%s %d", unit_is_mineral_field(u) ? "Minerals" : "Gas", u->building.resource.resource_count);
-			add(buf, unit_is_mineral_field(u) ? wire_rgb{120, 200, 255} : wire_rgb{90, 230, 120});
+			bool minerals = unit_is_mineral_field(u);
+			std::snprintf(buf, sizeof(buf), "%s: %d", minerals ? "Minerals" : "Vespene Gas", u->building.resource.resource_count);
+			ci.lines.push_back({buf});
 		}
-		if (u->owner != 11 && !ut_resource(u)) {
-			int base = ut->armor, total = (int)unit_armor(u).integer_part();
-			std::snprintf(buf, sizeof(buf), total != base ? "Armor %d (+%d)" : "Armor %d", base, total - base);
-			add(buf);
+		int race = (int)st.players[u->owner < 8 ? u->owner : 0].race;
+		if (u->owner < 8 && race >= 0 && race <= 2 && u_completed(u) && ut->supply_provided.raw_value > 0 && ut_building(u)) {
+			static const char* used_fmt[3] = {"Control Used: %d", "Supplies Used: %d", "Psi Used: %d"};
+			static const char* prov_fmt[3] = {"Control Provided: %d", "Supplies Provided: %d", "Psi Provided: %d"};
+			static const char* total_fmt[3] = {"Total Control: %d", "Total Supplies: %d", "Total Psi: %d"};
+			static const char* max_fmt[3] = {"Control Max: %d", "Supplies Max: %d", "Psi Max: %d"};
+			std::snprintf(buf, sizeof(buf), used_fmt[race], ((int)st.supply_used[u->owner][race].raw_value + 1) / 2);
+			ci.lines.push_back({buf});
+			std::snprintf(buf, sizeof(buf), prov_fmt[race], (int)ut->supply_provided.raw_value / 2);
+			ci.lines.push_back({buf});
+			std::snprintf(buf, sizeof(buf), total_fmt[race], std::min((int)st.supply_available[u->owner][race].raw_value, 400) / 2);
+			ci.lines.push_back({buf});
+			std::snprintf(buf, sizeof(buf), max_fmt[race], 200);
+			ci.lines.push_back({buf});
 		}
-		const unit_t* armed = u->subunit ? u->subunit : u;
-		if (auto* w = unit_ground_weapon(armed)) add(weapon_line("Ground", u, w, armed->unit_type->max_ground_hits));
-		if (auto* w = unit_air_weapon(armed)) {
-			if (w != unit_ground_weapon(armed)) add(weapon_line("Air", u, w, armed->unit_type->max_air_hits));
-		}
-		if (unit_ground_weapon(armed) || unit_air_weapon(armed) || u->kill_count) {
-			std::snprintf(buf, sizeof(buf), "Kills %d", u->kill_count);
-			add(buf);
-		}
-		if (ut_worker(u) && u->worker.resources_carried && u->carrying_flags) {
-			std::snprintf(buf, sizeof(buf), "Carrying %d %s", u->worker.resources_carried, (u->carrying_flags & 1) ? "gas" : "minerals");
-			add(buf);
-		}
-		// Progress: construction/morph, training queue, research, upgrade.
-		if (!u_completed(u) && ut->build_time > 0) {
-			std::snprintf(buf, sizeof(buf), "Building %d%%", pct(ut->build_time - u->remaining_build_time, ut->build_time));
-			add(buf, {255, 210, 90});
-		} else if (!u->build_queue.empty() && u->build_queue.front()) {
-			const unit_type_t* q = u->build_queue.front();
-			const unit_t* b = u->current_build_unit;
-			int done = b ? q->build_time - b->remaining_build_time : 0;
-			std::snprintf(buf, sizeof(buf), "Training %s %d%%", stat_text((int)q->id + 1).c_str(), pct(done, q->build_time));
-			add(buf, {255, 210, 90});
-			if (u->build_queue.size() > 1) {
-				a_string rest = "Queue:";
-				for (size_t i = 1; i != u->build_queue.size(); ++i) rest += " " + stat_text((int)u->build_queue[i]->id + 1);
-				add(rest, {200, 180, 120});
+
+		if (u->owner != 11 && !ut_resource(u) && u_completed(u)) {
+			auto level_icon = [&](UpgradeTypes upg, int fallback_icon) {
+				int icon = fallback_icon;
+				if ((int)upg >= 0 && (int)upg < (int)UpgradeTypes::None) icon = get_upgrade_type(upg)->icon;
+				int level = player_upgrade_level(u->owner, upg);
+				return console_icon{icon, level > 0 ? level : -1};
+			};
+			ci.icons.push_back(level_icon(ut->armor_upgrade, -1));
+			auto* gw = unit_ground_weapon(armed);
+			auto* aw = unit_air_weapon(armed);
+			if (gw) ci.icons.push_back({gw->icon, player_upgrade_level(u->owner, gw->damage_upgrade) > 0 ? player_upgrade_level(u->owner, gw->damage_upgrade) : -1});
+			if (aw && aw != gw) ci.icons.push_back({aw->icon, player_upgrade_level(u->owner, aw->damage_upgrade) > 0 ? player_upgrade_level(u->owner, aw->damage_upgrade) : -1});
+			if (v.has_shields) ci.icons.push_back(level_icon(UpgradeTypes::Protoss_Plasma_Shields, -1));
+			if (unit_is_carrier(u)) ci.icons.push_back({(int)UnitTypes::Protoss_Interceptor, (int)unit_interceptor_count(u)});
+			if (unit_is_reaver(u)) ci.icons.push_back({(int)UnitTypes::Protoss_Scarab, (int)unit_scarab_count(u)});
+			if (unit_is_vulture(u) && player_has_researched(u->owner, TechTypes::Spider_Mines)) {
+				ci.icons.push_back({get_tech_type(TechTypes::Spider_Mines)->icon, (int)unit_spider_mine_count(u)});
 			}
+			ci.icons.erase(std::remove_if(ci.icons.begin(), ci.icons.end(), [](const console_icon& i) { return i.frame < 0; }), ci.icons.end());
+		}
+
+		if (!u_completed(u) && !unit_is_egg(u)) {
+			console_progress p;
+			p.label = ut_building(u) ? "Under construction" : "Morphing";
+			p.frac = progress_frac(ut->build_time - u->remaining_build_time, ut->build_time);
+			ci.progress.push_back(p);
+		} else if (!u->build_queue.empty() && u->build_queue.front()) {
+			console_progress p;
+			for (auto* q : u->build_queue) if (q) p.frames.push_back((int)q->id);
+			const unit_type_t* q = u->build_queue.front();
+			// Eggs and cocoons count down themselves; producers via the unit being built.
+			const unit_t* timer = unit_is_egg(u) ? u : u->current_build_unit;
+			p.frac = timer ? progress_frac(q->build_time - timer->remaining_build_time, q->build_time) : 0;
+			ci.progress.push_back(p);
 		}
 		if (ut_building(u) && u->building.researching_type) {
 			auto* t = u->building.researching_type;
-			std::snprintf(buf, sizeof(buf), "Researching %s %d%%", stat_text(t->label).c_str(), pct(t->research_time - u->building.upgrade_research_time, t->research_time));
-			add(buf, {255, 210, 90});
+			console_progress p;
+			p.frames.push_back(t->icon);
+			p.frac = progress_frac(t->research_time - u->building.upgrade_research_time, t->research_time);
+			ci.progress.push_back(p);
 		}
 		if (ut_building(u) && u->building.upgrading_type) {
 			auto* t = u->building.upgrading_type;
 			int total = upgrade_time_cost(u->owner, t);
-			std::snprintf(buf, sizeof(buf), "Upgrading %s %d %d%%", stat_text(t->label).c_str(), u->building.upgrading_level, pct(total - u->building.upgrade_research_time, total));
-			add(buf, {255, 210, 90});
+			console_progress p;
+			p.frames.push_back(t->icon);
+			p.frac = progress_frac(total - u->building.upgrade_research_time, total);
+			p.label = a_string("Level ") + std::to_string(u->building.upgrading_level).c_str();
+			ci.progress.push_back(p);
 		}
-		if (u->order_type && (int)u->order_type->id >= 0 && (int)u->order_type->id < order_names::count) {
-			add(a_string("Order: ") + order_names::names[(int)u->order_type->id], {170, 180, 200});
+		if (ut_building(u) && u->building.addon && !u_completed(u->building.addon)) {
+			const unit_t* a = u->building.addon;
+			console_progress p;
+			p.frames.push_back((int)a->unit_type->id);
+			p.frac = progress_frac(a->unit_type->build_time - a->remaining_build_time, a->unit_type->build_time);
+			ci.progress.push_back(p);
 		}
-		a_string status;
-		auto flag = [&](bool on, const char* name) { if (on) status += status.empty() ? name : (a_string(", ") + name).c_str(); };
-		flag(u_hallucination(u), "Hallucination");
-		flag(u_cloaked(u) || u_requires_detector(u), "Cloaked");
-		flag(u_burrowed(u), "Burrowed");
-		flag(u->stim_timer != 0, "Stimmed");
-		flag(u->defensive_matrix_timer != 0, "Matrix");
-		flag(u->ensnare_timer != 0, "Ensnared");
-		flag(u->lockdown_timer != 0, "Lockdown");
-		flag(u->irradiate_timer != 0, "Irradiated");
-		flag(u->plague_timer != 0, "Plagued");
-		flag(u->stasis_timer != 0, "Stasis");
-		flag(u->maelstrom_timer != 0, "Maelstrom");
-		flag(u->acid_spore_count != 0, "Acid spores");
-		flag(u->parasite_flags != 0, "Parasite");
-		if (!status.empty()) add(status, {255, 140, 120});
-		int cargo = 0;
-		for (auto id : u->loaded_units) if (id.raw_value && get_unit(id)) ++cargo;
-		if (cargo) {
-			std::snprintf(buf, sizeof(buf), "Cargo %d", cargo);
-			add(buf);
+		for (auto id : u->loaded_units) {
+			if (!id.raw_value) continue;
+			if (const unit_t* c = get_unit(id)) ci.cargo.push_back(c);
 		}
-		return lines;
+		return ci;
+	}
+
+	// cmdicons.grp pixels 1..15 index the first ticon.pcx remap row (the lit button look).
+	void draw_cmd_icon(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int frame, int scale) {
+		if (frame < 0 || (size_t)frame >= cmdicons_grp.frames.size() || tileset_img.wpe.size() != 256 * 4) return;
+		auto& f = cmdicons_grp.frames[frame];
+		auto put = [&](size_t fx, size_t fy, uint8_t v) {
+			if (!v) return;
+			size_t ci = ticon_remap[std::min<int>(v, 15)];
+			uint32_t px = hud_rgba(tileset_img.wpe[4 * ci], tileset_img.wpe[4 * ci + 1], tileset_img.wpe[4 * ci + 2], 255);
+			int X0 = x + (int)(f.offset.x + fx) * scale, Y0 = y + (int)(f.offset.y + fy) * scale;
+			for (int Y = Y0; Y != Y0 + scale; ++Y) for (int X = X0; X != X0 + scale; ++X) {
+				if (X >= 0 && X < w && Y >= 0 && Y < h) buf[(size_t)Y * pitch + X] = px;
+			}
+		};
+		for (size_t fy = 0; fy != f.size.y; ++fy) {
+			const uint8_t* p = f.data_container.data() + f.line_data_offset[fy];
+			for (size_t fx = 0; fx < f.size.x;) {
+				uint8_t c = *p++;
+				if (c & 0x80) {
+					fx += c & 0x7f;
+				} else if (c & 0x40) {
+					uint8_t v = *p++;
+					for (int i = 0; i != (c & 0x3f); ++i, ++fx) put(fx, fy, v);
+				} else {
+					for (int i = 0; i != c; ++i, ++fx) put(fx, fy, *p++);
+				}
+			}
+		}
+	}
+
+	void fill_rgba(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int rw, int rh, uint32_t px) {
+		for (int Y = std::max(0, y); Y < std::min(h, y + rh); ++Y) {
+			for (int X = std::max(0, x); X < std::min(w, x + rw); ++X) buf[(size_t)Y * pitch + X] = px;
+		}
 	}
 
 	void prepare_panel_surface(int w, int h) {
@@ -2126,6 +2194,105 @@ struct ui_functions: ui_util_functions {
 			panel_surface = native_window_drawing::create_rgba_surface(w, h);
 			panel_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
 		}
+	}
+
+	void draw_unit_console(const unit_t* u, int scale) {
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 8, gap = 4;
+		auto ci = console_info_of(u);
+		const int wire = 64 * scale;
+		const int icon_w = 36 * scale, icon_h = 34 * scale;
+		const int cargo_cell = 32 * scale + 4;
+		const int bar_h = 6 * scale;
+		auto text_w = [&](const a_string& s) { return (int)s.size() * cw; };
+
+		int left_w = wire;
+		for (auto& l : ci.vitals) left_w = std::max(left_w, text_w(l.text));
+		int left_h = wire + (int)ci.vitals.size() * ch;
+
+		int right_w = 0, right_h = 0;
+		for (auto& l : ci.lines) right_w = std::max(right_w, text_w(l.text));
+		right_h += (int)ci.lines.size() * ch;
+		if (!ci.icons.empty()) {
+			right_w = std::max(right_w, (int)ci.icons.size() * (icon_w + gap));
+			right_h += gap + icon_h;
+		}
+		const int bar_w_min = 5 * (icon_w + gap) - gap;
+		for (auto& p : ci.progress) {
+			int row_w = std::max(bar_w_min, (int)p.frames.size() * (icon_w + gap) - gap);
+			if (!p.label.empty()) row_w = std::max(row_w, text_w(p.label) + (p.frames.empty() ? 0 : icon_w + gap));
+			right_w = std::max(right_w, row_w);
+			right_h += gap + (p.frames.empty() ? ch : icon_h) + 2 + bar_h;
+		}
+		if (!ci.cargo.empty()) {
+			right_w = std::max(right_w, (int)ci.cargo.size() * cargo_cell);
+			right_h += gap + cargo_cell;
+		}
+
+		int w = pad * 3 + left_w + right_w;
+		int h = pad * 2 + std::max(left_h, right_h);
+		prepare_panel_surface(w, h);
+		uint32_t* buf = (uint32_t*)panel_surface->lock();
+		size_t pitch = panel_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(8, 10, 16, 190));
+
+		draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, wireframe_grp, (size_t)u->unit_type->id, scale, 1, vitals_of(u));
+		for (size_t i = 0; i != ci.vitals.size(); ++i) {
+			auto& l = ci.vitals[i];
+			hud_text(buf, pitch, w, h, pad + (left_w - text_w(l.text)) / 2, pad + wire + (int)i * ch, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
+		}
+
+		int x0 = pad * 2 + left_w, y = pad;
+		for (auto& l : ci.lines) {
+			hud_text(buf, pitch, w, h, x0, y, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
+			y += ch;
+		}
+		auto draw_number = [&](int x, int y, int n) {
+			a_string s = std::to_string(n).c_str();
+			int tx = x + icon_w - text_w(s) - 1, ty = y + icon_h - ch + 1;
+			hud_text(buf, pitch, w, h, tx + 1, ty + 1, s.c_str(), 0, 0, 0);
+			hud_text(buf, pitch, w, h, tx, ty, s.c_str(), 255, 255, 255);
+		};
+		if (!ci.icons.empty()) {
+			y += gap;
+			for (size_t i = 0; i != ci.icons.size(); ++i) {
+				int x = x0 + (int)i * (icon_w + gap);
+				fill_rgba(buf, pitch, w, h, x, y, icon_w, icon_h, hud_rgba(0, 0, 0, 255));
+				draw_cmd_icon(buf, pitch, w, h, x, y, ci.icons[i].frame, scale);
+				if (ci.icons[i].number >= 0) draw_number(x, y, ci.icons[i].number);
+			}
+			y += icon_h;
+		}
+		for (auto& p : ci.progress) {
+			y += gap;
+			int row_w = std::max(bar_w_min, (int)p.frames.size() * (icon_w + gap) - gap);
+			if (p.frames.empty()) {
+				hud_text(buf, pitch, w, h, x0, y, p.label.c_str(), 230, 230, 230);
+				y += ch;
+			} else {
+				for (size_t i = 0; i != p.frames.size(); ++i) {
+					int x = x0 + (int)i * (icon_w + gap);
+					fill_rgba(buf, pitch, w, h, x, y, icon_w, icon_h, hud_rgba(0, 0, 0, 255));
+					draw_cmd_icon(buf, pitch, w, h, x, y, p.frames[i], scale);
+				}
+				if (!p.label.empty()) hud_text(buf, pitch, w, h, x0 + icon_w + gap, y + (icon_h - ch) / 2, p.label.c_str(), 230, 230, 230);
+				y += icon_h;
+			}
+			y += 2;
+			fill_rgba(buf, pitch, w, h, x0, y, row_w, bar_h, hud_rgba(40, 44, 52, 255));
+			fill_rgba(buf, pitch, w, h, x0, y, (int)(row_w * p.frac), bar_h, hud_rgba(40, 200, 60, 255));
+			y += bar_h;
+		}
+		if (!ci.cargo.empty()) {
+			y += gap;
+			for (size_t i = 0; i != ci.cargo.size(); ++i) {
+				const unit_t* c = ci.cargo[i];
+				size_t id = (size_t)c->unit_type->id;
+				int x = x0 + (int)i * cargo_cell;
+				if (id < group_wireframe_valid.size() && group_wireframe_valid[id]) draw_wireframe(buf, pitch, w, h, x, y, group_wireframe_grp, id, scale, 1, vitals_of(c));
+				else draw_wireframe(buf, pitch, w, h, x, y, wireframe_grp, id, scale, 2, vitals_of(c));
+			}
+		}
+		panel_surface->unlock();
 	}
 
 	// Returns false when there is nothing to show. Panel scale follows window height so
@@ -2137,23 +2304,7 @@ struct ui_functions: ui_util_functions {
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 8;
 		const int scale = window_height >= 1000 ? 2 : 1;
 		if (units.size() == 1) {
-			unit_t* u = units[0];
-			auto lines = unit_panel_lines(u);
-			int wire = 64 * scale;
-			size_t text_cols = 0;
-			for (auto& l : lines) text_cols = std::max(text_cols, l.text.size());
-			int w = pad * 3 + wire + (int)text_cols * cw;
-			int h = pad * 2 + std::max(wire, (int)lines.size() * ch);
-			prepare_panel_surface(w, h);
-			uint32_t* buf = (uint32_t*)panel_surface->lock();
-			size_t pitch = panel_surface->pitch / 4;
-			for (int y = 0; y != h; ++y) for (int x = 0; x != w; ++x) buf[(size_t)y * pitch + x] = hud_rgba(8, 10, 16, 190);
-			draw_wireframe(buf, pitch, w, h, pad, pad, wireframe_grp, (size_t)u->unit_type->id, scale, 1, vitals_of(u));
-			for (size_t i = 0; i != lines.size(); ++i) {
-				auto& l = lines[i];
-				hud_text(buf, pitch, w, h, pad * 2 + wire, pad + (int)i * ch, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
-			}
-			panel_surface->unlock();
+			draw_unit_console(units[0], scale);
 			return true;
 		}
 		const int per_row = 12, max_shown = 36;

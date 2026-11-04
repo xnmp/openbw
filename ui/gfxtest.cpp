@@ -209,6 +209,12 @@ void free_memory() {
 //	return true;
 //}
 
+// The dlmalloc override and the 160MB allocation cap below exist for the
+// emscripten (web) build: dlmalloc ships with that toolchain and the cap is
+// what keeps the browser build inside its heap. A native build must use the
+// system allocator -- dlmalloc/dlfree do not exist to link against, and a
+// 160MB ceiling would be actively harmful on a 31GB desktop.
+#ifdef EMSCRIPTEN
 struct dlmalloc_chunk {
 	size_t prev_foot;
 	size_t head;
@@ -243,6 +249,7 @@ extern "C" void free(void* ptr) {
 	bytes_allocated -= alloc_size(ptr);
 	dlfree(ptr);
 }
+#endif  // EMSCRIPTEN
 
 #ifdef EMSCRIPTEN
 
@@ -608,7 +615,7 @@ extern "C" void load_replay(const uint8_t* data, size_t len) {
 
 #endif
 
-int main() {
+int main(int argc, char** argv) {
 
 	using namespace bwgame;
 
@@ -627,7 +634,7 @@ int main() {
 	}
 	auto load_data_file = data_loading::data_files_directory<data_loading::data_files_loader<data_loading::mpq_file<data_loading::js_file_reader<>>>>("");
 #else
-	auto load_data_file = data_loading::data_files_directory("");
+	auto load_data_file = data_loading::data_files_directory(argc > 2 ? argv[2] : "");
 #endif
 
 	game_player player(load_data_file);
@@ -644,7 +651,8 @@ int main() {
 	ui.init();
 
 #ifndef EMSCRIPTEN
-	ui.load_replay_file("maps/p49.rep");
+	ui.load_replay_file(argc > 1 ? argv[1] : "maps/p49.rep");
+	ui.show_hud = true;  // stats overlay on by default in the interactive player ('h' toggles)
 #endif
 
 	auto& wnd = ui.wnd;

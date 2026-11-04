@@ -15,7 +15,8 @@ namespace native_window {
 			type_resize,
 			type_mouse_button_down,
 			type_mouse_button_up,
-			type_mouse_motion
+			type_mouse_motion,
+			type_mouse_wheel
 		};
 		int type = type_none;
 		int sym = -1;
@@ -29,6 +30,7 @@ namespace native_window {
 		int mouse_xrel = -1;
 		int mouse_yrel = -1;
 		int clicks = -1;
+		int wheel_y = 0; // type_mouse_wheel: +up / -down; mouse_x/y hold the cursor
 	};
 
 	struct window {
@@ -39,6 +41,7 @@ namespace native_window {
 		void destroy();
 		bool create(const char* title, int x, int y, int width, int height);
 		void get_cursor_pos(int* x, int* y);
+		bool has_mouse_focus();
 		bool peek_message(event_t& e);
 		bool show_cursor(bool show);
 		bool get_key_state(int scancode);

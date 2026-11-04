@@ -71,6 +71,10 @@ struct window_impl {
 	void get_cursor_pos(int* x, int* y) {
 		SDL_GetMouseState(x, y);
 	}
+
+	bool has_mouse_focus() {
+		return window && SDL_GetMouseFocus() == window;
+	}
 	
 	std::array<bool, 512> key_state {};
 	std::array<bool, 6> mouse_button_state {};
@@ -102,6 +106,12 @@ struct window_impl {
 				e.mouse_y = sdl_e.button.y;
 				e.clicks = sdl_e.button.clicks;
 				if ((size_t)e.button < mouse_button_state.size()) mouse_button_state[e.button] = false;
+				return true;
+			case SDL_MOUSEWHEEL:
+				e.type = event_t::type_mouse_wheel;
+				e.wheel_y = sdl_e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -sdl_e.wheel.y : sdl_e.wheel.y;
+				SDL_GetMouseState(&e.mouse_x, &e.mouse_y);
+				if (e.wheel_y == 0) break;
 				return true;
 			case SDL_KEYDOWN:
 				e.type = event_t::type_key_down;
@@ -178,6 +188,10 @@ bool window::create(const char* title, int x, int y, int width, int height) {
 
 void window::get_cursor_pos(int* x, int* y) {
 	return impl->get_cursor_pos(x, y);
+}
+
+bool window::has_mouse_focus() {
+	return impl->has_mouse_focus();
 }
 
 bool window::peek_message(event_t& e) {

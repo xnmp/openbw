@@ -5,6 +5,7 @@
 #include "native_window.h"
 #include "native_window_drawing.h"
 #include "native_sound.h"
+#include "hud_font.h"
 
 namespace bwgame {
 
@@ -1644,10 +1645,28 @@ struct ui_functions: ui_util_functions {
 	int fps_counter = 0;
 	size_t scroll_speed_n = 0;
 
+	// Zoom: the game is drawn into a logical screen_width x screen_height buffer
+	// (window size / zoom) and scaled to the window, so every draw/clip path
+	// stays in logical pixels; mouse input is mapped back by dividing by zoom.
+	double zoom = 1.0;
+	int window_width = 0;
+	int window_height = 0;
+	// The game view is capped at max_aspect (16:9) and centred; wider windows get black
+	// pillarbox bars. viewport_x/viewport_w are the view's position/width in window pixels.
+	double max_aspect = 16.0 / 9.0;
+	int viewport_x = 0;
+	int viewport_w = 0;
+	bool edge_pan = true;
+	int edge_pan_px = 4;
+
 	void resize(int width, int height) {
 		if (!wnd && create_window) wnd.create("OpenBW", 0, 0, width, height);
-		screen_width = width;
-		screen_height = height;
+		window_width = width;
+		window_height = height;
+		viewport_w = std::min(width, (int)(height * max_aspect + 0.5));
+		viewport_x = (width - viewport_w) / 2;
+		screen_width = std::max(64, (int)(viewport_w / zoom));
+		screen_height = std::max(64, (int)(height / zoom));
 		//view_scale = fp16::integer(1) - (fp16::integer(1) / 4);
 		view_scale = fp16::integer(1);
 		view_width = (fp16::integer(screen_width) / view_scale).integer_part();
@@ -1656,6 +1675,145 @@ struct ui_functions: ui_util_functions {
 		window_surface.reset();
 		indexed_surface.reset();
 		rgba_surface.reset();
+	}
+
+	// Keeps the map point under window pixel (anchor_x, anchor_y) fixed;
+	// the default anchor (-1) is the window centre.
+	void set_zoom(double new_zoom, int anchor_x = -1, int anchor_y = -1) {
+		if (new_zoom == zoom || window_width <= 0) return;
+		if (anchor_x < 0 || anchor_y < 0) {
+			anchor_x = viewport_w / 2;
+			anchor_y = window_height / 2;
+		}
+		xy anchor = screen_pos + xy((int)(anchor_x / zoom), (int)(anchor_y / zoom));
+		zoom = new_zoom;
+		resize(window_width, window_height);
+		screen_pos = anchor - xy((int)(anchor_x / zoom), (int)(anchor_y / zoom));
+	}
+
+	void step_zoom(int direction, int anchor_x = -1, int anchor_y = -1) {
+		static const double steps[] = {0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0};
+		const int n = sizeof(steps) / sizeof(steps[0]);
+		int i = 0;
+		while (i + 1 < n && steps[i] < zoom - 1e-9) ++i;
+		i += direction;
+		if (i < 0) i = 0;
+		if (i >= n) i = n - 1;
+		set_zoom(steps[i], anchor_x, anchor_y);
+	}
+
+	void step_speed(bool faster) {
+		if (faster) {
+			if (game_speed < fp8::integer(128)) game_speed *= 2;
+		} else {
+			if (game_speed > 2_fp8) game_speed /= 2;
+		}
+	}
+
+	int unmuted_volume = 50;
+
+	// ---- Stats overlay (minerals, gas, supply, army/worker supply per player) ----
+	// Drawn into its own surface and blitted onto the window after zoom scaling, so it
+	// stays crisp and constant-size. Supply is shown as Brood War displays it (internal
+	// half-units rounded up). Workers = worker units alive; army = supply used - workers
+	// (so units in production, including workers being trained, count as army).
+	bool show_hud = false;
+	std::unique_ptr<native_window_drawing::surface> hud_surface;
+
+	static uint32_t hud_rgba(int r, int g, int b, int a) {
+		return (uint32_t)a << 24 | (uint32_t)b << 16 | (uint32_t)g << 8 | (uint32_t)r;
+	}
+
+	void hud_text(uint32_t* buf, size_t pitch, int w, int h, int x, int y, const char* text, int r, int g, int b) {
+		for (; *text; ++text, x += hud_font::cell_w) {
+			int c = (unsigned char)*text;
+			if (c < 32 || c > 126) c = '?';
+			const uint8_t* glyph = hud_font::glyphs[c - 32];
+			for (int gy = 0; gy != hud_font::cell_h; ++gy) {
+				if (y + gy < 0 || y + gy >= h) continue;
+				for (int gx = 0; gx != hud_font::cell_w; ++gx) {
+					if (x + gx < 0 || x + gx >= w) continue;
+					int cov = glyph[gy * hud_font::cell_w + gx];
+					if (!cov) continue;
+					uint32_t& px = buf[(size_t)(y + gy) * pitch + (size_t)(x + gx)];
+					int pa = px >> 24, pb = (px >> 16) & 0xff, pg = (px >> 8) & 0xff, pr = px & 0xff;
+					px = hud_rgba(pr + (r - pr) * cov / 255, pg + (g - pg) * cov / 255, pb + (b - pb) * cov / 255, pa + (255 - pa) * cov / 255);
+				}
+			}
+		}
+	}
+
+	struct hud_row {
+		a_string name;
+		int race = 0;
+		int minerals = 0, gas = 0, supply = 0, supply_max = 0, army = 0, workers = 0;
+		int r = 255, g = 255, b = 255;
+	};
+
+	a_vector<hud_row> hud_rows() {
+		a_vector<hud_row> rows;
+		for (int i = 0; i != 8; ++i) {
+			auto& pl = st.players[i];
+			if (!pl.initially_active) continue;
+			int race = (int)pl.race;
+			if (race < 0 || race > 2) continue;
+			hud_row row;
+			row.name = replay_st.player_name[i].empty() ? a_string("Player ") + std::to_string(i + 1).c_str() : replay_st.player_name[i];
+			row.race = race;
+			row.minerals = st.current_minerals[i];
+			row.gas = st.current_gas[i];
+			int used = (int)st.supply_used[i][race].raw_value;
+			int avail = std::min((int)st.supply_available[i][race].raw_value, 400);
+			row.supply = (used + 1) / 2;
+			row.supply_max = avail / 2;
+			for (unit_t* u : ptr(st.player_units[i])) {
+				if (ut_worker(u->unit_type)) ++row.workers;
+			}
+			row.army = std::max(0, row.supply - row.workers);
+			if (palette && tileset_img.wpe.size() == 256 * 4) {
+				size_t ci = img.player_minimap_colors.at(pl.color);
+				row.r = tileset_img.wpe[4 * ci + 0];
+				row.g = tileset_img.wpe[4 * ci + 1];
+				row.b = tileset_img.wpe[4 * ci + 2];
+			}
+			rows.push_back(row);
+		}
+		return rows;
+	}
+
+	void draw_hud() {
+		auto rows = hud_rows();
+		if (rows.empty()) return;
+		static const char* race_letter = "ZTP";
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 6;
+		const int name_cols = 18;
+		// columns: swatch+name | Min | Gas | Supply | Army | Wkr
+		const int cols = 2 + name_cols + 7 + 7 + 10 + 7 + 6;
+		int w = cols * cw + pad * 2;
+		int h = (int)(rows.size() + 1) * ch + pad * 2;
+		if (!hud_surface || hud_surface->w != w || hud_surface->h != h) {
+			hud_surface = native_window_drawing::create_rgba_surface(w, h);
+			hud_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)hud_surface->lock();
+		size_t pitch = hud_surface->pitch / 4;
+		for (int y = 0; y != h; ++y) for (int x = 0; x != w; ++x) buf[(size_t)y * pitch + x] = hud_rgba(8, 10, 16, 175);
+		char line[128];
+		std::snprintf(line, sizeof(line), "%-*s %6s %6s %9s %6s %5s", name_cols + 1, "", "Min", "Gas", "Supply", "Army", "Wkr");
+		hud_text(buf, pitch, w, h, pad, pad, line, 170, 180, 200);
+		for (size_t i = 0; i != rows.size(); ++i) {
+			auto& row = rows[i];
+			int y = pad + (int)(i + 1) * ch;
+			for (int sy = 5; sy != ch - 5; ++sy) for (int sx = 1; sx != cw - 1; ++sx) buf[(size_t)(y + sy) * pitch + pad + sx] = hud_rgba(row.r, row.g, row.b, 255);
+			char name[64];
+			std::snprintf(name, sizeof(name), "%.*s (%c)", name_cols - 4, row.name.c_str(), race_letter[row.race]);
+			hud_text(buf, pitch, w, h, pad + 2 * cw, y, name, row.r, row.g, row.b);
+			char sup[16];
+			std::snprintf(sup, sizeof(sup), "%d/%d", row.supply, row.supply_max);
+			std::snprintf(line, sizeof(line), "%6d %6d %9s %6d %5d", row.minerals, row.gas, sup, row.army, row.workers);
+			hud_text(buf, pitch, w, h, pad + (name_cols + 2) * cw, y, line, 235, 235, 235);
+		}
+		hud_surface->unlock();
 	}
 
 	a_vector<unit_id> current_selection;
@@ -1802,6 +1960,15 @@ struct ui_functions: ui_util_functions {
 		if (wnd) {
 			native_window::event_t e;
 			while (wnd.peek_message(e)) {
+				if (e.type == native_window::event_t::type_mouse_wheel) {
+					// mouse_x/y are window pixels here (the anchor), not logical ones.
+					step_zoom(e.wheel_y > 0 ? +1 : -1, std::max(0, std::min(viewport_w - 1, e.mouse_x - viewport_x)), e.mouse_y);
+					continue;
+				}
+				if (zoom != 1.0 || viewport_x != 0) {
+					e.mouse_x = (int)((e.mouse_x - viewport_x) / zoom);
+					e.mouse_y = (int)(e.mouse_y / zoom);
+				}
 				switch (e.type) {
 				case native_window::event_t::type_quit:
 					if (exit_on_close) std::exit(0);
@@ -1862,12 +2029,26 @@ struct ui_functions: ui_util_functions {
 					if (e.sym == ' ' || e.sym == 'p') {
 						is_paused = !is_paused;
 					}
-					if (e.sym == 'a' || e.sym == 'u') {
-						if (game_speed < fp8::integer(128)) game_speed *= 2;
+					{
+						bool ctrl = wnd.get_key_state(224) || wnd.get_key_state(228);
+						// SDLK_KP_MINUS / SDLK_KP_PLUS / SDLK_KP_EQUALS
+						bool minus = e.sym == '-' || e.sym == 0x40000056;
+						bool plus = e.sym == '=' || e.sym == '+' || e.sym == 0x40000057 || e.sym == 0x40000067;
+						if (ctrl && minus) step_zoom(-1);
+						else if (ctrl && plus) step_zoom(+1);
+						else if (ctrl && e.sym == '0') set_zoom(1.0);
+						else if (minus) step_speed(false);
+						else if (plus) step_speed(true);
 					}
-					if (e.sym == 'z' || e.sym == 'd') {
-						if (game_speed > 2_fp8) game_speed /= 2;
+					if (e.sym == 'h') show_hud = !show_hud;
+					if (e.sym == 'm') {
+						if (global_volume) {
+							unmuted_volume = global_volume;
+							set_volume(0);
+						} else set_volume(unmuted_volume);
 					}
+					if (e.sym == 'a' || e.sym == 'u') step_speed(true);
+					if (e.sym == 'z' || e.sym == 'd') step_speed(false);
 					if (e.sym == '\b') {
 						int t = 5 * 42 / 1000;
 						if (replay_frame < t) replay_frame = 0;
@@ -1882,7 +2063,7 @@ struct ui_functions: ui_util_functions {
 		if (!indexed_surface) {
 			if (wnd) {
 				window_surface = native_window_drawing::get_window_surface(&wnd);
-				rgba_surface = native_window_drawing::create_rgba_surface(window_surface->w, window_surface->h);
+				rgba_surface = native_window_drawing::create_rgba_surface(screen_width, screen_height);
 			} else {
 				rgba_surface = native_window_drawing::create_rgba_surface(screen_width, screen_height);
 			}
@@ -1916,6 +2097,18 @@ struct ui_functions: ui_util_functions {
 					else if (wnd.get_key_state(82)) screen_pos.y -= scroll_speed;
 					if (wnd.get_key_state(79)) screen_pos.x += scroll_speed;
 					else if (wnd.get_key_state(80)) screen_pos.x -= scroll_speed;
+					// Edge pan: cursor within edge_pan_px of the window edge (only while the
+					// cursor is over this window, so leaving it doesn't keep scrolling).
+					if (edge_pan && !is_moving_minimap && !is_moving_replay_slider && wnd.has_mouse_focus()) {
+						int cx = -1, cy = -1;
+						wnd.get_cursor_pos(&cx, &cy);
+						if (cx >= 0 && cy >= 0) {
+							if (cx < edge_pan_px) screen_pos.x -= scroll_speed;
+							else if (cx >= window_width - edge_pan_px) screen_pos.x += scroll_speed;
+							if (cy < edge_pan_px) screen_pos.y -= scroll_speed;
+							else if (cy >= window_height - edge_pan_px) screen_pos.y += scroll_speed;
+						}
+					}
 					if (screen_pos != prev_screen_pos) {
 						if (scroll_speed_n != scroll_speeds.size() - 1) ++scroll_speed_n;
 					} else scroll_speed_n = 0;
@@ -1928,13 +2121,13 @@ struct ui_functions: ui_util_functions {
 				int x = -1;
 				int y = -1;
 				wnd.get_cursor_pos(&x, &y);
-				if (x != -1) move_minimap(x, y);
+				if (x != -1) move_minimap((int)((x - viewport_x) / zoom), (int)(y / zoom));
 			}
 			if (is_moving_replay_slider) {
 				int x = -1;
 				int y = -1;
 				wnd.get_cursor_pos(&x, &y);
-				if (x != -1) move_replay_slider(x, y);
+				if (x != -1) move_replay_slider((int)((x - viewport_x) / zoom), (int)(y / zoom));
 			}
 		}
 
@@ -1973,7 +2166,16 @@ struct ui_functions: ui_util_functions {
 		}
 
 		if (wnd) {
-			rgba_surface->blit(&*window_surface, 0, 0);
+			if (viewport_x > 0) window_surface->fill(0, 0, 0, 255);
+			if (rgba_surface->w == viewport_w && rgba_surface->h == window_surface->h) {
+				rgba_surface->blit(&*window_surface, viewport_x, 0);
+			} else {
+				rgba_surface->blit_scaled(&*window_surface, viewport_x, 0, viewport_w, window_surface->h);
+			}
+			if (show_hud) {
+				draw_hud();
+				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + 8, 8);
+			}
 			wnd.update_surface();
 		}
 	}

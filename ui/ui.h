@@ -1838,16 +1838,18 @@ struct ui_functions: ui_util_functions {
 	// ---- Selection panel (unit stats + wireframes, like the in-game console) ----
 	// One selected unit: its large wireframe (unit/wirefram/wirefram.grp) beside its stats.
 	// Several: a grid of small wireframes (grpwire.grp). Drawn crisp after zoom scaling,
-	// bottom-centre of the game view. Wireframe pixels are palette *roles*, not colours:
-	// 208-211 are four hull sections and 192/193 the outline, which carries the shield state
-	// on shielded units; Zerg wireframes instead use 216-219 as a shading ramp. The section damage colouring approximates Brood
-	// War's: each section steps green -> yellow -> red as hp falls, in an order fixed per
-	// unit by its wireframe_randomizer.
+	// bottom-centre of the game view. Wireframe pixels are palette *roles*, not colours;
+	// see wire_pixel_rgb for how they are remapped by health and shields. Which hull
+	// section turns first is our approximation (the exact per-unit pattern is undocumented):
+	// sections step green -> yellow -> red in an order fixed by the unit's
+	// wireframe_randomizer.
 	bool show_selection_panel = true;
 	bool selection_panel_data_loaded = false;
 	grp_t wireframe_grp, group_wireframe_grp;
 	a_vector<bool> group_wireframe_valid;  // grpwire.grp frames for buildings etc. are "BLANK" art
 	grp_t cmdicons_grp;
+	std::array<uint8_t, 24> twire_remap{};
+	bool twire_loaded = false;
 	std::array<uint8_t, 16> ticon_remap{};
 	string_table_data stat_txt;
 	std::unique_ptr<native_window_drawing::surface> panel_surface;
@@ -1862,6 +1864,12 @@ struct ui_functions: ui_util_functions {
 			group_wireframe_valid.clear();
 			for (auto& f : group_wireframe_grp.frames) group_wireframe_valid.push_back(frame_has_wireframe_roles(f));
 			load_data_file(stat_txt.data, "rez/stat_txt.tbl");
+			load_data_file(data, "game/twire.pcx");
+			auto twire = load_pcx_data(data);
+			if (twire.data.size() >= 24) {
+				std::copy(twire.data.begin(), twire.data.begin() + 24, twire_remap.begin());
+				twire_loaded = true;
+			}
 			load_data_file(data, "unit/cmdbtns/cmdicons.grp");
 			cmdicons_grp = read_grp(data_loading::data_reader_le(data.data(), data.data() + data.size()));
 			load_data_file(data, "unit/cmdbtns/ticon.pcx");
@@ -1930,27 +1938,40 @@ struct ui_functions: ui_util_functions {
 		return v;
 	}
 
+	// Brood War remaps each wireframe role through game/twire.pcx (24 palette indices) by
+	// missing hp/shields; stages run from full health. Tables as documented by
+	// DarkenedFantasies (staredit.net topic 18436): 192/193 shield outline (inner/outer),
+	// 208-211 hull sections (randomised pattern per unit), 216-219 the Zerg "heatmap"
+	// (bright/dark inner, bright/dark outer). Unshielded units' outline maps to the
+	// shields-gone entry, which is near-black.
+	static int wire_stage(double missing_frac, int stages) {
+		return std::max(0, std::min(stages - 1, (int)(std::max(0.0, missing_frac) * stages)));
+	}
+
+	wire_rgb twire_rgb(int position) const {
+		if (!twire_loaded || tileset_img.wpe.size() != 256 * 4) return {120, 120, 120};
+		size_t ci = twire_remap[std::max(0, std::min(23, position))];
+		return {tileset_img.wpe[4 * ci], tileset_img.wpe[4 * ci + 1], tileset_img.wpe[4 * ci + 2]};
+	}
+
 	wire_rgb wire_pixel_rgb(int index, const unit_vitals& v) const {
-		if (index >= 208 && index <= 211) return wire_section_rgb(wire_section_state(index - 208, v.hp, v.randomizer));
-		if (index >= 216 && index <= 219) {
-			// Zerg (and resource) wireframes are shaded silhouettes, not sections: 216..219 is a
-			// dark-to-bright ramp, tinted by overall health.
-			static const int shade[4] = {40, 58, 78, 100};
+		static const int inner_shield[8] = {3, 4, 5, 6, 7, 8, 9, 2};
+		static const int outer_shield[8] = {4, 5, 6, 7, 8, 9, 2, 2};
+		static const int section[3] = {1, 0, 10};
+		static const int heat[4][6] = {
+			{0, 1, 1, 19, 19, 14},     // 216 bright inner
+			{1, 18, 18, 11, 11, 6},    // 217 dark inner
+			{18, 20, 20, 10, 13, 7},   // 218 bright outer
+			{10, 12, 16, 16, 6, 8}};   // 219 dark outer
+		if (!twire_loaded) {
 			auto c = wire_section_rgb(overall_state(v.hp));
-			int k = shade[index - 216];
-			return {c.r * k / 100, c.g * k / 100, c.b * k / 100};
+			return index == 192 || index == 193 ? wire_rgb{56, 120, 252} : c;
 		}
-		if (index == 192 || index == 193) {
-			if (v.has_shields) {
-				// Outline as the shield bar: bright blue full, dim blue partial, grey when down.
-				if (v.shields <= 0) return {72, 72, 84};
-				bool full_layer = index == 192 ? true : v.shields > 0.5;
-				return full_layer ? wire_rgb{56, 120, 252} : wire_rgb{36, 64, 150};
-			}
-			auto c = wire_section_rgb(overall_state(v.hp));
-			if (index == 193) return {c.r * 3 / 4, c.g * 3 / 4, c.b * 3 / 4};
-			return c;
-		}
+		double shields_missing = v.has_shields ? 1.0 - v.shields : 1.0;
+		if (index == 192) return twire_rgb(inner_shield[wire_stage(shields_missing, 8)]);
+		if (index == 193) return twire_rgb(outer_shield[wire_stage(shields_missing, 8)]);
+		if (index >= 208 && index <= 211) return twire_rgb(section[wire_section_state(index - 208, v.hp, v.randomizer)]);
+		if (index >= 216 && index <= 219) return twire_rgb(heat[index - 216][wire_stage(1.0 - v.hp, 6)]);
 		return {120, 120, 120};
 	}
 

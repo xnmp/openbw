@@ -85,6 +85,9 @@ Playback starts at 1×, so press `=` a few times.
 - The overlay font in `ui/hud_font.h` is a bitmap rendering of JetBrains Mono Bold
   (SIL OFL 1.1, see `LICENSE-JetBrainsMono.txt`). Regenerate it with `gen_hud_font.py`.
 - `ui/order_names.h` is generated from `bwenums.h` by `gen_order_names.py`.
-- Wireframes come from the game's own `unit/wirefram/*.grp` files. Their damage colouring
-  (four sections that turn yellow, then red, in a fixed random order per unit) approximates
-  Brood War's. It is not a byte-exact copy.
+- Wireframes come from the game's own `unit/wirefram/*.grp` files. Colours are remapped
+  through `game/twire.pcx` by missing health and shields, as the game does. This covers
+  the blue shield outline, green/yellow/red hull sections, and the Zerg heat-map
+  ramp, using the tables documented on
+  [staredit.net](https://staredit.net/topic/18436/). Which hull section changes first
+  is an approximation: the per-unit pattern is undocumented.

@@ -2882,6 +2882,14 @@ struct ui_functions: ui_util_functions {
 		}
 		if (!observer_has_target) {
 			if (best > 0.3) observer_switch_to(best_centre, now, best_action);
+			else {
+				// Nothing to show yet (the opening): frame the first player's base.
+				for (int i = 0; i != 8; ++i) {
+					if (!st.players[i].initially_active) continue;
+					observer_switch_to(game_st.start_locations[i], now, 0);
+					break;
+				}
+			}
 			return;
 		}
 		observer_shot_peak = std::max(observer_shot_peak, current_action);

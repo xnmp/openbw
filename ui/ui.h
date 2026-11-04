@@ -1692,6 +1692,12 @@ struct ui_functions: ui_util_functions {
 		window_surface.reset();
 		indexed_surface.reset();
 		rgba_surface.reset();
+		// With pillarbox bars, keep the cursor in the game view (edge pan then triggers at
+		// the bars); without bars leave it free to leave the window.
+		if (wnd) {
+			if (viewport_x > 0) wnd.confine_cursor(viewport_x, 0, viewport_w, height);
+			else wnd.confine_cursor(0, 0, 0, 0);
+		}
 	}
 
 	// Keeps the map point under window pixel (anchor_x, anchor_y) fixed;
@@ -3317,7 +3323,7 @@ struct ui_functions: ui_util_functions {
 			while (input_poll_t >= input_poll_speed) {
 				if (input_poll_t >= input_poll_speed * 20) last_input_poll = now - input_poll_speed;
 				else last_input_poll += input_poll_speed;
-				std::array<int, 6> scroll_speeds = {2, 2, 4, 6, 6, 8};
+				std::array<int, 6> scroll_speeds = {3, 3, 5, 8, 8, 10};
 
 				if (!is_drag_selecting) {
 					int scroll_speed = scroll_speeds[scroll_speed_n];
@@ -3332,8 +3338,9 @@ struct ui_functions: ui_util_functions {
 						int cx = -1, cy = -1;
 						wnd.get_cursor_pos(&cx, &cy);
 						if (cx >= 0 && cy >= 0) {
-							if (cx < edge_pan_px) screen_pos.x -= scroll_speed;
-							else if (cx >= window_width - edge_pan_px) screen_pos.x += scroll_speed;
+							// Edges of the game view, not the window (the bars are outside it).
+							if (cx < viewport_x + edge_pan_px) screen_pos.x -= scroll_speed;
+							else if (cx >= viewport_x + viewport_w - edge_pan_px) screen_pos.x += scroll_speed;
 							if (cy < edge_pan_px) screen_pos.y -= scroll_speed;
 							else if (cy >= window_height - edge_pan_px) screen_pos.y += scroll_speed;
 						}

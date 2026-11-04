@@ -42,6 +42,9 @@ namespace native_window {
 		bool create(const char* title, int x, int y, int width, int height);
 		void get_cursor_pos(int* x, int* y);
 		bool has_mouse_focus();
+		// Keep the cursor inside this window-pixel rect while the window has focus;
+		// w <= 0 releases it. No-op where the backend cannot confine the pointer.
+		void confine_cursor(int x, int y, int w, int h);
 		bool peek_message(event_t& e);
 		bool show_cursor(bool show);
 		bool get_key_state(int scancode);

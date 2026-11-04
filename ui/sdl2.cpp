@@ -75,6 +75,20 @@ struct window_impl {
 	bool has_mouse_focus() {
 		return window && SDL_GetMouseFocus() == window;
 	}
+
+	void confine_cursor(int x, int y, int w, int h) {
+		if (!window) return;
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+		if (w <= 0 || h <= 0) {
+			SDL_SetWindowMouseRect(window, nullptr);
+		} else {
+			SDL_Rect r{x, y, w, h};
+			SDL_SetWindowMouseRect(window, &r);
+		}
+#else
+		(void)x; (void)y; (void)w; (void)h;
+#endif
+	}
 	
 	std::array<bool, 512> key_state {};
 	std::array<bool, 6> mouse_button_state {};
@@ -192,6 +206,10 @@ void window::get_cursor_pos(int* x, int* y) {
 
 bool window::has_mouse_focus() {
 	return impl->has_mouse_focus();
+}
+
+void window::confine_cursor(int x, int y, int w, int h) {
+	impl->confine_cursor(x, y, w, h);
 }
 
 bool window::peek_message(event_t& e) {

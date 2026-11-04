@@ -28,6 +28,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls.
 - **Sound** through SDL2_mixer, when it is installed.
 - **Edge panning**, and a game view capped at **16:9**, with black bars on ultrawide windows.
+  With bars, the cursor is kept inside the game view while the window has focus (SDL
+  2.0.18+ pointer confinement), so edge panning triggers where the view ends.
 
 ## Data files
 

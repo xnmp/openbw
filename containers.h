@@ -15,6 +15,7 @@
 #include "static_vector.h"
 #include "intrusive_list.h"
 #include "circular_vector.h"
+#include <cstdint>
 
 namespace bwgame {
 

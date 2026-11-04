@@ -4,6 +4,7 @@
 #include "util.h"
 #include "data_types.h"
 #include "containers.h"
+#include <cstdint>
 
 namespace bwgame {
 

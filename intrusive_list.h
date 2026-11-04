@@ -4,6 +4,7 @@
 #include <utility>
 #include <cstddef>
 #include <iterator>
+#include <cstdint>
 
 namespace bwgame {
 

@@ -2569,6 +2569,14 @@ struct ui_functions: ui_util_functions {
 		if (unit_is_egg(u) && !u->build_queue.empty()) return u->build_queue.front();
 		return nullptr;
 	}
+
+	// Army value excludes workers and Overlords (supply, not fighting units); an egg is
+	// classed by what it will hatch into.
+	bool unit_counts_as_army(const unit_t* u) const {
+		const unit_type_t* t = egg_target(u);
+		if (!t) t = u->unit_type;
+		return !ut_worker(t) && t->id != UnitTypes::Zerg_Overlord && t->id != UnitTypes::Zerg_Larva;
+	}
 	int unit_value(const unit_t* u) const {
 		if (auto* t = egg_target(u)) return unit_type_value(t) * (ut_two_units_in_one_egg(t) ? 2 : 1);
 		return unit_type_value(u->unit_type);
@@ -3047,12 +3055,13 @@ struct ui_functions: ui_util_functions {
 			p.workers = row.workers;
 			p.value_total = p.value_army = 0;
 			// Units in production exist as incomplete units (Terran/Protoss training, morphs)
-			// or eggs, and count; queued ones do not exist yet. Workers count in the total.
+			// or eggs, and count; queued ones do not exist yet. Workers and Overlords count in
+			// the total but not the army.
 			for (unit_t* u : ptr(st.player_units[row.player])) {
 				if (ut_building(u) || u_hallucination(u)) continue;
 				int v = unit_value(u);
 				p.value_total += v;
-				if (!ut_worker(u)) p.value_army += v;
+				if (unit_counts_as_army(u)) p.value_army += v;
 			}
 			p.lost_supply_half = p.lost_value = 0;
 		}

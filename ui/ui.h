@@ -6,6 +6,7 @@
 #include "native_window_drawing.h"
 #include "native_sound.h"
 #include "hud_font.h"
+#include "order_names.h"
 
 namespace bwgame {
 
@@ -713,6 +714,7 @@ struct ui_functions: ui_util_functions {
 
 	a_vector<uint8_t> creep_random_tile_indices = a_vector<uint8_t>(256 * 256);
 	void init() {
+		load_selection_panel_data();
 		uint32_t rand_state = (uint32_t)clock.now().time_since_epoch().count();
 		auto rand = [&]() {
 			rand_state = rand_state * 22695477 + 1;
@@ -1816,6 +1818,378 @@ struct ui_functions: ui_util_functions {
 		hud_surface->unlock();
 	}
 
+	// ---- Selection panel (unit stats + wireframes, like the in-game console) ----
+	// One selected unit: its large wireframe (unit/wirefram/wirefram.grp) beside its stats.
+	// Several: a grid of small wireframes (grpwire.grp). Drawn crisp after zoom scaling,
+	// bottom-centre of the game view. Wireframe pixels are palette *roles*, not colours:
+	// 208-211 (Zerg: 216-219) are four hull sections and 192/193 the outline, which carries
+	// the shield state on shielded units. The section damage colouring approximates Brood
+	// War's: each section steps green -> yellow -> red as hp falls, in an order fixed per
+	// unit by its wireframe_randomizer.
+	bool show_selection_panel = true;
+	bool selection_panel_data_loaded = false;
+	grp_t wireframe_grp, group_wireframe_grp;
+	a_vector<bool> group_wireframe_valid;  // grpwire.grp frames for buildings etc. are "BLANK" art
+	string_table_data stat_txt;
+	std::unique_ptr<native_window_drawing::surface> panel_surface;
+
+	void load_selection_panel_data() {
+		try {
+			a_vector<uint8_t> data;
+			load_data_file(data, "unit/wirefram/wirefram.grp");
+			wireframe_grp = read_grp(data_loading::data_reader_le(data.data(), data.data() + data.size()));
+			load_data_file(data, "unit/wirefram/grpwire.grp");
+			group_wireframe_grp = read_grp(data_loading::data_reader_le(data.data(), data.data() + data.size()));
+			group_wireframe_valid.clear();
+			for (auto& f : group_wireframe_grp.frames) group_wireframe_valid.push_back(frame_has_wireframe_roles(f));
+			load_data_file(stat_txt.data, "rez/stat_txt.tbl");
+			selection_panel_data_loaded = true;
+		} catch (const std::exception& e) {
+			ui::log("selection panel disabled: %s\n", e.what());
+		}
+	}
+
+	// stat_txt lookup with bounds checks; strips the hotkey/format control bytes.
+	a_string stat_text(int index) const {
+		const auto& d = stat_txt.data;
+		if (index <= 0 || d.size() < 2) return {};
+		size_t count = d[0] | (size_t)d[1] << 8;
+		if ((size_t)index > count || 2 + (size_t)index * 2 > d.size()) return {};
+		size_t offset = d[2 + (index - 1) * 2] | (size_t)d[3 + (index - 1) * 2] << 8;
+		a_string s;
+		for (size_t i = offset; i < d.size() && d[i]; ++i) {
+			if (d[i] >= 32 && d[i] < 127) s += (char)d[i];
+		}
+		return s;
+	}
+
+	struct wire_rgb { int r, g, b; };
+
+	// Colour for one wireframe pixel. section_state: 0 green, 1 yellow, 2 red.
+	static wire_rgb wire_section_rgb(int state) {
+		static const wire_rgb c[3] = {{24, 210, 24}, {236, 228, 40}, {222, 32, 24}};
+		return c[std::max(0, std::min(2, state))];
+	}
+
+	// Section i (0..3) state for a unit at hp fraction f: 8 damage steps are spread over
+	// the sections in a per-unit order, first turning them yellow, then red.
+	static int wire_section_state(int section, double hp_frac, int randomizer) {
+		static const uint8_t perms[24][4] = {
+			{0,1,2,3},{0,1,3,2},{0,2,1,3},{0,2,3,1},{0,3,1,2},{0,3,2,1},{1,0,2,3},{1,0,3,2},
+			{1,2,0,3},{1,2,3,0},{1,3,0,2},{1,3,2,0},{2,0,1,3},{2,0,3,1},{2,1,0,3},{2,1,3,0},
+			{2,3,0,1},{2,3,1,0},{3,0,1,2},{3,0,2,1},{3,1,0,2},{3,1,2,0},{3,2,0,1},{3,2,1,0}};
+		int steps = (int)((1.0 - std::max(0.0, std::min(1.0, hp_frac))) * 8.0 + 0.5);
+		const uint8_t* p = perms[(unsigned)randomizer % 24];
+		int rank = 0;
+		while (rank != 4 && p[rank] != section) ++rank;
+		return (steps > rank) + (steps > rank + 4);
+	}
+
+	static int overall_state(double hp_frac) {
+		return hp_frac > 0.66 ? 0 : hp_frac > 0.33 ? 1 : 2;
+	}
+
+	struct unit_vitals {
+		double hp = 1, shields = 0;
+		bool has_shields = false;
+		int randomizer = 0;
+	};
+
+	unit_vitals vitals_of(const unit_t* u) const {
+		unit_vitals v;
+		double max_hp = u->unit_type->hitpoints.raw_value;
+		v.hp = max_hp > 0 ? u->hp.raw_value / max_hp : 1.0;
+		v.has_shields = u->unit_type->has_shield && u->unit_type->shield_points > 0;
+		if (v.has_shields) v.shields = (double)u->shield_points.raw_value / (u->unit_type->shield_points * 256.0);
+		v.randomizer = u->wireframe_randomizer;
+		return v;
+	}
+
+	wire_rgb wire_pixel_rgb(int index, const unit_vitals& v) const {
+		if (index >= 208 && index <= 211) return wire_section_rgb(wire_section_state(index - 208, v.hp, v.randomizer));
+		if (index >= 216 && index <= 219) return wire_section_rgb(wire_section_state(index - 216, v.hp, v.randomizer));
+		if (index == 192 || index == 193) {
+			if (v.has_shields) {
+				// Outline as the shield bar: bright blue full, dim blue partial, grey when down.
+				if (v.shields <= 0) return {72, 72, 84};
+				bool full_layer = index == 192 ? true : v.shields > 0.5;
+				return full_layer ? wire_rgb{56, 120, 252} : wire_rgb{36, 64, 150};
+			}
+			auto c = wire_section_rgb(overall_state(v.hp));
+			if (index == 193) return {c.r * 3 / 4, c.g * 3 / 4, c.b * 3 / 4};
+			return c;
+		}
+		return {120, 120, 120};
+	}
+
+	// Draws grp frame `frame_index` at (x, y), nearest-neighbour scaled by num/den.
+	void draw_wireframe(uint32_t* buf, size_t pitch, int w, int h, int x, int y, const grp_t& grp, size_t frame_index, int num, int den, const unit_vitals& v) {
+		if (frame_index >= grp.frames.size()) return;
+		auto& f = grp.frames[frame_index];
+		for (size_t fy = 0; fy != f.size.y; ++fy) {
+			const uint8_t* p = f.data_container.data() + f.line_data_offset[fy];
+			size_t fx = 0;
+			auto put = [&](int index) {
+				auto c = wire_pixel_rgb(index, v);
+				uint32_t px = hud_rgba(c.r, c.g, c.b, 255);
+				int sx = (int)(f.offset.x + fx), sy = (int)(f.offset.y + fy);
+				for (int Y = y + sy * num / den; Y < y + (sy + 1) * num / den; ++Y) {
+					for (int X = x + sx * num / den; X < x + (sx + 1) * num / den; ++X) {
+						if (X >= 0 && X < w && Y >= 0 && Y < h) buf[(size_t)Y * pitch + X] = px;
+					}
+				}
+			};
+			while (fx < f.size.x) {
+				uint8_t c = *p++;
+				if (c & 0x80) {
+					fx += c & 0x7f;
+				} else if (c & 0x40) {
+					uint8_t index = *p++;
+					for (int i = 0; i != (c & 0x3f); ++i, ++fx) put(index);
+				} else {
+					for (int i = 0; i != c; ++i, ++fx) put(*p++);
+				}
+			}
+		}
+	}
+
+	static bool is_wireframe_role(int index) {
+		return index == 192 || index == 193 || (index >= 208 && index <= 211) || (index >= 216 && index <= 219);
+	}
+
+	// The placeholder frames (grpwire.grp's "BLANK" text for most buildings) are drawn in a
+	// single colour; real wireframes use several roles.
+	static bool frame_has_wireframe_roles(const grp_t::frame_t& f) {
+		int first = -1;
+		auto check = [&](int index) {
+			if (!is_wireframe_role(index)) return false;
+			if (first == -1) first = index;
+			return index != first;
+		};
+		for (size_t fy = 0; fy != f.size.y; ++fy) {
+			const uint8_t* p = f.data_container.data() + f.line_data_offset[fy];
+			for (size_t fx = 0; fx < f.size.x;) {
+				uint8_t c = *p++;
+				if (c & 0x80) {
+					fx += c & 0x7f;
+				} else if (c & 0x40) {
+					if (check(*p++)) return true;
+					fx += c & 0x3f;
+				} else {
+					for (int i = 0; i != c; ++i, ++fx) if (check(*p++)) return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	a_vector<unit_t*> selected_units() {
+		a_vector<unit_t*> r;
+		for (auto uid : current_selection) {
+			if (unit_t* u = get_unit(uid)) r.push_back(u);
+		}
+		return r;
+	}
+
+	a_string player_label(int owner) const {
+		if (owner < 0 || owner >= 12) return "?";
+		if (owner == 11) return "Neutral";
+		if (owner < 8 && !replay_st.player_name[owner].empty()) return replay_st.player_name[owner];
+		return a_string("Player ") + std::to_string(owner + 1).c_str();
+	}
+
+	wire_rgb player_rgb(int owner) const {
+		if (owner < 0 || owner >= 8 || !palette || tileset_img.wpe.size() != 256 * 4) return {220, 220, 220};
+		size_t ci = img.player_minimap_colors.at(st.players[owner].color);
+		return {tileset_img.wpe[4 * ci + 0], tileset_img.wpe[4 * ci + 1], tileset_img.wpe[4 * ci + 2]};
+	}
+
+	struct panel_line {
+		a_string text;
+		wire_rgb rgb{230, 230, 230};
+	};
+
+	static int pct(int done, int total) {
+		if (total <= 0) return 0;
+		return std::max(0, std::min(100, 100 * done / total));
+	}
+
+	a_string weapon_line(const char* slot, const unit_t* u, const weapon_type_t* w, int max_hits) const {
+		int base = w->damage_amount, bonus = (int)weapon_damage_amount(w, u->owner).integer_part() - base;
+		char buf[160];
+		int hits = std::max(1, max_hits) * std::max(1, w->bullet_count);
+		std::snprintf(buf, sizeof(buf), "%s: %s  %d%s%s  rng %d  cd %d", slot, stat_text(w->label).c_str(), base,
+			bonus ? (a_string(" (+") + std::to_string(bonus).c_str() + ")").c_str() : "",
+			hits > 1 ? (a_string(" x") + std::to_string(hits).c_str()).c_str() : "",
+			weapon_max_range(u, w) / 32, w->cooldown);
+		return buf;
+	}
+
+	a_vector<panel_line> unit_panel_lines(const unit_t* u) const {
+		a_vector<panel_line> lines;
+		char buf[160];
+		auto add = [&](a_string s, wire_rgb c = {230, 230, 230}) { lines.push_back({std::move(s), c}); };
+		const unit_type_t* ut = u->unit_type;
+		add(stat_text((int)ut->id + 1), {255, 255, 255});
+		add(player_label(u->owner), player_rgb(u->owner));
+		auto v = vitals_of(u);
+		std::snprintf(buf, sizeof(buf), "HP %d/%d", (int)u->hp.ceil().integer_part(), (int)ut->hitpoints.integer_part());
+		add(buf, wire_section_rgb(overall_state(v.hp)));
+		if (v.has_shields) {
+			std::snprintf(buf, sizeof(buf), "Shields %d/%d  (armor %d)", (int)u->shield_points.integer_part(), ut->shield_points,
+				player_upgrade_level(u->owner, UpgradeTypes::Protoss_Plasma_Shields));
+			add(buf, {110, 160, 255});
+		}
+		if (ut_has_energy(u)) {
+			std::snprintf(buf, sizeof(buf), "Energy %d/%d", (int)u->energy.integer_part(), (int)unit_max_energy(u).integer_part());
+			add(buf, {200, 120, 255});
+		}
+		if (ut_resource(u)) {
+			std::snprintf(buf, sizeof(buf), "%s %d", unit_is_mineral_field(u) ? "Minerals" : "Gas", u->building.resource.resource_count);
+			add(buf, unit_is_mineral_field(u) ? wire_rgb{120, 200, 255} : wire_rgb{90, 230, 120});
+		}
+		if (u->owner != 11 && !ut_resource(u)) {
+			int base = ut->armor, total = (int)unit_armor(u).integer_part();
+			std::snprintf(buf, sizeof(buf), total != base ? "Armor %d (+%d)" : "Armor %d", base, total - base);
+			add(buf);
+		}
+		const unit_t* armed = u->subunit ? u->subunit : u;
+		if (auto* w = unit_ground_weapon(armed)) add(weapon_line("Ground", u, w, armed->unit_type->max_ground_hits));
+		if (auto* w = unit_air_weapon(armed)) {
+			if (w != unit_ground_weapon(armed)) add(weapon_line("Air", u, w, armed->unit_type->max_air_hits));
+		}
+		if (unit_ground_weapon(armed) || unit_air_weapon(armed) || u->kill_count) {
+			std::snprintf(buf, sizeof(buf), "Kills %d", u->kill_count);
+			add(buf);
+		}
+		if (ut_worker(u) && u->worker.resources_carried && u->carrying_flags) {
+			std::snprintf(buf, sizeof(buf), "Carrying %d %s", u->worker.resources_carried, (u->carrying_flags & 1) ? "gas" : "minerals");
+			add(buf);
+		}
+		// Progress: construction/morph, training queue, research, upgrade.
+		if (!u_completed(u) && ut->build_time > 0) {
+			std::snprintf(buf, sizeof(buf), "Building %d%%", pct(ut->build_time - u->remaining_build_time, ut->build_time));
+			add(buf, {255, 210, 90});
+		} else if (!u->build_queue.empty() && u->build_queue.front()) {
+			const unit_type_t* q = u->build_queue.front();
+			const unit_t* b = u->current_build_unit;
+			int done = b ? q->build_time - b->remaining_build_time : 0;
+			std::snprintf(buf, sizeof(buf), "Training %s %d%%", stat_text((int)q->id + 1).c_str(), pct(done, q->build_time));
+			add(buf, {255, 210, 90});
+			if (u->build_queue.size() > 1) {
+				a_string rest = "Queue:";
+				for (size_t i = 1; i != u->build_queue.size(); ++i) rest += " " + stat_text((int)u->build_queue[i]->id + 1);
+				add(rest, {200, 180, 120});
+			}
+		}
+		if (ut_building(u) && u->building.researching_type) {
+			auto* t = u->building.researching_type;
+			std::snprintf(buf, sizeof(buf), "Researching %s %d%%", stat_text(t->label).c_str(), pct(t->research_time - u->building.upgrade_research_time, t->research_time));
+			add(buf, {255, 210, 90});
+		}
+		if (ut_building(u) && u->building.upgrading_type) {
+			auto* t = u->building.upgrading_type;
+			int total = upgrade_time_cost(u->owner, t);
+			std::snprintf(buf, sizeof(buf), "Upgrading %s %d %d%%", stat_text(t->label).c_str(), u->building.upgrading_level, pct(total - u->building.upgrade_research_time, total));
+			add(buf, {255, 210, 90});
+		}
+		if (u->order_type && (int)u->order_type->id >= 0 && (int)u->order_type->id < order_names::count) {
+			add(a_string("Order: ") + order_names::names[(int)u->order_type->id], {170, 180, 200});
+		}
+		a_string status;
+		auto flag = [&](bool on, const char* name) { if (on) status += status.empty() ? name : (a_string(", ") + name).c_str(); };
+		flag(u_hallucination(u), "Hallucination");
+		flag(u_cloaked(u) || u_requires_detector(u), "Cloaked");
+		flag(u_burrowed(u), "Burrowed");
+		flag(u->stim_timer != 0, "Stimmed");
+		flag(u->defensive_matrix_timer != 0, "Matrix");
+		flag(u->ensnare_timer != 0, "Ensnared");
+		flag(u->lockdown_timer != 0, "Lockdown");
+		flag(u->irradiate_timer != 0, "Irradiated");
+		flag(u->plague_timer != 0, "Plagued");
+		flag(u->stasis_timer != 0, "Stasis");
+		flag(u->maelstrom_timer != 0, "Maelstrom");
+		flag(u->acid_spore_count != 0, "Acid spores");
+		flag(u->parasite_flags != 0, "Parasite");
+		if (!status.empty()) add(status, {255, 140, 120});
+		int cargo = 0;
+		for (auto id : u->loaded_units) if (id.raw_value && get_unit(id)) ++cargo;
+		if (cargo) {
+			std::snprintf(buf, sizeof(buf), "Cargo %d", cargo);
+			add(buf);
+		}
+		return lines;
+	}
+
+	void prepare_panel_surface(int w, int h) {
+		if (!panel_surface || panel_surface->w != w || panel_surface->h != h) {
+			panel_surface = native_window_drawing::create_rgba_surface(w, h);
+			panel_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+	}
+
+	// Returns false when there is nothing to show. Panel scale follows window height so
+	// wireframes stay legible on large screens.
+	bool draw_selection_panel() {
+		if (!selection_panel_data_loaded) return false;
+		auto units = selected_units();
+		if (units.empty()) return false;
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 8;
+		const int scale = window_height >= 1000 ? 2 : 1;
+		if (units.size() == 1) {
+			unit_t* u = units[0];
+			auto lines = unit_panel_lines(u);
+			int wire = 64 * scale;
+			size_t text_cols = 0;
+			for (auto& l : lines) text_cols = std::max(text_cols, l.text.size());
+			int w = pad * 3 + wire + (int)text_cols * cw;
+			int h = pad * 2 + std::max(wire, (int)lines.size() * ch);
+			prepare_panel_surface(w, h);
+			uint32_t* buf = (uint32_t*)panel_surface->lock();
+			size_t pitch = panel_surface->pitch / 4;
+			for (int y = 0; y != h; ++y) for (int x = 0; x != w; ++x) buf[(size_t)y * pitch + x] = hud_rgba(8, 10, 16, 190);
+			draw_wireframe(buf, pitch, w, h, pad, pad, wireframe_grp, (size_t)u->unit_type->id, scale, 1, vitals_of(u));
+			for (size_t i = 0; i != lines.size(); ++i) {
+				auto& l = lines[i];
+				hud_text(buf, pitch, w, h, pad * 2 + wire, pad + (int)i * ch, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
+			}
+			panel_surface->unlock();
+			return true;
+		}
+		const int per_row = 12, max_shown = 36;
+		int cell = 32 * scale + 4;
+		int shown = std::min((int)units.size(), max_shown);
+		int rows = (shown + per_row - 1) / per_row;
+		int cols = std::min(shown, per_row);
+		char title[64];
+		if ((int)units.size() > shown) std::snprintf(title, sizeof(title), "%d units (showing %d)", (int)units.size(), shown);
+		else std::snprintf(title, sizeof(title), "%d units", (int)units.size());
+		int w = std::max(pad * 2 + cols * cell, pad * 2 + (int)std::strlen(title) * cw);
+		int h = pad * 2 + ch + rows * cell;
+		prepare_panel_surface(w, h);
+		uint32_t* buf = (uint32_t*)panel_surface->lock();
+		size_t pitch = panel_surface->pitch / 4;
+		for (int y = 0; y != h; ++y) for (int x = 0; x != w; ++x) buf[(size_t)y * pitch + x] = hud_rgba(8, 10, 16, 190);
+		hud_text(buf, pitch, w, h, pad, pad, title, 170, 180, 200);
+		for (int i = 0; i != shown; ++i) {
+			unit_t* u = units[i];
+			int x = pad + (i % per_row) * cell, y = pad + ch + (i / per_row) * cell;
+			auto pc = player_rgb(u->owner);
+			for (int k = 0; k != cell - 2; ++k) {  // owner-coloured underline per cell
+				int X = x + k, Y = y + cell - 3;
+				if (X < w && Y < h) buf[(size_t)Y * pitch + X] = hud_rgba(pc.r, pc.g, pc.b, 255);
+			}
+			size_t id = (size_t)u->unit_type->id;
+			if (id < group_wireframe_valid.size() && group_wireframe_valid[id]) {
+				draw_wireframe(buf, pitch, w, h, x + 1, y, group_wireframe_grp, id, scale, 1, vitals_of(u));
+			} else {
+				draw_wireframe(buf, pitch, w, h, x + 1, y, wireframe_grp, id, scale, 2, vitals_of(u));
+			}
+		}
+		panel_surface->unlock();
+		return true;
+	}
+
 	a_vector<unit_id> current_selection;
 
 	bool current_selection_is_selected(unit_t* u) {
@@ -1944,13 +2318,17 @@ struct ui_functions: ui_util_functions {
 				if (r.from.y > r.to.y) std::swap(r.from.y, r.to.y);
 				a_vector<unit_t*> new_units;
 				bool any_non_neutrals = false;
+				bool any_non_buildings = false;
 				for (unit_t* u : find_units(translate_rect(r, screen_pos))) {
 					if (!unit_can_be_selected(u)) continue;
 					new_units.push_back(u);
 					if (u->owner != 11) any_non_neutrals = true;
+					if (!ut_building(u)) any_non_buildings = true;
 				}
+				// As in Brood War, a box that catches units leaves buildings out.
 				for (unit_t* u : new_units) {
 					if (u->owner == 11 && any_non_neutrals) continue;
+					if (ut_building(u) && any_non_buildings) continue;
 					current_selection_add(u);
 				}
 			}
@@ -2041,6 +2419,7 @@ struct ui_functions: ui_util_functions {
 						else if (plus) step_speed(true);
 					}
 					if (e.sym == 'h') show_hud = !show_hud;
+					if (e.sym == 'i') show_selection_panel = !show_selection_panel;
 					if (e.sym == 'm') {
 						if (global_volume) {
 							unmuted_volume = global_volume;
@@ -2175,6 +2554,11 @@ struct ui_functions: ui_util_functions {
 			if (show_hud) {
 				draw_hud();
 				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + 8, 8);
+			}
+			if (show_selection_panel && draw_selection_panel()) {
+				int px = viewport_x + (viewport_w - panel_surface->w) / 2;
+				int py = window_surface->h - panel_surface->h - 8;
+				panel_surface->blit(&*window_surface, std::max(viewport_x, px), std::max(0, py));
 			}
 			wnd.update_surface();
 		}

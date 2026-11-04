@@ -3299,7 +3299,9 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 
-		if (vmin < 0) fill_rgba(buf, pitch, w, h, px0, to_y(0), px1 - px0, 1, hud_rgba(140, 150, 170, 255));
+		// Zero line: in difference mode it is the line between the players, so make it bold.
+		if (difference) fill_rgba(buf, pitch, w, h, px0, to_y(0) - 1, px1 - px0, 3, hud_rgba(225, 230, 240, 255));
+		else if (vmin < 0) fill_rgba(buf, pitch, w, h, px0, to_y(0), px1 - px0, 1, hud_rgba(140, 150, 170, 255));
 
 		// Series. A segment crossing zero is split there so each part takes its sign's colour.
 		int y_zero = to_y(0);

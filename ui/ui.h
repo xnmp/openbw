@@ -1808,7 +1808,7 @@ struct ui_functions: ui_util_functions {
 		set_zoom(steps[i], anchor_x, anchor_y);
 	}
 
-	// Doubling steps, with 1.5x between 1x and 2x.
+	// Doubling steps from 1/4x to 128x, with 1.5x between 1x and 2x.
 	void step_speed(bool faster) {
 		const fp8 one = fp8::integer(1), one_half = fp8::from_raw(one.raw_value * 3 / 2), two = fp8::integer(2);
 		if (faster) {
@@ -1818,7 +1818,7 @@ struct ui_functions: ui_util_functions {
 		} else {
 			if (game_speed == two) game_speed = one_half;
 			else if (game_speed == one_half) game_speed = one;
-			else if (game_speed > 2_fp8) game_speed /= 2;
+			else if (game_speed > fp8::from_raw(one.raw_value / 4)) game_speed /= 2;  // slowest 1/4x
 		}
 	}
 

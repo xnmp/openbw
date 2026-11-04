@@ -72,7 +72,7 @@ cmake --build build -j
 | --- | --- |
 | `?` | settings menu: a checkbox for every toggle below, plus a key summary |
 | `space` / `p` | pause |
-| `=` / `-` (also `a` / `z`) | faster / slower: ×2 per press, with 1.5× between 1× and 2× |
+| `=` / `-` (also `a` / `z`) | faster / slower: ×2 per press from 1/4× to 128×, with 1.5× between 1× and 2× |
 | `ctrl =` / `ctrl -` / `ctrl 0` | zoom in / out / reset |
 | mouse wheel | zoom around the cursor |
 | arrows, or the mouse at the game view's edge | scroll (with the full graph panel open, `←` / `→` switch its tabs) |

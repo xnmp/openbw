@@ -9,9 +9,10 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   with shields, HP and energy below it. Beside the wireframe are its name, owner and kills,
   and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Carriers, Reavers and
   Vultures also show interceptor, scarab or mine counts. Buildings show the training queue
-  and research, upgrade, add-on or construction progress bars. Mineral fields and geysers
+  and research, upgrade, add-on or construction progress bars. A morphing Lair, Hive,
+  Greater Spire or Sunken/Spore Colony shows as the building it is becoming. Mineral fields and geysers
   show resources left, supply buildings show supply totals, and transports show their cargo.
-  Drag-select to get a grid of health-coloured wireframes. As in Brood War, a box that
+  Drag-select to get a grid of health-coloured wireframes, grouped by unit type. As in Brood War, a box that
   catches units leaves buildings out. Click a wireframe in the grid to select just that unit,
   `shift`-click to drop it, `ctrl`-click to keep only units of its type.
 - **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute, a

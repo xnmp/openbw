@@ -2131,6 +2131,13 @@ struct ui_functions: ui_util_functions {
 		return false;
 	}
 
+	// What the console shows a unit as: a Hatchery morphing into a Lair is still a Hatchery
+	// to the engine until the morph completes, but Brood War presents it as the Lair (as
+	// with Hive, Greater Spire and Sunken/Spore Colonies).
+	const unit_type_t* shown_type(const unit_t* u) const {
+		return unit_is_morphing_building(u) ? u->build_queue.front() : u->unit_type;
+	}
+
 	a_vector<unit_t*> selected_units() {
 		a_vector<unit_t*> r;
 		for (auto uid : current_selection) {
@@ -2200,7 +2207,7 @@ struct ui_functions: ui_util_functions {
 			ci.vitals.push_back({buf, {225, 225, 225}});
 		}
 
-		ci.lines.push_back({stat_text((int)ut->id + 1), {255, 255, 255}});
+		ci.lines.push_back({stat_text((int)shown_type(u)->id + 1), {255, 255, 255}});
 		if (u->owner != 11) ci.lines.push_back({player_label(u->owner), player_rgb(u->owner)});
 		const unit_t* armed = u->subunit ? u->subunit : u;
 		bool has_weapon = unit_ground_weapon(armed) || unit_air_weapon(armed) || unit_is_carrier(u) || unit_is_reaver(u);
@@ -2254,9 +2261,11 @@ struct ui_functions: ui_util_functions {
 		}
 
 		if (!u_completed(u) && !unit_is_egg(u)) {
+			// A morphing building counts down the target type's build time.
+			const unit_type_t* target = shown_type(u);
 			console_progress p;
-			p.label = ut_building(u) ? "Under construction" : "Morphing";
-			p.frac = progress_frac(ut->build_time - u->remaining_build_time, ut->build_time);
+			p.label = ut_building(u) && target == ut ? "Under construction" : "Morphing";
+			p.frac = progress_frac(target->build_time - u->remaining_build_time, target->build_time);
 			ci.progress.push_back(p);
 		} else if (!u->build_queue.empty() && u->build_queue.front()) {
 			console_progress p;
@@ -2400,7 +2409,7 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = panel_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(8, 10, 16, 190));
 
-		draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, wireframe_grp, (size_t)u->unit_type->id, scale, 1, vitals_of(u));
+		draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, wireframe_grp, (size_t)shown_type(u)->id, scale, 1, vitals_of(u));
 		for (size_t i = 0; i != ci.vitals.size(); ++i) {
 			auto& l = ci.vitals[i];
 			hud_text(buf, pitch, w, h, pad + (left_w - text_w(l.text)) / 2, pad + wire + (int)i * ch, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
@@ -2450,7 +2459,7 @@ struct ui_functions: ui_util_functions {
 			y += gap;
 			for (size_t i = 0; i != ci.cargo.size(); ++i) {
 				const unit_t* c = ci.cargo[i];
-				size_t id = (size_t)c->unit_type->id;
+				size_t id = (size_t)shown_type(c)->id;
 				int x = x0 + (int)i * cargo_cell;
 				if (id < group_wireframe_valid.size() && group_wireframe_valid[id]) draw_wireframe(buf, pitch, w, h, x, y, group_wireframe_grp, id, scale, 1, vitals_of(c));
 				else draw_wireframe(buf, pitch, w, h, x, y, wireframe_grp, id, scale, 2, vitals_of(c));
@@ -2484,8 +2493,8 @@ struct ui_functions: ui_util_functions {
 			if (shift) {
 				current_selection_remove(clicked);
 			} else if (ctrl) {
-				auto type = clicked->unit_type;
-				for (unit_t* u : selected_units()) if (u->unit_type != type) current_selection_remove(u);
+				auto type = shown_type(clicked);
+				for (unit_t* u : selected_units()) if (shown_type(u) != type) current_selection_remove(u);
 			} else {
 				current_selection_clear();
 				current_selection_add(clicked);
@@ -2500,6 +2509,10 @@ struct ui_functions: ui_util_functions {
 		if (!selection_panel_data_loaded) return false;
 		auto units = selected_units();
 		if (units.empty()) return false;
+		// Group the grid by type, keeping selection order within a type.
+		std::stable_sort(units.begin(), units.end(), [&](const unit_t* a, const unit_t* b) {
+			return shown_type(a)->id < shown_type(b)->id;
+		});
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 8;
 		const int scale = window_height >= 1000 ? 2 : 1;
 		if (units.size() == 1) {
@@ -2530,7 +2543,7 @@ struct ui_functions: ui_util_functions {
 				int X = x + k, Y = y + cell - 3;
 				if (X < w && Y < h) buf[(size_t)Y * pitch + X] = hud_rgba(pc.r, pc.g, pc.b, 255);
 			}
-			size_t id = (size_t)u->unit_type->id;
+			size_t id = (size_t)shown_type(u)->id;
 			if (id < group_wireframe_valid.size() && group_wireframe_valid[id]) {
 				draw_wireframe(buf, pitch, w, h, x + 1, y, group_wireframe_grp, id, scale, 1, vitals_of(u));
 			} else {

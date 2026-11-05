@@ -1758,6 +1758,14 @@ struct ui_functions: ui_util_functions {
 	int viewport_w = 0;
 	bool edge_pan = true;
 	int edge_pan_px = 4;
+	// Keyboard and edge scroll speed, a level in the settings menu: level 3 is the original
+	// speed, and the default (5) scrolls twice as fast.
+	static constexpr int scroll_speed_levels = 9;
+	int scroll_speed_level = 5;
+	double scroll_speed_factor() const {
+		static const double factors[scroll_speed_levels] = {0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5};
+		return factors[std::max(1, std::min(scroll_speed_levels, scroll_speed_level)) - 1];
+	}
 
 	void resize(int width, int height) {
 		if (!wnd && create_window) wnd.create("OpenBW", 0, 0, width, height);
@@ -3397,7 +3405,8 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// ---- Settings menu ('?'): a checkbox for every toggle, saved between sessions ----
-	// Click a row, or press its key as usual. Choices are saved to
+	// Click a row, or press its key as usual. A level setting (scroll speed) is a row of
+	// notches instead: click a notch to set it, or the row's label to step up (wrapping). Choices are saved to
 	// $XDG_CONFIG_HOME/openbw-viewer/settings (~/.config/... by default; %APPDATA% on
 	// Windows) whenever one changes, and loaded at startup.
 	bool show_settings_menu = false;
@@ -3412,6 +3421,9 @@ struct ui_functions: ui_util_functions {
 		bool persist;
 		std::function<bool()> get;
 		std::function<void()> toggle;
+		int levels = 0;  // > 0: a level 1..levels shown as notches, instead of a checkbox
+		std::function<int()> level = {};
+		std::function<void(int)> set_level = {};
 	};
 
 	void toggle_mute() {
@@ -3436,6 +3448,14 @@ struct ui_functions: ui_util_functions {
 			std::function<void()>([this] { toggle_auto_observer(); })));
 		add("muted", "Mute sound", "m", true, std::make_pair(std::function<bool()>([this] { return global_volume == 0; }),
 			std::function<void()>([this] { toggle_mute(); })));
+		{
+			viewer_setting v{"scroll_speed", "Scroll speed", "", true, [] { return false; },
+				[this] { scroll_speed_level = scroll_speed_level % scroll_speed_levels + 1; }};
+			v.levels = scroll_speed_levels;
+			v.level = [this] { return scroll_speed_level; };
+			v.set_level = [this](int l) { scroll_speed_level = std::max(1, std::min(scroll_speed_levels, l)); };
+			r.push_back(std::move(v));
+		}
 		add("graphs", "Graphs", "g", false, flag(show_graphs));
 		add("graph_minimized", "Graphs: minimized in the corner", "m (graphs open)", true, flag(graph_minimized));
 		add("graph_value", "Graphs: resource value, not supply", "r (graphs open)", true, flag(graph_value_mode));
@@ -3475,7 +3495,10 @@ struct ui_functions: ui_util_functions {
 
 	a_string settings_state() {
 		a_string s;
-		for (auto& v : viewer_settings()) if (v.persist) s += a_string(v.id) + "=" + (v.get() ? "1" : "0") + "\n";
+		for (auto& v : viewer_settings()) {
+			if (!v.persist) continue;
+			s += a_string(v.id) + "=" + (v.levels ? a_string(std::to_string(v.level()).c_str()) : a_string(v.get() ? "1" : "0")) + "\n";
+		}
 		char z[32];
 		std::snprintf(z, sizeof(z), "zoom=%g\n", zoom);
 		return s + z;
@@ -3500,7 +3523,9 @@ struct ui_functions: ui_util_functions {
 				}
 				bool want = eq[1] == '1';
 				for (auto& v : settings) {
-					if (v.persist && std::strcmp(v.id, line) == 0 && v.get() != want) v.toggle();
+					if (!v.persist || std::strcmp(v.id, line) != 0) continue;
+					if (v.levels) v.set_level(std::atoi(eq + 1));
+					else if (v.get() != want) v.toggle();
 				}
 			}
 			std::fclose(f);
@@ -3528,6 +3553,11 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+	static constexpr int notch_pitch = 12;  // level notches: 9 px wide, 3 px apart
+
+	// Panel-relative x of a level row's first notch.
+	static int notches_x(int panel_w, int levels) { return panel_w - 16 - levels * notch_pitch + 3; }
+
 	void draw_settings_menu() {
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 16, row_h = ch + 8;
 		auto settings = viewer_settings();
@@ -3537,13 +3567,13 @@ struct ui_functions: ui_util_functions {
 			"wheel       zoom             arrows / edges   scroll",
 			"[ ]         graph time zoom  tab, 1-5   graph tabs",
 		};
-		int label_cols = 0, key_cols = 0, other_cols = 0;
+		int label_cols = 0, key_w = 0, other_cols = 0;
 		for (auto& v : settings) {
 			label_cols = std::max(label_cols, (int)std::strlen(v.label));
-			key_cols = std::max(key_cols, (int)std::strlen(v.key));
+			key_w = std::max(key_w, v.levels ? v.levels * notch_pitch : (int)std::strlen(v.key) * cw);
 		}
 		for (auto* s : other_keys) other_cols = std::max(other_cols, (int)std::strlen(s));
-		int w = pad * 2 + std::max((4 + label_cols + 3 + key_cols) * cw, other_cols * cw);
+		int w = pad * 2 + std::max((4 + label_cols + 3) * cw + key_w, other_cols * cw);
 		int h = pad * 2 + ch + 12 + (int)settings.size() * row_h + 12 + ch + 6 + (int)(sizeof(other_keys) / sizeof(*other_keys)) * ch;
 		if (!settings_surface || settings_surface->w != w || settings_surface->h != h) {
 			settings_surface = native_window_drawing::create_rgba_surface(w, h);
@@ -3559,8 +3589,23 @@ struct ui_functions: ui_util_functions {
 		settings_row_rects.clear();
 		int y = pad + ch + 12;
 		for (auto& v : settings) {
-			bool on = v.get();
 			settings_row_rects.push_back(rect{{pad - 4, y}, {w - pad + 4, y + row_h}});
+			if (v.levels) {
+				// The level as a number where the checkbox goes, then the notches up to it lit.
+				int lv = v.level();
+				hud_text(buf, pitch, w, h, pad + 3, y + 4, std::to_string(lv).c_str(), 110, 230, 90);
+				hud_text(buf, pitch, w, h, pad + 4 * cw, y + 4, v.label, 240, 240, 240);
+				int nx = notches_x(w, v.levels), ny = y + (row_h - 14) / 2;
+				for (int i = 0; i != v.levels; ++i) {
+					int x = nx + i * notch_pitch;
+					fill_rgba(buf, pitch, w, h, x, ny, notch_pitch - 3, 14, hud_rgba(20, 24, 34, 255));
+					bevel(buf, pitch, w, h, x, ny, notch_pitch - 3, 14, hud_rgba(150, 140, 80, 255), hud_rgba(60, 56, 30, 255));
+					if (i < lv) fill_rgba(buf, pitch, w, h, x + 2, ny + 2, notch_pitch - 7, 10, hud_rgba(110, 230, 90, 255));
+				}
+				y += row_h;
+				continue;
+			}
+			bool on = v.get();
 			// Checkbox
 			int bx = pad, by = y + (row_h - 14) / 2;
 			fill_rgba(buf, pitch, w, h, bx, by, 14, 14, hud_rgba(20, 24, 34, 255));
@@ -3592,7 +3637,12 @@ struct ui_functions: ui_util_functions {
 		auto settings = viewer_settings();
 		for (size_t i = 0; i != settings_row_rects.size() && i != settings.size(); ++i) {
 			auto& r = settings_row_rects[i];
-			if (x >= r.from.x && x < r.to.x && y >= r.from.y && y < r.to.y) settings[i].toggle();
+			if (x < r.from.x || x >= r.to.x || y < r.from.y || y >= r.to.y) continue;
+			auto& v = settings[i];
+			int nx = notches_x(a.to.x - a.from.x, v.levels);
+			// A click on (or between) the notches sets the level; elsewhere on the row steps it.
+			if (v.levels && x >= nx - 3) v.set_level((x - (nx - 3)) / notch_pitch + 1);
+			else v.toggle();
 		}
 		return true;
 	}
@@ -3633,13 +3683,144 @@ struct ui_functions: ui_util_functions {
 		fill_rgba(buf, pitch, w, h, x + rw - 1, y, 1, rh, dark);
 	}
 
+	// ---- Replay controls: slower, pause/play and faster, left of the seek bar ----
+	enum replay_button { replay_button_slower, replay_button_pause, replay_button_faster, replay_button_count };
+	static constexpr int replay_controls_w = 24 + 4 + 32 + 4 + 24 + 12;  // buttons, then a divider
+
+	// The replay panel in window pixels: its outer rect and each button's rect.
+	struct replay_panel_layout {
+		rect panel;
+		std::array<rect, replay_button_count> buttons;
+	};
+	replay_panel_layout replay_panel() const {
+		const int ch = hud_font::cell_h, pad = 8;
+		rect bar = replay_bar_window_rect();
+		replay_panel_layout r;
+		r.panel = rect{{bar.from.x - pad - replay_controls_w, bar.from.y - pad - ch - 6}, {bar.to.x + pad, bar.to.y + pad}};
+		int inner_top = r.panel.from.y + pad, inner_h = ch + 6 + (bar.to.y - bar.from.y);
+		int x = r.panel.from.x + pad;
+		auto button = [&](int size) {
+			int y = inner_top + (inner_h - size) / 2;
+			rect b{{x, y}, {x + size, y + size}};
+			x += size + 4;
+			return b;
+		};
+		r.buttons[replay_button_slower] = button(24);
+		r.buttons[replay_button_pause] = button(32);
+		r.buttons[replay_button_faster] = button(24);
+		return r;
+	}
+
+	static bool rect_contains(const rect& r, int x, int y) { return x >= r.from.x && x < r.to.x && y >= r.from.y && y < r.to.y; }
+
+	bool can_step_speed(bool faster) const {
+		return faster ? game_speed < fp8::integer(128) : game_speed > fp8::from_raw(fp8::integer(1).raw_value / 4);
+	}
+
+	int replay_button_at(int wx, int wy) const {
+		auto layout = replay_panel();
+		for (int i = 0; i != replay_button_count; ++i) if (rect_contains(layout.buttons[i], wx, wy)) return i;
+		return -1;
+	}
+
+	int replay_button_held = -1;  // pressed with the mouse, until it is released
+
+	// Mouse down (window pixels): presses a control. Any click on the panel outside the seek
+	// bar is consumed, so it doesn't select or move the camera.
+	bool replay_controls_click(int wx, int wy) {
+		if (replay_st.end_frame == 0 || !show_replay_panel()) return false;
+		int b = replay_button_at(wx, wy);
+		if (b == replay_button_pause) is_paused = !is_paused;
+		else if (b == replay_button_slower || b == replay_button_faster) step_speed(b == replay_button_faster);
+		if (b >= 0) {
+			replay_button_held = b;
+			return true;
+		}
+		rect bar = replay_bar_window_rect();
+		int slack = (int)(4 * zoom);
+		bool on_bar = wx >= bar.from.x && wx < bar.to.x && wy >= bar.from.y - slack && wy < bar.to.y + slack;
+		return !on_bar && rect_contains(replay_panel().panel, wx, wy);
+	}
+
+	bool show_replay_panel() const { return draw_ui_elements; }
+
+	// Pixel-art icons for the buttons, centred in a size x size square at (x, y).
+	void draw_play_icon(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int size, uint32_t c) {
+		int th = size / 2 | 1, tw = th / 2 + 2, x0 = x + (size - tw) / 2 + 1, y0 = y + (size - th) / 2;
+		for (int i = 0; i != tw; ++i) {
+			int half = (th / 2) * (tw - i) / tw;
+			fill_rgba(buf, pitch, w, h, x0 + i, y0 + th / 2 - half, 1, half * 2 + 1, c);
+		}
+	}
+	void draw_pause_icon(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int size, uint32_t c) {
+		int bh = size / 2, bw = std::max(3, size / 8), gap = bw;
+		int x0 = x + (size - bw * 2 - gap) / 2, y0 = y + (size - bh) / 2;
+		fill_rgba(buf, pitch, w, h, x0, y0, bw, bh, c);
+		fill_rgba(buf, pitch, w, h, x0 + bw + gap, y0, bw, bh, c);
+	}
+	// Two chevron-triangles pointing right (faster) or left (slower).
+	void draw_speed_icon(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int size, bool right, uint32_t c) {
+		int th = size / 2 - 1 | 1, tw = th / 2 + 1, total = tw * 2, x0 = x + (size - total) / 2, y0 = y + (size - th) / 2;
+		for (int t = 0; t != 2; ++t) {
+			for (int i = 0; i != tw; ++i) {
+				int col = right ? i : tw - 1 - i;
+				int half = (th / 2) * (tw - i) / tw;
+				fill_rgba(buf, pitch, w, h, x0 + t * tw + col, y0 + th / 2 - half, 1, half * 2 + 1, c);
+			}
+		}
+	}
+
+	// A console-style button: bevelled olive frame, sunk while pressed, lit while hovered.
+	void draw_replay_button(uint32_t* buf, size_t pitch, int w, int h, const rect& r, bool hover, bool pressed, bool enabled) {
+		int x = r.from.x, y = r.from.y, bw = r.to.x - r.from.x, bh = r.to.y - r.from.y;
+		fill_rgba(buf, pitch, w, h, x, y, bw, bh, hud_rgba(0, 0, 0, 255));
+		uint32_t face = pressed ? hud_rgba(14, 18, 10, 255) : hover && enabled ? hud_rgba(52, 62, 36, 255) : hud_rgba(30, 36, 22, 255);
+		fill_rgba(buf, pitch, w, h, x + 1, y + 1, bw - 2, bh - 2, face);
+		// Lighter upper half, as on the console's buttons.
+		if (!pressed) fill_rgba(buf, pitch, w, h, x + 2, y + 2, bw - 4, (bh - 4) / 2, hover && enabled ? hud_rgba(62, 74, 44, 255) : hud_rgba(38, 46, 28, 255));
+		uint32_t light = hud_rgba(150, 164, 108, 255), dark = hud_rgba(44, 50, 32, 255);
+		if (pressed) std::swap(light, dark);
+		bevel(buf, pitch, w, h, x + 1, y + 1, bw - 2, bh - 2, light, dark);
+	}
+
+	void draw_replay_controls(uint32_t* buf, size_t pitch, int w, int h, int ox, int oy) {
+		auto layout = replay_panel();
+		int mx = -1, my = -1;
+		if (wnd.has_mouse_focus()) wnd.get_cursor_pos(&mx, &my);
+		int hovered = replay_button_at(mx, my);
+		for (int i = 0; i != replay_button_count; ++i) {
+			rect r = layout.buttons[i];
+			bool enabled = i == replay_button_pause || can_step_speed(i == replay_button_faster);
+			bool pressed = replay_button_held == i && hovered == i;
+			draw_replay_button(buf, pitch, w, h, rect{{r.from.x - ox, r.from.y - oy}, {r.to.x - ox, r.to.y - oy}}, hovered == i, pressed, enabled);
+			int size = r.to.x - r.from.x, x = r.from.x - ox + (pressed ? 1 : 0), y = r.from.y - oy + (pressed ? 1 : 0);
+			uint32_t c = !enabled ? hud_rgba(80, 86, 64, 255) : hovered == i ? hud_rgba(255, 252, 220, 255) : hud_rgba(248, 240, 170, 255);
+			if (i == replay_button_pause) {
+				if (is_paused) draw_play_icon(buf, pitch, w, h, x, y, size, hovered == i ? hud_rgba(190, 255, 160, 255) : hud_rgba(150, 230, 110, 255));
+				else draw_pause_icon(buf, pitch, w, h, x, y, size, c);
+			} else draw_speed_icon(buf, pitch, w, h, x, y, size, i == replay_button_faster, c);
+		}
+		// Divider between the controls and the timer/seek bar.
+		int dx = layout.buttons[replay_button_faster].to.x - ox + 6;
+		fill_rgba(buf, pitch, w, h, dx, 6, 1, h - 12, hud_rgba(24, 28, 18, 255));
+		fill_rgba(buf, pitch, w, h, dx + 1, 6, 1, h - 12, hud_rgba(84, 94, 60, 255));
+	}
+
+	const char* replay_button_tip(int b) const {
+		if (b == replay_button_slower) return "Slower  (-)";
+		if (b == replay_button_faster) return "Faster  (=)";
+		return is_paused ? "Play  (space)" : "Pause  (space)";
+	}
+
 	void draw_replay_bar() {
 		if (replay_st.end_frame == 0) return;
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = 8;
 		rect bar = replay_bar_window_rect();
 		int bw = bar.to.x - bar.from.x, bh = bar.to.y - bar.from.y;
-		int w = bw + pad * 2, h = ch + 6 + bh + pad * 2;
-		int ox = bar.from.x - pad, oy = bar.from.y - pad - ch - 6;
+		auto layout = replay_panel();
+		int w = layout.panel.to.x - layout.panel.from.x, h = layout.panel.to.y - layout.panel.from.y;
+		int ox = layout.panel.from.x, oy = layout.panel.from.y;
+		const int lx = bar.from.x - ox;  // left edge of the timer and seek bar in the panel
 		if (!replay_bar_surface || replay_bar_surface->w != w || replay_bar_surface->h != h) {
 			replay_bar_surface = native_window_drawing::create_rgba_surface(w, h);
 			replay_bar_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
@@ -3651,17 +3832,17 @@ struct ui_functions: ui_util_functions {
 		bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
 
 		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(replay_st.end_frame);
-		hud_text(buf, pitch, w, h, pad, pad - 2, timer.c_str(), 248, 240, 170);
+		hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 248, 240, 170);
 		if (auto_observer) {
 			bool held = clock.now() < observer_manual_until;
-			hud_text(buf, pitch, w, h, pad + ((int)timer.size() + 2) * cw, pad - 2, held ? "AUTO (manual)" : "AUTO", held ? 150 : 120, held ? 150 : 220, held ? 150 : 255);
+			hud_text(buf, pitch, w, h, lx + ((int)timer.size() + 2) * cw, pad - 2, held ? "AUTO (manual)" : "AUTO", held ? 150 : 120, held ? 150 : 220, held ? 150 : 255);
 		}
 		a_string speed = speed_label();
 		if (is_paused) hud_text(buf, pitch, w, h, w - pad - (int)speed.size() * cw, pad - 2, speed.c_str(), 255, 190, 70);
 		else hud_text(buf, pitch, w, h, w - pad - (int)speed.size() * cw, pad - 2, speed.c_str(), 150, 230, 110);
 
 		// Track: segmented like the in-game bars
-		int tx = pad, ty = pad + ch + 4;
+		int tx = lx, ty = pad + ch + 4;
 		draw_bw_bar(buf, pitch, w, h, tx, ty, bw, bh, (double)std::min(st.current_frame, replay_st.end_frame) / replay_st.end_frame, 3);
 		auto frame_x = [&](int frame) { return tx + 2 + (int)((int64_t)(bw - 4) * std::max(0, std::min(frame, replay_st.end_frame)) / replay_st.end_frame); };
 		int fx = frame_x(st.current_frame);
@@ -3674,10 +3855,17 @@ struct ui_functions: ui_util_functions {
 		// Thumb
 		fill_rgba(buf, pitch, w, h, fx - 2, ty - 3, 5, bh + 6, hud_rgba(20, 24, 16, 255));
 		fill_rgba(buf, pitch, w, h, fx - 1, ty - 2, 3, bh + 4, hud_rgba(236, 244, 214, 255));
+		draw_replay_controls(buf, pitch, w, h, ox, oy);
 
 		replay_bar_surface->unlock();
 		replay_bar_surface->blit(&*window_surface, ox, oy);
 		if (hover >= 0) draw_replay_tip(format_game_time(hover), ox + frame_x(hover), oy);
+		else if (wnd.has_mouse_focus()) {
+			int mx = -1, my = -1;
+			wnd.get_cursor_pos(&mx, &my);
+			int b = replay_button_at(mx, my);
+			if (b >= 0) draw_replay_tip(replay_button_tip(b), (layout.buttons[b].from.x + layout.buttons[b].to.x) / 2, oy);
+		}
 	}
 
 	// Small timer label centred on x, just above the replay bar panel whose top is panel_y.
@@ -3853,6 +4041,11 @@ struct ui_functions: ui_util_functions {
 					continue;
 				}
 				if (e.type == native_window::event_t::type_mouse_button_down && settings_menu_click(e.mouse_x, e.mouse_y)) continue;
+				if (e.type == native_window::event_t::type_mouse_button_down && e.button == 1 && replay_controls_click(e.mouse_x, e.mouse_y)) continue;
+				if (e.type == native_window::event_t::type_mouse_button_up && e.button == 1 && replay_button_held >= 0) {
+					replay_button_held = -1;
+					continue;
+				}
 				if (e.type == native_window::event_t::type_mouse_button_down && graph_panel_click(e.mouse_x, e.mouse_y)) continue;
 				if (e.type == native_window::event_t::type_mouse_button_down && e.button == 1) {
 					bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
@@ -4015,7 +4208,7 @@ struct ui_functions: ui_util_functions {
 				std::array<int, 6> scroll_speeds = {3, 3, 5, 8, 8, 10};
 
 				if (!is_drag_selecting) {
-					int scroll_speed = scroll_speeds[scroll_speed_n];
+					int scroll_speed = std::max(1, (int)std::lround(scroll_speeds[scroll_speed_n] * scroll_speed_factor()));
 					auto prev_screen_pos = screen_pos;
 					if (wnd.get_key_state(81)) screen_pos.y += scroll_speed;
 					else if (wnd.get_key_state(82)) screen_pos.y -= scroll_speed;

@@ -39,10 +39,12 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   as Brood War does (explored ground dimmed, unexplored black, soft edges), on the
   minimap too.
 - **Settings menu** (`?`): checkboxes for every toggle (overlay, selection panel, health
-  bars, fog, two-colour mode, auto observer, mute, graph modes). Choices, whether made
+  bars, fog, two-colour mode, auto observer, mute, graph modes) and a scroll speed slider
+  (keyboard and edge scrolling; default twice the original speed). Choices, whether made
   there or with the keys, are saved to `$XDG_CONFIG_HOME/openbw-viewer/settings`
   (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
-- **Replay bar** in the bottom-right corner: game timer, speed or pause state, and a seek bar. Hover the seek bar to see the game time under the cursor.
+- **Replay bar** in the bottom-right corner: slower / pause-play / faster buttons, game timer,
+  speed or pause state, and a seek bar. Hover the seek bar to see the game time under the cursor.
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls.
 - **Sound** through SDL2_mixer, when it is installed.
 - **Edge panning**, and a game view capped at **16:9**, with black bars on ultrawide windows.

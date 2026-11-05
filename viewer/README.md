@@ -42,7 +42,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   bars, fog, two-colour mode, auto observer, mute, graph modes). Choices, whether made
   there or with the keys, are saved to `$XDG_CONFIG_HOME/openbw-viewer/settings`
   (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
-- **Replay bar** in the bottom-right corner: game timer, speed or pause state, and a seek bar.
+- **Replay bar** in the bottom-right corner: game timer, speed or pause state, and a seek bar. Hover the seek bar to see the game time under the cursor.
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls.
 - **Sound** through SDL2_mixer, when it is installed.
 - **Edge panning**, and a game view capped at **16:9**, with black bars on ultrawide windows.

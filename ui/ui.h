@@ -3600,7 +3600,21 @@ struct ui_functions: ui_util_functions {
 	// ---- Replay bar: game timer, speed and seek bar, bottom-right, drawn crisp ----
 	// Styled after Brood War's console: black panel, olive bevelled frame, hp-bar green
 	// progress, pale yellow timer text.
-	std::unique_ptr<native_window_drawing::surface> replay_bar_surface;
+	std::unique_ptr<native_window_drawing::surface> replay_bar_surface, replay_tip_surface;
+
+	// Frame under the cursor on the seek bar (window pixels, same mapping as a click), or -1
+	// when the cursor is elsewhere. While dragging, the cursor may stray off the bar.
+	int replay_bar_hover_frame(const rect& bar) {
+		if (!wnd.has_mouse_focus()) return -1;
+		int mx = -1, my = -1;
+		wnd.get_cursor_pos(&mx, &my);
+		int slack = (int)(4 * zoom);
+		bool over = mx >= bar.from.x && mx < bar.to.x && my >= bar.from.y - slack && my < bar.to.y + slack;
+		if (!over && !is_moving_replay_slider) return -1;
+		int bw = std::max(1, bar.to.x - bar.from.x);
+		int x = std::max(0, std::min(bw, mx - bar.from.x));
+		return (int)((int64_t)x * replay_st.end_frame / bw);
+	}
 
 	// 1x is OpenBW's normal replay rate (42 ms per frame, Brood War's "Fastest").
 	a_string speed_label() const {
@@ -3655,12 +3669,33 @@ struct ui_functions: ui_util_functions {
 			int sx = frame_x(replay_frame);
 			fill_rgba(buf, pitch, w, h, sx, ty - 2, 1, bh + 4, hud_rgba(248, 240, 170, 255));
 		}
+		int hover = replay_bar_hover_frame(bar);
+		if (hover >= 0) fill_rgba(buf, pitch, w, h, frame_x(hover), ty, 1, bh, hud_rgba(248, 240, 170, 200));
 		// Thumb
 		fill_rgba(buf, pitch, w, h, fx - 2, ty - 3, 5, bh + 6, hud_rgba(20, 24, 16, 255));
 		fill_rgba(buf, pitch, w, h, fx - 1, ty - 2, 3, bh + 4, hud_rgba(236, 244, 214, 255));
 
 		replay_bar_surface->unlock();
 		replay_bar_surface->blit(&*window_surface, ox, oy);
+		if (hover >= 0) draw_replay_tip(format_game_time(hover), ox + frame_x(hover), oy);
+	}
+
+	// Small timer label centred on x, just above the replay bar panel whose top is panel_y.
+	void draw_replay_tip(const a_string& text, int x, int panel_y) {
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h;
+		int w = (int)text.size() * cw + 10, h = ch + 6;
+		if (!replay_tip_surface || replay_tip_surface->w != w || replay_tip_surface->h != h) {
+			replay_tip_surface = native_window_drawing::create_rgba_surface(w, h);
+			replay_tip_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)replay_tip_surface->lock();
+		size_t pitch = replay_tip_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 230));
+		bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
+		hud_text(buf, pitch, w, h, 5, 2, text.c_str(), 248, 240, 170);
+		replay_tip_surface->unlock();
+		int left = std::max(viewport_x, std::min(viewport_x + viewport_w - w, x - w / 2));
+		replay_tip_surface->blit(&*window_surface, left, std::max(0, panel_y - h - 3));
 	}
 
 	a_vector<unit_id> current_selection;

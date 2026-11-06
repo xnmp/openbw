@@ -1767,7 +1767,7 @@ struct ui_functions: ui_util_functions {
 		}
 		// 5: army icons, the costliest placed first. A row that would overlap a costlier
 		// one is left out: at the minimap's scale the two read as one army.
-		const int icon = std::max(14, std::min(26, w / 11));
+		const int icon = std::max(16, std::min(30, w * 2 / 19));
 		// Groups of one player closer than about an icon's width share a row.
 		auto clumps = minimap_army_clumps((int)(icon * 32 / std::max(sx, sy) * 0.8));
 		std::vector<minimap_clumps::badge> want;
@@ -1782,15 +1782,16 @@ struct ui_functions: ui_util_functions {
 			uint32_t c = palette_rgba(img.player_minimap_colors.at(player_color(cl.owner)));
 			const int x0 = placed[i].x, y0 = placed[i].y, bw = want[i].w, bh = want[i].h, s = bh - 2;
 			// A badge: a round plate in the player's colour (a pill for a row of types), a
-			// white border and a thin dark edge outside it, so it stands out on any ground and
-			// over the unit dots under it; inside, each type's silhouette in white, most cost
-			// first, its shading kept as darker tones of the plate's colour.
+			// yellow border and a thin dark edge outside it, so it stands out on any ground and
+			// over the unit dots under it; inside, each type's silhouette in yellow, most cost
+			// first, its shading kept as darker amber. Yellow is no player's colour here, so a
+			// badge reads as an army icon at a glance while the plate says whose it is.
 			uint32_t plate = minimap_shade(c, 3, 4), black = hud_rgba(0, 0, 0, 255);
 			rounded(x0 - 1, y0 - 1, x0 + bw + 1, y0 + bh + 1, bh / 2.0 + 1, black, 150);
-			rounded(x0, y0, x0 + bw, y0 + bh, bh / 2.0, hud_rgba(255, 255, 255, 255), 235);
+			rounded(x0, y0, x0 + bw, y0 + bh, bh / 2.0, hud_rgba(255, 214, 40, 255), 245);
 			rounded(x0 + 1.5, y0 + 1.5, x0 + bw - 1.5, y0 + bh - 1.5, bh / 2.0 - 1.5, plate, 250);
 			const int is = std::max(6, (bh - 4) * 4 / 5);  // the square icon fits inside the round plate
-			uint32_t shadow = minimap_shade(c, 1, 3);
+			const uint32_t shadow = hud_rgba(110, 70, 0, 255), light = hud_rgba(255, 226, 60, 255);
 			for (size_t t = 0; t != cl.c.types.size(); ++t) {
 				const auto& m = minimap_icon_mask(cl.c.types[t], is);
 				const int ix = x0 + 1 + (int)t * (s + 1) + (s - is) / 2, iy = y0 + (bh - is) / 2;
@@ -1798,9 +1799,9 @@ struct ui_functions: ui_util_functions {
 					uint16_t v = m[(size_t)y * is + x];
 					int a = v >> 8, l = v & 0xff;
 					if (!a) continue;
-					// Dark tones take the plate's shadow colour, light ones go to white.
+					// Dark tones go to amber, light ones to bright yellow.
 					int t2 = std::min(255, l * 3 / 2);
-					auto mix = [&](int sh) { return ((shadow >> sh & 0xff) * (255 - t2) + (255u) * t2) / 255 << sh; };
+					auto mix = [&](int sh) { return ((shadow >> sh & 0xff) * (255 - t2) + (light >> sh & 0xff) * t2) / 255 << sh; };
 					blend(ix + x, iy + y, mix(0) | mix(8) | mix(16) | 0xff000000u, std::min(255, a * 4 / 3));
 				}
 			}

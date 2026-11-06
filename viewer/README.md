@@ -148,10 +148,8 @@ What is drawn from Remastered: terrain (HD megatiles and creep edges), every ima
 sprite with team colour, shadows, cloaking, warp-in and warp flash, fire, smoke and
 explosions, selection circles, selection-panel wireframes and the mouse cursor. Sprites are composited the way Remastered's own
 shaders do it (team colour mask, shadows that darken by up to half without stacking).
-Not reproduced: the dynamic lighting from normal/specular maps and animated water. Health
-bars are the viewer's own, drawn at window resolution (dark rounded backing, pips scaled to max hp,
-green/amber/red fill, blue shield row above, purple energy row below; rules in `ui/health_bar.h`),
-fainter at full health so a healthy crowd stays quiet; the classic view keeps the 8-bit bars. Assets load the first time
+Not reproduced: the dynamic lighting from normal/specular maps, animated water, and HD
+health bars (the classic ones are drawn over the HD view). Assets load the first time
 they are seen and stay block-compressed; frames are decoded and scaled as they are drawn,
 with both kept within fixed budgets (384 MB of atlases, 256 MB of scaled frames; past
 one, what was drawn least recently is dropped). Over a whole

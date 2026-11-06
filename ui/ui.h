@@ -5216,7 +5216,10 @@ struct ui_functions: ui_util_functions {
 		return hit;
 	}
 
-	// Draws the markers on the seek bar's track; frame_x maps a frame to a panel x.
+	// Draws the markers around the seek bar's track (top ty, height bh), leaving the track
+	// itself to the progress fill: each battle a thin red strip just under the track (more
+	// solid the more was lost) with a small tick above its start, the first loss a short
+	// cyan line through the track. frame_x maps a frame to a panel x.
 	template<typename frame_x_F>
 	void draw_timeline_markers(uint32_t* buf, size_t pitch, int w, int h, int ty, int bh, frame_x_F&& frame_x) {
 		const timeline::markers* m = timeline_markers();
@@ -5225,18 +5228,13 @@ struct ui_functions: ui_util_functions {
 		for (const auto& b : m->battles) biggest = std::max(biggest, b.total);
 		for (const auto& b : m->battles) {
 			int x0 = frame_x(b.start), x1 = std::max(x0 + 2, frame_x(b.end) + 1);
-			int a = 150 + (int)(100 * b.total / biggest);  // bigger battles are more solid
-			blend_rect(buf, pitch, w, h, x0, ty + 1, x1 - x0, bh - 2, hud_rgba(255, 36, 24, a));
-			// tick at the start, standing proud of the track
-			fill_rgba(buf, pitch, w, h, x0 - 1, ty - 4, 3, 4, hud_rgba(20, 6, 4, 255));
-			fill_rgba(buf, pitch, w, h, x0, ty - 3, 1, 3, hud_rgba(255, 70, 50, 255));
-			fill_rgba(buf, pitch, w, h, x0 - 1, ty + bh, 3, 4, hud_rgba(20, 6, 4, 255));
-			fill_rgba(buf, pitch, w, h, x0, ty + bh, 1, 3, hud_rgba(255, 70, 50, 255));
+			int a = 120 + (int)(110 * b.total / biggest);
+			blend_rect(buf, pitch, w, h, x0, ty + bh + 1, x1 - x0, 3, hud_rgba(255, 50, 36, a));
+			blend_rect(buf, pitch, w, h, x0, ty - 4, 1, 3, hud_rgba(255, 70, 50, a));
 		}
 		if (m->has_first_loss) {
 			int x = frame_x(m->first_loss.frame);
-			fill_rgba(buf, pitch, w, h, x - 1, ty - 5, 4, bh + 10, hud_rgba(10, 10, 10, 255));
-			fill_rgba(buf, pitch, w, h, x, ty - 4, 2, bh + 8, hud_rgba(90, 210, 255, 255));  // cyan, unlike the thumb
+			blend_rect(buf, pitch, w, h, x, ty - 4, 1, bh + 8, hud_rgba(90, 210, 255, 200));
 		}
 	}
 
@@ -5514,9 +5512,10 @@ struct ui_functions: ui_util_functions {
 			fill_rgba(buf, pitch, w, h, frame_x(hover), ty, 1, bh, hud_rgba(248, 240, 170, 200));
 			hover_marker = timeline_marker_at(hover, 4, bw);
 		}
-		// Thumb
-		fill_rgba(buf, pitch, w, h, fx - 2, ty - 3, 5, bh + 6, hud_rgba(20, 24, 16, 255));
-		fill_rgba(buf, pitch, w, h, fx - 1, ty - 2, 3, bh + 4, hud_rgba(236, 244, 214, 255));
+		// Thumb, standing out over the markers
+		fill_rgba(buf, pitch, w, h, fx - 3, ty - 5, 7, bh + 10, hud_rgba(10, 12, 8, 255));
+		fill_rgba(buf, pitch, w, h, fx - 2, ty - 4, 5, bh + 8, hud_rgba(250, 252, 236, 255));
+		fill_rgba(buf, pitch, w, h, fx - 2, ty - 4, 5, 1, hud_rgba(255, 255, 255, 255));
 		draw_replay_controls(buf, pitch, w, h, ox, oy);
 
 		replay_bar_surface->unlock();

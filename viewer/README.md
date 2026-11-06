@@ -21,7 +21,12 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   `shift`-click to drop it, `ctrl`-click to keep only units of its type.
 - **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute,
   smoothed over about 7-8 s), unit value, army value, workers and value lost over game
-  time; it opens on unit value.
+  time; it opens on unit value. For games between [Pluto](https://github.com/tscmoo/pluto)
+  bots, a sixth tab plots each bot's own win estimate (its network's value output, shown as
+  0-100%), read from the stats files it writes, `pluto_bandit_<opponent>.txt`. They are
+  looked for beside the replay, in its `bot-write/` or `write/`, and in the self-play layout
+  `<game>/{host,join}/bot-write/`. Each game logs 64 points, so the line is coarse (about one
+  point every 15-25 s).
   `d` switches to the first derivative (change per minute). `f` plots the first player
   minus the second, coloured by whoever is ahead. `m` pins the graphs minimized in the
   top-right corner of the view, where they keep updating (gas income dotted, as there is no
@@ -146,7 +151,7 @@ cmake --build build -j
 | `F2` | remastered or classic graphics (remastered when an install is found) |
 | `b` | health bars under all units, or only selected ones (all by default) |
 | `i` | toggle the selection panel |
-| `g` / `esc` | toggle / close the graphs (`g` on the minimized panel restores it); `tab`, `←` / `→` or `1`-`5` (or click a tab) to switch |
+| `g` / `esc` | toggle / close the graphs (`g` on the minimized panel restores it); `tab`, `←` / `→` or `1`-`5` (`6` with Pluto data; or click a tab) to switch |
 | `r` | graphs: resource value or supply |
 | `d` | graphs: level or rate of change (with the graphs closed, `d` slows playback) |
 | `f` | graphs: players' difference or a line each (with the graphs closed, fog of war) |

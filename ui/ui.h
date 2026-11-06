@@ -8,12 +8,14 @@
 #include "hud_font.h"
 #include "order_names.h"
 #include "timeline_markers.h"
+#include "pluto_win.h"
 #ifdef OPENBW_REMASTERED
 #include "scr_render.h"
 #endif
 
 #include <atomic>
 #include <climits>
+#include <fstream>
 #include <thread>
 #include <functional>
 #ifdef _WIN32
@@ -4146,7 +4148,9 @@ struct ui_functions: ui_util_functions {
 	void step_graph_window(int dir) {
 		graph_window = std::max(0, std::min(graph_window_count - 1, graph_window + dir));
 	}
-	static constexpr int graph_tab_count = 5;
+	static constexpr int graph_tab_count = 6;  // the last, the bots' win estimate, only with Pluto data
+	int graph_tabs() const { return any_win_estimate ? graph_tab_count : graph_tab_count - 1; }
+	static constexpr int win_tab = 5;
 	bool graph_value_mode = true;  // 'r': resource value <-> supply (workers unaffected)
 	bool graph_derivative = false;  // 'd': plot the rate of change per minute instead
 	bool graph_difference = false;  // 'f': first player minus second instead of a line each
@@ -4196,9 +4200,52 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+	// ---- The Pluto bot's win estimate (graph tab 6) ----
+	// Read from the bots' stats files, pluto_bandit_<opponent>.txt, which hold each game's
+	// win-estimate trajectory (see pluto_win.h). They are looked for beside the replay and in
+	// the self-play layout <game>/{host,join}/game.rep with <game>/{host,join}/bot-write/.
+	// A file named after one player is the other player's; the game is matched by length.
+	std::array<pluto_win::record, 8> win_estimate;
+	std::array<bool, 8> has_win_estimate{};
+	bool any_win_estimate = false;
+
+	void load_pluto_win_estimates(const a_string& replay_path) {
+		std::string path(replay_path.c_str());
+		size_t slash = path.find_last_of("/\\");
+		std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
+		std::vector<std::string> dirs;
+		for (const char* sub : {"", "/bot-write", "/bot-write/write", "/write"}) dirs.push_back(dir + sub);
+		for (const char* side : {"/../host", "/../join"}) {
+			for (const char* sub : {"/bot-write", "/bot-write/write"}) dirs.push_back(dir + side + sub);
+		}
+		std::vector<int> players;
+		for (int i = 0; i != 8; ++i) {
+			if (st.players[i].controller == player_t::controller_occupied && !replay_st.player_name[i].empty()) players.push_back(i);
+		}
+		if (players.size() != 2) return;  // the file names the opponent; with more, whose is it?
+		for (int k = 0; k != 2; ++k) {
+			int named = players[k], owner = players[1 - k];
+			std::string name(replay_st.player_name[named].c_str());
+			for (auto& d : dirs) {
+				std::ifstream f(d + "/pluto_bandit_" + name + ".txt", std::ios::binary);
+				if (!f) continue;
+				std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+				auto records = pluto_win::parse(text);
+				if (auto* r = pluto_win::match(records, name, replay_st.end_frame)) {
+					win_estimate[owner] = *r;
+					has_win_estimate[owner] = true;
+					break;
+				}
+			}
+		}
+		any_win_estimate = has_win_estimate[players[0]] || has_win_estimate[players[1]];
+		if (any_win_estimate) ui::log("pluto win estimates: %s%s\n", has_win_estimate[players[0]] ? replay_st.player_name[players[0]] : "", 
+			has_win_estimate[players[1]] ? " " + replay_st.player_name[players[1]] : a_string());
+	}
+
 	const char* graph_tab_name(int tab) const {
-		static const char* supply_names[graph_tab_count] = {"Income", "Supply", "Army supply", "Workers", "Supply lost"};
-		static const char* value_names[graph_tab_count] = {"Income", "Unit value", "Army value", "Workers", "Value lost"};
+		static const char* supply_names[graph_tab_count] = {"Income", "Supply", "Army supply", "Workers", "Supply lost", "Win %"};
+		static const char* value_names[graph_tab_count] = {"Income", "Unit value", "Army value", "Workers", "Value lost", "Win %"};
 		return graph_value_mode ? value_names[tab] : supply_names[tab];
 	}
 
@@ -4236,7 +4283,8 @@ struct ui_functions: ui_util_functions {
 		case 1: return graph_value_mode ? p.value_total : p.supply;
 		case 2: return graph_value_mode ? p.value_army : p.army;
 		case 3: return p.workers;
-		default: return graph_value_mode ? p.lost_value : p.lost_supply_half / 2.0;
+		case 4: return graph_value_mode ? p.lost_value : p.lost_supply_half / 2.0;
+		default: return has_win_estimate[player] ? 100 * pluto_win::chance_at(win_estimate[player], (int)i * graph_sample_interval) : 50;
 		}
 	}
 
@@ -4309,7 +4357,10 @@ struct ui_functions: ui_util_functions {
 				auto pos = colour(rows[lower_is_better ? 1 : 0], g == 1), neg = colour(rows[lower_is_better ? 0 : 1], g == 1);
 				out.push_back({rows[0].player, rows[1].player, g == 1, pos, neg});
 			} else {
-				for (auto& r : rows) out.push_back({r.player, -1, g == 1, colour(r, g == 1), colour(r, g == 1)});
+				for (auto& r : rows) {
+					if (graph_tab == win_tab && !has_win_estimate[r.player]) continue;
+					out.push_back({r.player, -1, g == 1, colour(r, g == 1), colour(r, g == 1)});
+				}
 			}
 		}
 		return out;
@@ -4375,7 +4426,7 @@ struct ui_functions: ui_util_functions {
 		} else {
 			// Tabs
 			int tx = pad;
-			for (int t = 0; t != graph_tab_count; ++t) {
+			for (int t = 0; t != graph_tabs(); ++t) {
 				char label[48];
 				std::snprintf(label, sizeof(label), "%d %s", t + 1, graph_tab_name(t));
 				int tw = (int)std::strlen(label) * cw + 16;
@@ -4410,6 +4461,7 @@ struct ui_functions: ui_util_functions {
 				}
 			}
 			if (graph_tab == 0) hud_text(buf, pitch, w, h, lx, ly, "solid: minerals/min  faint: gas/min", dim.r, dim.g, dim.b);
+			if (graph_tab == win_tab) hud_text(buf, pitch, w, h, lx, ly, "each bot's own estimate", dim.r, dim.g, dim.b);
 			char mode[96];
 			std::snprintf(mode, sizeof(mode), "r: %s  d: %s  f: %s   %s", graph_value_mode ? "resources" : "supply",
 				graph_derivative ? "per minute" : "total", difference ? "difference" : "players", range);
@@ -4444,6 +4496,11 @@ struct ui_functions: ui_util_functions {
 		double ystep = nice_step(std::max(vmax - vmin, (double)y_intervals) / y_intervals);
 		vmax = std::max(ystep, std::ceil(vmax / ystep) * ystep);
 		vmin = std::floor(vmin / ystep) * ystep;
+		if (graph_tab == win_tab && !graph_derivative && !difference) {  // a chance: always 0-100
+			vmin = 0;
+			vmax = 100;
+			ystep = 25;
+		}
 		auto to_x = [&](int frame) { return px0 + (int)((int64_t)(px1 - px0) * (frame - x_from) / std::max(1, x_to - x_from)); };
 		auto to_y = [&](double v) { return py1 - (int)((py1 - py0) * ((v - vmin) / (vmax - vmin))); };
 
@@ -4539,7 +4596,7 @@ struct ui_functions: ui_util_functions {
 			return true;
 		}
 		int x = wx - a.from.x, y = wy - a.from.y;
-		for (int t = 0; t != graph_tab_count; ++t) {
+		for (int t = 0; t != graph_tabs(); ++t) {
 			auto& r = graph_tab_rects[t];
 			if (x >= r.from.x && x < r.to.x && y >= r.from.y && y < r.to.y) graph_tab = t;
 		}
@@ -5873,11 +5930,11 @@ struct ui_functions: ui_util_functions {
 					if (e.sym == '\t') {
 						bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
 						if (shift) two_colour_mode = !two_colour_mode;
-						else if (graph_full()) graph_tab = (graph_tab + 1) % graph_tab_count;
+						else if (graph_full()) graph_tab = (graph_tab + 1) % graph_tabs();
 					}
-					if (graph_full() && e.sym >= '1' && e.sym < '1' + graph_tab_count) graph_tab = e.sym - '1';
+					if (graph_full() && e.sym >= '1' && e.sym < '1' + graph_tabs()) graph_tab = e.sym - '1';
 					if (graph_arrows_switch_tabs() && (e.scancode == 79 || e.scancode == 80)) {  // right / left
-						graph_tab = (graph_tab + (e.scancode == 79 ? 1 : graph_tab_count - 1)) % graph_tab_count;
+						graph_tab = (graph_tab + (e.scancode == 79 ? 1 : graph_tabs() - 1)) % graph_tabs();
 					}
 					if (e.sym == 'f') {
 						if (graph_full()) graph_difference = !graph_difference;

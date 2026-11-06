@@ -658,6 +658,7 @@ int main(int argc, char** argv) {
 #ifndef EMSCRIPTEN
 	ui.load_replay_file(argc > 1 ? argv[1] : "maps/p49.rep");
 	ui.start_timeline_markers(argc > 1 ? argv[1] : "maps/p49.rep");  // seek-bar markers, in the background
+	ui.load_pluto_win_estimates(argc > 1 ? argv[1] : "maps/p49.rep");  // graph tab 6, if there is Pluto data
 	ui.show_hud = true;  // stats overlay on by default in the interactive player ('?' menu toggles)
 	ui.zoom = 1.5;  // interactive default, closer to Brood War's view; the saved zoom overrides it
 	ui.load_settings();  // saved choices from the '?' menu / toggle keys override the defaults

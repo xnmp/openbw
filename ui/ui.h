@@ -1867,10 +1867,6 @@ struct ui_functions: ui_util_functions {
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
 					disc(x0, y0, x1, y1, minimap_tint(c, 70), 255);
-					{  // a bright centre, a little up and left: units read as lit, solid dots
-						double cx = (x0 + x1) / 2 - 0.3, cy = (y0 + y1) / 2 - 0.3, r = std::max(0.8, (x1 - x0) * 0.24);
-						disc(cx - r, cy - r, cx + r, cy + r, minimap_tint(c, 190), 230);
-					}
 				}
 			}
 		}

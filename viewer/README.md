@@ -64,7 +64,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   drawn at the window's resolution, each tile its terrain art averaged over a 4x4 grid (the
   remastered tiles with those graphics on). Buildings are bevelled tiles in the
   units' colour (a lit top-left band, a shadowed bottom-right one), part transparent, with
-  a dark hairline; units are dots on top with a bright centre, air army outlined in black.
+  a dark hairline; units are dots on top, air army outlined in black.
   Players' units and buildings are drawn 1.2x their footprint. Spider
   Mines, Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
   12 tiles of one of their own bases are drawn as small bevelled tiles like the buildings,

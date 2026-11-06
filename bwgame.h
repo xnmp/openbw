@@ -13898,7 +13898,7 @@ struct state_functions {
 		}
 	}
 
-	void spawn_broodlings(unit_t* target, const unit_t* source_unit) {
+	void spawn_broodlings(unit_t* target, unit_t* source_unit) {
 		if (!u_hallucination(target)) {
 			const unit_type_t* broodling_type = get_unit_type(UnitTypes::Zerg_Broodling);
 			auto spawn = [&](xy pos) {
@@ -13916,7 +13916,9 @@ struct state_functions {
 			spawn(target->sprite->position - xy(2, 2));
 			spawn(target->sprite->position + xy(2, 2));
 		}
-		// todo: increment scores and kill count
+		// todo: increment scores
+		// Kill count (display only, like those in unit_deal_damage): the Queen gets the kill.
+		if (!u_hallucination(target) && unit_target_is_enemy(source_unit, target)) ++source_unit->kill_count;
 		kill_unit(target);
 	}
 

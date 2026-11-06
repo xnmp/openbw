@@ -8,8 +8,10 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   count beside the race's Marine / Zergling / Zealot and SCV / Drone / Probe icons. Supply
   turns red when blocked. On by default; turn it off in the `?` menu.
 - **Selection panel** laid out like the in-game console. Click a unit to see its wireframe,
-  with shields, HP and energy below it. Beside the wireframe are its name, owner and kills,
-  and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Carriers, Reavers and
+  with shields, HP and energy below it, and what a Defensive Matrix on it has left to absorb. Beside the wireframe are its name, owner and kills,
+  and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Hover
+  one for its name and numbers, base plus upgrades: armor, shield armor, or a weapon's damage
+  (with hits per attack and explosive / concussive type) and range. Carriers, Reavers and
   Vultures also show interceptor, scarab or mine counts. A second row shows completed research
   that affects the unit (e.g. Metabolic Boost and Adrenal Glands on a Zergling, Stim Packs on a
   Marine); hover an icon for its name. Buildings show the training queue
@@ -166,7 +168,9 @@ Playback starts at 1×, so press `=` a few times.
 ## Notes
 
 - Kill counts: upstream OpenBW never increments them; this fork credits the killing
-  unit (an Interceptor's or Scarab's kills go to its Carrier or Reaver). Kill counts are
+  unit (an Interceptor's or Scarab's kills go to its Carrier or Reaver). Spells count for
+  their caster (Psionic Storm, Irradiate, Feedback, Spawn Broodling), an Archon starts with
+  its two Templar's kills, and spellcasters show their count too. Kill counts are
   display only, so replays still play back identically.
 
 - The overlay font in `ui/hud_font.h` is a bitmap rendering of JetBrains Mono Bold

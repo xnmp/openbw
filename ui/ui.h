@@ -3126,12 +3126,17 @@ struct ui_functions: ui_util_functions {
 			std::snprintf(buf, sizeof(buf), "%d/%d", (int)u->energy.integer_part(), (int)unit_max_energy(u).integer_part());
 			ci.vitals.push_back({buf, {225, 225, 225}});
 		}
+		if (u->defensive_matrix_hp != 0_fp8) {  // what the Defensive Matrix has left to absorb
+			std::snprintf(buf, sizeof(buf), "Matrix %d", (int)u->defensive_matrix_hp.ceil().integer_part());
+			ci.vitals.push_back({buf, {120, 200, 255}});
+		}
 
 		ci.lines.push_back({stat_text((int)shown_type(u)->id + 1), {255, 255, 255}});
 		if (u->owner != 11) ci.lines.push_back({player_label(u->owner), player_rgb(u->owner)});
 		const unit_t* armed = u->subunit ? u->subunit : u;
 		bool has_weapon = unit_ground_weapon(armed) || unit_air_weapon(armed) || unit_is_carrier(u) || unit_is_reaver(u);
-		if (has_weapon && u_completed(u)) {
+		bool spellcaster = ut_has_energy(u) && !ut_building(u);  // storms, irradiate, feedback... kill too
+		if ((has_weapon || spellcaster) && u_completed(u)) {
 			std::snprintf(buf, sizeof(buf), "Kills: %d", u->kill_count);
 			ci.lines.push_back({buf});
 		}
@@ -3143,23 +3148,61 @@ struct ui_functions: ui_util_functions {
 		if (u->owner != 11 && !ut_resource(u) && u_completed(u)) {
 			// Buildings point at upgrade 60, an unnamed placeholder whose icon index (0) is the
 			// Marine portrait; the game shows no armor icon for them, so skip unnamed upgrades.
-			auto level_icon = [&](UpgradeTypes upg, int fallback_icon) {
-				int icon = fallback_icon;
-				if ((int)upg >= 0 && (int)upg < (int)UpgradeTypes::None && get_upgrade_type(upg)->label) icon = get_upgrade_type(upg)->icon;
-				int level = player_upgrade_level(u->owner, upg);
-				return console_icon{icon, level > 0 ? level : -1};
+			// Each icon's hover tip gives what it stands for with the numbers, base + upgrades.
+			auto upgrade_name = [&](UpgradeTypes upg) {
+				bool named = (int)upg >= 0 && (int)upg < (int)UpgradeTypes::None && get_upgrade_type(upg)->label;
+				return named ? stat_text(get_upgrade_type(upg)->label) : a_string();
 			};
-			ci.icons.push_back(level_icon(ut->armor_upgrade, -1));
+			auto level_icon = [&](UpgradeTypes upg, int fallback_icon, a_string tip) {
+				int icon = fallback_icon;
+				if (!upgrade_name(upg).empty()) icon = get_upgrade_type(upg)->icon;
+				int level = player_upgrade_level(u->owner, upg);
+				return console_icon{icon, level > 0 ? level : -1, std::move(tip)};
+			};
+			auto plus = [&](int base, int bonus) {
+				char t[32];
+				if (bonus) std::snprintf(t, sizeof(t), "%d+%d", base, bonus);
+				else std::snprintf(t, sizeof(t), "%d", base);
+				return a_string(t);
+			};
+			{
+				int bonus = (int)unit_armor(u).integer_part() - ut->armor;
+				a_string name = upgrade_name(ut->armor_upgrade);
+				ci.icons.push_back(level_icon(ut->armor_upgrade, -1, (name.empty() ? a_string("Armor") : name) + ": armor " + plus(ut->armor, bonus)));
+			}
 			auto* gw = unit_ground_weapon(armed);
 			auto* aw = unit_air_weapon(armed);
+			auto weapon_icon = [&](const weapon_type_t* wt, const char* kind) {
+				int level = player_upgrade_level(u->owner, wt->damage_upgrade);
+				a_string tip = stat_text(wt->label);
+				if (tip.empty()) tip = kind;
+				tip += ": damage " + plus(wt->damage_amount, wt->damage_bonus * level);
+				if (wt->bullet_count > 1) tip += " x" + a_string(std::to_string(wt->bullet_count).c_str());
+				if (wt->damage_type == weapon_type_t::damage_type_explosive) tip += " explosive";
+				else if (wt->damage_type == weapon_type_t::damage_type_concussive) tip += " concussive";
+				int range_px = weapon_max_range(armed, wt);
+				char range[32];
+				if (range_px < 32) std::snprintf(range, sizeof(range), ", melee");  // under a tile
+				else std::snprintf(range, sizeof(range), ", range %g", range_px / 32.0);
+				tip += range;
+				if (gw && aw && gw == aw) tip += ", ground and air";
+				return console_icon{wt->icon, level > 0 ? level : -1, tip};
+			};
 			// Brood War's order: armor, shields, weapons, then special counts.
-			if (v.has_shields) ci.icons.push_back(level_icon(UpgradeTypes::Protoss_Plasma_Shields, -1));
-			if (gw) ci.icons.push_back({gw->icon, player_upgrade_level(u->owner, gw->damage_upgrade) > 0 ? player_upgrade_level(u->owner, gw->damage_upgrade) : -1});
-			if (aw && aw != gw) ci.icons.push_back({aw->icon, player_upgrade_level(u->owner, aw->damage_upgrade) > 0 ? player_upgrade_level(u->owner, aw->damage_upgrade) : -1});
-			if (unit_is_carrier(u)) ci.icons.push_back({(int)UnitTypes::Protoss_Interceptor, (int)unit_interceptor_count(u)});
-			if (unit_is_reaver(u)) ci.icons.push_back({(int)UnitTypes::Protoss_Scarab, (int)unit_scarab_count(u)});
+			if (v.has_shields) {
+				int level = player_upgrade_level(u->owner, UpgradeTypes::Protoss_Plasma_Shields);
+				ci.icons.push_back(level_icon(UpgradeTypes::Protoss_Plasma_Shields, -1,
+					upgrade_name(UpgradeTypes::Protoss_Plasma_Shields) + ": shield armor " + a_string(std::to_string(level).c_str())));
+			}
+			if (gw) ci.icons.push_back(weapon_icon(gw, "Ground weapon"));
+			if (aw && aw != gw) ci.icons.push_back(weapon_icon(aw, "Air weapon"));
+			auto count_icon = [&](int frame, int n, const char* what) {
+				return console_icon{frame, n, a_string(what) + ": " + a_string(std::to_string(n).c_str())};
+			};
+			if (unit_is_carrier(u)) ci.icons.push_back(count_icon((int)UnitTypes::Protoss_Interceptor, (int)unit_interceptor_count(u), "Interceptors"));
+			if (unit_is_reaver(u)) ci.icons.push_back(count_icon((int)UnitTypes::Protoss_Scarab, (int)unit_scarab_count(u), "Scarabs"));
 			if (unit_is_vulture(u) && player_has_researched(u->owner, TechTypes::Spider_Mines)) {
-				ci.icons.push_back({get_tech_type(TechTypes::Spider_Mines)->icon, (int)unit_spider_mine_count(u)});
+				ci.icons.push_back(count_icon(get_tech_type(TechTypes::Spider_Mines)->icon, (int)unit_spider_mine_count(u), "Spider Mines"));
 			}
 			ci.icons.erase(std::remove_if(ci.icons.begin(), ci.icons.end(), [](const console_icon& i) { return i.frame < 0; }), ci.icons.end());
 			if (u->owner < 8) {
@@ -3552,6 +3595,7 @@ struct ui_functions: ui_util_functions {
 				if (!ui_skin) fill_rgba(buf, pitch, w, h, x, y, icon_w, icon_h, hud_rgba(0, 0, 0, 255));  // HD icons carry their own alpha
 				draw_cmd_icon(buf, pitch, w, h, x, y, ci.icons[i].frame, scale);
 				if (ci.icons[i].number >= 0) draw_number(x, y, ci.icons[i].frame, ci.icons[i].number);
+				panel_tips.push_back({rect{{x, y}, {x + icon_w, y + icon_h}}, ci.icons[i].name});
 			}
 			y += icon_h;
 		}
@@ -3612,7 +3656,7 @@ struct ui_functions: ui_util_functions {
 		rect r;  // panel-relative
 		a_string text;
 	};
-	a_vector<panel_tip> panel_tips;  // hover labels on the panel (research icons)
+	a_vector<panel_tip> panel_tips;  // hover labels on the panel (status and research icons)
 
 	// The hover label of whatever panel item is under the cursor, if any.
 	void draw_panel_tip() {

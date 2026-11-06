@@ -65,8 +65,6 @@ add_executable(openbw-replay-result-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_
 target_include_directories(openbw-replay-result-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-supply-state-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/supply_state_test.cpp")
 target_include_directories(openbw-supply-state-test PRIVATE "${OPENBW_DIR}/ui")
-add_executable(openbw-minimap-bevel-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/minimap_bevel_test.cpp")
-target_include_directories(openbw-minimap-bevel-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-modal-layout-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/modal_layout_test.cpp")
 target_include_directories(openbw-modal-layout-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-skin-strip-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/skin_strip_test.cpp")

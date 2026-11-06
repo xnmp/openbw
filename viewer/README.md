@@ -98,7 +98,13 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   shaded. Hover it for the time left; click it to skip to the end. Games decided only in
   their last minute (the loser resigning) get none.
 - **Game menu** (`F10`): pauses the replay with **Return to Game**, **Options** (the
-  settings menu) and **Exit Replay**; `F10` or `Esc` returns, playing or paused as before.
+  settings menu) and **Exit Replay**, stacked as in the game's own menu; `F10` or `Esc`
+  returns, playing or paused as before. With Remastered graphics the card uses the race
+  theme's panel and the race's own dialog button art (`HD2/game/consoles/<race>/dlg.dds.grp`);
+  the end-of-replay card shares it. Protoss and Zerg panels are cut from that race's console
+  art (`console_left/center.dds`) rather than recoloured Terran metal (`ui/skin_strip.h`).
+  Layout maths is in `ui/modal_layout.h`; tests: `viewer/tests/modal_layout_test.cpp`,
+  `skin_strip_test.cpp`.
 - **Music**: the race soundtracks of the players in the replay, shuffled, from Remastered's
   `music/*.ogg` when an install is found (the classic data files have none). The master
   volume and mute apply; **Music** in the settings menu turns it off on its own.

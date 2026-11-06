@@ -6,7 +6,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Stats overlay**, top right: a line per player in the style of Brood War's resource bar,
   with its mineral, gas and supply icons for the player's race, then army supply and worker
   count beside the race's Marine / Zergling / Zealot and SCV / Drone / Probe icons. Supply
-  turns red when blocked. On by default; turn it off in the `?` menu.
+  turns red when blocked, and a fainter red one supply short of it (47/48). On by default; turn it off in the `?` menu.
 - **Selection panel** laid out like the in-game console. Click a unit to see its wireframe,
   with shields, HP and energy below it, and what a Defensive Matrix on it has left to absorb (its icon and the number; hover for the tip). Beside the wireframe are its name, owner and kills,
   and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Hover
@@ -62,11 +62,14 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
 - **Minimap** flush in the bottom-left corner; click or drag on it to move the camera. It is
   drawn at the window's resolution, each tile its terrain art averaged over a 4x4 grid (the
-  remastered tiles with those graphics on). Buildings are rounded boxes in the
-  units' colour, part transparent, with a dark hairline; units are dots on top, air army
-  outlined in black. Spider
+  remastered tiles with those graphics on). Buildings are bevelled tiles in the
+  units' colour (a lit top-left band, a shadowed bottom-right one), part transparent, with
+  a dark hairline; units are dots on top with a bright centre, air army outlined in black.
+  Players' units and buildings are drawn 1.2x their footprint. Spider
   Mines, Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
-  12 tiles of one of their own bases are dimmed, so armies stand out. A concentration of one
+  12 tiles of one of their own bases are drawn as small bevelled tiles like the buildings,
+  so armies stand out. Mineral fields and geysers more than 12 tiles from any base on the
+  minimap are slightly faint, so untaken bases recede. A concentration of one
   unit type gets a round badge with that type's icon (a pill for several types): each type's units are grouped (linked within 6 tiles,
   DBSCAN-style, and cut by 2-means until no group is wider than 10 tiles), and a group shows
   when its cost reaches 800 minerals + gas and its density 12 per square tile. Icons of one

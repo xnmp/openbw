@@ -13,7 +13,7 @@
 #include "minimap_clumps.h"
 #include "replay_result.h"
 #include "supply_state.h"
-#include "minimap_block.h"
+#include "minimap_bevel.h"
 #include "ui_theme.h"
 #include "modal_layout.h"
 #include "skin_strip.h"
@@ -1833,10 +1833,10 @@ struct ui_functions: ui_util_functions {
 				if (!shown(u) || !(ut_building(u) || u->owner >= 8)) continue;
 				box(u, 2, 4, x0, y0, x1, y1, u->owner >= 8 ? 1.0 : minimap_owned_scale);
 				uint32_t c = colour(u);
-				if (u->owner >= 8 && (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) && !near_base(u)) blend_fill(x0, y0, x1, y1, c, 95);
+				if (u->owner >= 8 && (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) && !near_base(u)) blend_fill(x0, y0, x1, y1, c, 185);  // slightly faint
 				else if (u->owner >= 8) fill(x0, y0, x1, y1, c);
 				else {
-					draw_minimap_block(x0, y0, x1, y1, minimap_tint(c, 70), blend);
+					draw_minimap_bevel(x0, y0, x1, y1, minimap_tint(c, 70), blend);
 				}
 			}
 		}
@@ -1857,7 +1857,7 @@ struct ui_functions: ui_util_functions {
 					}
 					box(u, 2, 3, x0, y0, x1, y1, minimap_owned_scale);
 					if (minimap_worker_at_work(u, depots)) {
-						disc(x0, y0, x1, y1, minimap_tint(c, 70), minimap_building_alpha);  // as the buildings: part of the base
+						draw_minimap_bevel(x0, y0, x1, y1, minimap_tint(c, 70), blend);  // as the buildings: part of the base
 						continue;
 					}
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
@@ -1917,38 +1917,34 @@ struct ui_functions: ui_util_functions {
 	static constexpr int minimap_building_alpha = 150;
 	static constexpr double minimap_owned_scale = 1.2;  // players' units and buildings, over their footprint
 
-	// A building as a block with height (see minimap_block.h): the roof in its colour, a
-	// little see-through with a lit top-left edge, and the right and front sides darker and
-	// more solid, all over a faint dark hairline that follows the block's outline.
-	// Antialiased by 4x4 supersampling; `blend(x, y, colour, alpha)` writes one pixel.
+	// A building (or a worker mining at its base) as a bevelled tile lit from the top left
+	// (see minimap_bevel.h): a bright band along the top and left edges, a dark one along the
+	// bottom and right, mitred at the corners, around a see-through face in the units'
+	// colour, over a faint dark hairline. Antialiased by 4x4 supersampling;
+	// `blend(x, y, colour, alpha)` writes one pixel.
 	template<typename B>
-	void draw_minimap_block(double x0, double y0, double x1, double y1, uint32_t base, B&& blend) const {
-		using minimap_block::face;
-		const double w = x1 - x0, h = y1 - y0, d = minimap_block::depth(w, h);
-		if (!(d > 0)) return;
-		const uint32_t roof = minimap_tint(base, 30), edge = minimap_tint(base, 120);
-		const uint32_t right = minimap_shade(base, 150, 256), front = minimap_shade(base, 95, 256);
+	void draw_minimap_bevel(double x0, double y0, double x1, double y1, uint32_t base, B&& blend) const {
+		using minimap_bevel::part;
+		const double w = x1 - x0, h = y1 - y0, bw = minimap_bevel::width(w, h);
+		if (!(bw > 0)) return;
+		const uint32_t face_c = base, lit_c = minimap_tint(base, 120), shadow_c = minimap_shade(base, 110, 256);
 		const uint32_t black = hud_rgba(0, 0, 0, 255);
-		const int roof_a = minimap_building_alpha, side_a = std::min(255, minimap_building_alpha + 70);
-		auto face_at = [&](double u, double v) { return minimap_block::at(u, v, w, h, d); };
+		const int face_a = minimap_building_alpha, edge_a = std::min(255, minimap_building_alpha + 70);
+		auto part_at = [&](double u, double v) { return minimap_bevel::at(u, v, w, h, bw); };
 		for (int y = (int)std::floor(y0) - 1; y < (int)std::ceil(y1) + 1; ++y) {
 			for (int x = (int)std::floor(x0) - 1; x < (int)std::ceil(x1) + 1; ++x) {
 				// Average the samples' colours (premultiplied) and coverage.
 				double r = 0, g = 0, b = 0, a = 0, outline = 0;
 				for (int sy_ = 0; sy_ != 4; ++sy_) for (int sx_ = 0; sx_ != 4; ++sx_) {
 					double u = x + (sx_ + 0.5) / 4 - x0, v = y + (sy_ + 0.5) / 4 - y0;
-					face f = face_at(u, v);
-					if (f == face::none) {
-						// The hairline: within a pixel of the block.
-						if (face_at(u + 1, v) != face::none || face_at(u - 1, v) != face::none || face_at(u, v + 1) != face::none || face_at(u, v - 1) != face::none) outline += 1;
+					part p = part_at(u, v);
+					if (p == part::none) {
+						// The hairline: within a pixel of the tile.
+						if (part_at(u + 1, v) != part::none || part_at(u - 1, v) != part::none || part_at(u, v + 1) != part::none || part_at(u, v - 1) != part::none) outline += 1;
 						continue;
 					}
-					uint32_t c;
-					int ca;
-					if (f == face::roof) {
-						bool lit = u < 1.0 || v < 1.0;  // the roof's top and left edges catch the light
-						c = lit ? edge : roof, ca = lit ? side_a : roof_a;
-					} else c = f == face::right ? right : front, ca = side_a;
+					uint32_t c = p == part::lit ? lit_c : p == part::shadow ? shadow_c : face_c;
+					int ca = p == part::face ? face_a : edge_a;
 					r += (c & 0xff) * ca, g += (c >> 8 & 0xff) * ca, b += (c >> 16 & 0xff) * ca, a += ca;
 				}
 				if (outline > 0) blend(x, y, black, (int)(110 * outline / 16));

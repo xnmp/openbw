@@ -1823,7 +1823,7 @@ struct ui_functions: ui_util_functions {
 	static constexpr double minimap_unit_scale = 1.6;  // players' units (dots), over their footprint
 	// Dots of costly units (250+ minerals and gas: Tanks, Reavers, Carriers, Ultralisks) are a
 	// little larger, cheap ones (under 100: Zerglings, Marines, Zealots...) a little smaller.
-	static double minimap_cost_scale(int value) { return value >= 250 ? 1.15 : value < 100 ? 0.85 : 1.0; }
+	static double minimap_cost_scale(int value) { return value >= 250 ? 1.3 : value < 100 ? 0.75 : 1.0; }
 	static constexpr double minimap_worker_tile_scale = 1.35;  // workers drawn as tiles, smaller so bases don't bloat
 
 	// Coverage (0..1) of the pixel centred at (px, py) by a box with corners rounded to `rad`

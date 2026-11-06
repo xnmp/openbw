@@ -292,6 +292,24 @@ struct graphics {
 				premultiply(strip);
 				r->size = size;
 				for (int k = 0; k != 7; ++k) r->cells[k] = resample(strip, k * cell, 0, cell, cell, size, size, false);
+				// A few wireframes (the Shuttle's) have no line art in the install, only their
+				// hull sections, which are then filled shapes with their own shading: use
+				// those sections as the line art, so the hull is drawn rather than just the
+				// shield outline.
+				// (Its line cell holds only a few faint stray pixels: "no line art" is less
+				// than a twentieth of the sections' coverage.)
+				auto& line = r->cells[6].px;
+				uint64_t line_cover = 0, section_cover = 0;
+				for (uint32_t p : line) line_cover += ch_a(p);
+				for (int k = 0; k != 4; ++k) for (uint32_t p : r->cells[k].px) section_cover += ch_a(p);
+				if (line_cover * 20 < section_cover) {
+					for (size_t i = 0; i != line.size(); ++i) {
+						for (int k = 0; k != 4; ++k) {
+							uint32_t p = r->cells[k].px[i];
+							if (ch_a(p) > ch_a(line[i])) line[i] = p;
+						}
+					}
+				}
 				uint64_t sum = 0, n = 0;
 				for (uint32_t p : r->cells[6].px) {
 					if (ch_a(p) <= 128) continue;

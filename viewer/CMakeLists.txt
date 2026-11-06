@@ -55,6 +55,10 @@ add_executable(openbw-timeline-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/
 target_include_directories(openbw-timeline-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-pluto-win-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/pluto_win_test.cpp")
 target_include_directories(openbw-pluto-win-test PRIVATE "${OPENBW_DIR}/ui")
+add_executable(openbw-minimap-clumps-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/minimap_clumps_test.cpp")
+target_include_directories(openbw-minimap-clumps-test PRIVATE "${OPENBW_DIR}/ui")
+add_executable(openbw-replay-result-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/replay_result_test.cpp")
+target_include_directories(openbw-replay-result-test PRIVATE "${OPENBW_DIR}/ui")
 
 # Sound is optional: uses SDL2_mixer when installed, otherwise builds silent.
 find_package(SDL2_mixer CONFIG QUIET)

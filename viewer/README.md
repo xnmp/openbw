@@ -3,7 +3,7 @@
 A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openbw)'s
 `ui/gfxtest.cpp`, with additions for watching games:
 
-- **Stats overlay**, top left: a line per player in the style of Brood War's resource bar,
+- **Stats overlay**, top right: a line per player in the style of Brood War's resource bar,
   with its mineral, gas and supply icons for the player's race, then army supply and worker
   count beside the race's Marine / Zergling / Zealot and SCV / Drone / Probe icons. Supply
   turns red when blocked. On by default; turn it off in the `?` menu.
@@ -31,7 +31,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   point every 15-25 s).
   `d` switches to the first derivative (change per minute). `f` plots the first player
   minus the second, coloured by whoever is ahead. `m` pins the graphs minimized in the
-  top-right corner of the view, where they keep updating (gas income dotted, as there is no
+  top-left corner of the view, where they keep updating (gas income dotted, as there is no
   legend); `g` or a click then maximizes / minimizes them instead of closing them, and `m`
   on the full panel unpins. Graph keys act only on the full panel.
   `r` switches units, army and losses between resource value (minerals + gas, with
@@ -62,7 +62,16 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
 - **Minimap** flush in the bottom-left corner; click or drag on it to move the camera. It is
   drawn at the window's resolution, each tile its terrain art averaged over a 4x4 grid (the
-  remastered tiles with those graphics on).
+  remastered tiles with those graphics on). Buildings are flat and part transparent in the
+  player's colour, units solid and lighter on top, air army outlined in black. Spider
+  Mines, Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
+  12 tiles of one of their own bases are dimmed, so armies stand out. Each army clump gets
+  small icons of what it is made of by cost: up to three types, each with a quarter of the
+  clump's minerals + gas or 6 supply of its own (20 Zerglings with 8 Mutalisks show both).
+  Clumps are one player's army units linked within 6 tiles of each other (DBSCAN-style),
+  split by 2-means when spread wider than 6 tiles, shown from 8 supply; where two clumps'
+  icons would overlap, only the bigger one's are drawn. The grouping is in
+  `ui/minimap_clumps.h`.
 - **Order lines** (`l`: off, selected units, all units): a dotted line from each unit to its
   order's target and on through queued orders, coloured by kind (move green, attack red,
   spell violet, build and repair cyan, gathering amber for selected units only). Builders
@@ -77,6 +86,10 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   losses in the battle; click it to jump to 5 s before. They are found by playing the whole
   replay once in the background at startup (a few seconds), so they appear shortly after
   the window opens.
+- **End of replay**: when playback reaches the end, a card gives each player's result
+  (victorious, defeated, dropped; a player left standing after the others left is the
+  winner) with **Watch Again** and **Exit Replay**. `Esc` closes it; it shows again at the
+  end.
 - **Observer console skin**: with the remastered graphics on, the stats overlay, selection
   panel, graphs, replay bar and minimap frame are drawn on Remastered's own observer-mode UI
   art (metal edge, corner rivets, red inner line), with its green progress bars and its HD
@@ -182,7 +195,8 @@ Playback starts at 1×, so press `=` a few times.
   the blue shield outline, green/yellow/red hull sections, and the Zerg heat-map
   ramp, using the tables documented on
   [staredit.net](https://staredit.net/topic/18436/). Which hull section changes first
-  is an approximation: the per-unit pattern is undocumented.
+  is an approximation: the per-unit pattern is undocumented. Remastered's Shuttle has no
+  line art in its wireframe, only filled hull sections, which are drawn as the line art.
 
 ## Tuning the auto observer
 

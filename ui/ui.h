@@ -9,6 +9,8 @@
 #include "order_names.h"
 #include "timeline_markers.h"
 #include "pluto_win.h"
+#include "minimap_clumps.h"
+#include "replay_result.h"
 #ifdef OPENBW_REMASTERED
 #include "scr_render.h"
 #endif
@@ -1489,8 +1491,9 @@ struct ui_functions: ui_util_functions {
 		outline_rect<uint8_t>(data, data_pitch, area.from, area.to - xy(1, 1), index);
 	}
 
-	bool unit_visble_on_minimap(unit_t* u) {
+	bool unit_visble_on_minimap(const unit_t* u) const {
 		if (u->owner < 8 && u->sprite->visibility_flags == 0) return false;
+		if (s_hidden(u->sprite)) return false;  // loaded in a transport or Bunker, or inside a building
 		if (ut_turret(u)) return false;
 		if (unit_is_trap(u)) return false;
 		if (unit_is(u, UnitTypes::Spell_Dark_Swarm)) return false;
@@ -1581,6 +1584,257 @@ struct ui_functions: ui_util_functions {
 		return hud_rgba(tileset_img.wpe[4 * index], tileset_img.wpe[4 * index + 1], tileset_img.wpe[4 * index + 2], 255);
 	}
 
+	// ---- Minimap units ----
+	// Layers, bottom to top: resources and other neutrals; buildings (flat, in the player's
+	// colour, part transparent); ground units; air units (with a dark outline, so a flock reads over
+	// ground units and terrain). Units are lighter than buildings, so the two read apart even
+	// in one colour. Minor units (mines, Interceptors, Scarabs, larvae, larva eggs) are a
+	// faint dot: a minefield or an Interceptor cloud shows as a haze rather than a wall of
+	// squares, and the Carrier stays the solid one. Workers mining at one of their own bases
+	// are dimmed (see minimap_worker_at_work), so the mineral lines don't compete with armies.
+	// Army clumps get a small badge with the icon of what they mostly are by cost (see
+	// minimap_army_clumps), so a stack of Mutalisks drawn on one spot still reads as Mutalisks.
+	static uint32_t minimap_shade(uint32_t c, int num, int den) {  // scale towards black
+		return hud_rgba((c & 0xff) * num / den, (c >> 8 & 0xff) * num / den, (c >> 16 & 0xff) * num / den, 255);
+	}
+	static uint32_t minimap_tint(uint32_t c, int white) {  // mix in white, of 256
+		auto m = [&](uint32_t v) { return v + (255 - v) * (uint32_t)white / 256; };
+		return hud_rgba(m(c & 0xff), m(c >> 8 & 0xff), m(c >> 16 & 0xff), 255);
+	}
+	bool minimap_minor_unit(const unit_t* u) const {
+		switch (u->unit_type->id) {
+		case UnitTypes::Terran_Vulture_Spider_Mine:
+		case UnitTypes::Protoss_Interceptor:
+		case UnitTypes::Protoss_Scarab:
+		case UnitTypes::Zerg_Larva:
+		case UnitTypes::Zerg_Egg:  // Cocoons and Lurker eggs are army mid-morph, so not minor
+			return true;
+		default:
+			return false;
+		}
+	}
+	// Units that make a clump: army that counts in the graphs, without the minor units.
+	// Workers (every mineral line would ring), Overlords and buildings are left out.
+	bool minimap_clump_unit(const unit_t* u) const {
+		return !ut_building(u) && !minimap_minor_unit(u) && unit_counts_as_army(u) && !u_hallucination(u);
+	}
+
+	template<typename fill_F>
+	void draw_minimap_units(uint32_t* buf, size_t pitch, int w, int h, double sx, double sy, uint8_t fog_mask, fill_F&& fill) {
+		auto blend = [&](int x, int y, uint32_t c, int a) {
+			if (x < 0 || y < 0 || x >= w || y >= h) return;
+			uint32_t& d = buf[(size_t)y * pitch + x];
+			auto mix = [&](int sh) { return (((c >> sh & 0xff) * a + (d >> sh & 0xff) * (255 - a)) / 255) << sh; };
+			d = mix(0) | mix(8) | mix(16) | 0xff000000u;
+		};
+		auto blend_fill = [&](double x0, double y0, double x1, double y1, uint32_t c, int a) {
+			int ix0 = std::max(0, (int)std::floor(x0)), iy0 = std::max(0, (int)std::floor(y0));
+			int ix1 = std::max(ix0 + 1, (int)std::floor(x1)), iy1 = std::max(iy0 + 1, (int)std::floor(y1));
+			for (int y = iy0; y < iy1; ++y) for (int x = ix0; x < ix1; ++x) blend(x, y, c, a);
+		};
+		auto shown = [&](const unit_t* u) {
+			if (!unit_visble_on_minimap(u)) return false;
+			// Under fog, neutral units (resources, critters) show only where explored.
+			return !(fog_mask && u->owner >= 8 && fog_tile_level(u->sprite->position.x / 32, u->sprite->position.y / 32, fog_mask) == 0);
+		};
+		auto box = [&](const unit_t* u, int min_tiles, int max_tiles, double& x0, double& y0, double& x1, double& y1) {
+			int tw_ = std::max(min_tiles, std::min(max_tiles, (int)u->unit_type->placement_size.x / 32));
+			int th_ = std::max(min_tiles, std::min(max_tiles, (int)u->unit_type->placement_size.y / 32));
+			xy c = u->sprite->position;
+			x0 = (c.x / 32.0 - tw_ / 2.0) * sx, y0 = (c.y / 32.0 - th_ / 2.0) * sy;
+			x1 = x0 + tw_ * sx, y1 = y0 + th_ * sy;
+		};
+		auto colour = [&](const unit_t* u) {
+			if (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) return palette_rgba(tileset_img.resource_minimap_color);
+			return palette_rgba(img.player_minimap_colors.at(player_color(u->owner)));
+		};
+		double x0, y0, x1, y1;
+		// 1: neutrals and buildings.
+		for (size_t i = 12; i != 0;) {
+			--i;
+			for (unit_t* u : ptr(st.player_units[i])) {
+				if (!shown(u) || !(ut_building(u) || u->owner >= 8)) continue;
+				box(u, 2, 4, x0, y0, x1, y1);
+				uint32_t c = colour(u);
+				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
+				else blend_fill(x0, y0, x1, y1, c, 150);  // the player's colour, over the terrain
+			}
+		}
+		// 2: minor units, faint; 3: ground units; 4: air units, outlined.
+		const auto depots = minimap_depots();
+		for (int pass = 2; pass != 5; ++pass) {
+			for (size_t i = 12; i != 0;) {
+				--i;
+				for (unit_t* u : ptr(st.player_units[i])) {
+					if (!shown(u) || ut_building(u) || u->owner >= 8) continue;
+					bool minor = minimap_minor_unit(u), air = u_flying(u);
+					if (pass != (minor ? 2 : air ? 4 : 3)) continue;
+					uint32_t c = colour(u);
+					if (minor) {
+						double cx = u->sprite->position.x / 32.0 * sx, cy = u->sprite->position.y / 32.0 * sy;
+						blend((int)cx, (int)cy, c, 110);
+						continue;
+					}
+					box(u, 2, 3, x0, y0, x1, y1);
+					if (minimap_worker_at_work(u, depots)) {
+						fill(x0, y0, x1, y1, minimap_shade(c, 1, 2));
+						continue;
+					}
+					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
+					if (air && unit_counts_as_army(u)) fill(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255));
+					fill(x0, y0, x1, y1, minimap_tint(c, 70));
+				}
+			}
+		}
+		// 5: clump badges, the biggest placed first. A badge that would overlap a bigger
+		// clump's is left out: at the minimap's scale the two read as one army.
+		auto clumps = minimap_army_clumps();
+		const int icon = std::max(12, std::min(20, w / 15));
+		std::vector<minimap_clumps::badge> want;
+		for (auto& cl : clumps) {
+			int s = icon + (cl.c.supply_half >= 48 ? 2 : 0);  // 24 supply and up: a bit bigger
+			int n = (int)cl.c.types.size();
+			want.push_back({(int)(cl.c.x / 32.0 * sx), (int)(cl.c.y / 32.0 * sy), n * (s + 1) + 1, s + 2});
+		}
+		auto placed = minimap_clumps::place(want, w, h);
+		for (size_t i = 0; i != clumps.size(); ++i) {
+			if (!placed[i].placed) continue;
+			auto& cl = clumps[i];
+			uint32_t c = palette_rgba(img.player_minimap_colors.at(player_color(cl.owner)));
+			const int x0 = placed[i].x, y0 = placed[i].y, bw = want[i].w, bh = want[i].h, s = bh - 2;
+			// No plate: each unit's silhouette in a light version of the player's colour,
+			// most cost first, with a thin dark halo around its outline so it reads on any
+			// ground and over the units under it.
+			uint32_t dark = minimap_tint(c, 50), light = minimap_tint(c, 180);
+			for (size_t t = 0; t != cl.c.types.size(); ++t) {
+				const auto& m = minimap_icon_mask(cl.c.types[t], s);
+				const int ix = x0 + 1 + (int)t * (s + 1), iy = y0 + 1;
+				auto alpha_at = [&](int x, int y) { return x < 0 || y < 0 || x >= s || y >= s ? 0 : m[(size_t)y * s + x] >> 8; };
+				for (int y = -1; y <= s; ++y) for (int x = -1; x <= s; ++x) {
+					if (alpha_at(x, y) >= 128) continue;
+					int near = 0;
+					for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) near = std::max(near, alpha_at(x + dx, y + dy));
+					if (near >= 96) blend(ix + x, iy + y, hud_rgba(0, 0, 0, 255), 190);
+				}
+				for (int y = 0; y != s; ++y) for (int x = 0; x != s; ++x) {
+					uint16_t v = m[(size_t)y * s + x];
+					int a = v >> 8, l = v & 0xff;
+					if (!a) continue;
+					auto mix = [&](int sh) { return ((dark >> sh & 0xff) * (255 - l) + (light >> sh & 0xff) * l) / 255 << sh; };
+					blend(ix + x, iy + y, mix(0) | mix(8) | mix(16) | 0xff000000u, std::min(255, a * 4 / 3));
+				}
+			}
+		}
+	}
+
+	// Each player's completed resource depots (Nexus, Command Center, Hatchery, Lair, Hive).
+	a_vector<std::pair<int, xy>> minimap_depots() const {
+		a_vector<std::pair<int, xy>> out;
+		for (int p = 0; p != 8; ++p) {
+			for (const unit_t* u : ptr(st.player_units[p])) {
+				if (ut_resource_depot(u) && u_completed(u)) out.push_back({p, u->sprite->position});
+			}
+		}
+		return out;
+	}
+	// A worker gathering (on its way to, at, or returning from minerals or gas) within 12
+	// tiles of one of its own depots: ordinary economy. A worker that is building, fighting,
+	// scouting or long-distance mining (no depot of its own nearby) is not.
+	bool minimap_worker_at_work(const unit_t* u, const a_vector<std::pair<int, xy>>& depots) const {
+		if (!ut_worker(u)) return false;
+		switch (u->order_type->id) {
+		case Orders::Harvest1: case Orders::Harvest2: case Orders::ResetHarvestCollision:
+		case Orders::MoveToMinerals: case Orders::WaitForMinerals: case Orders::MiningMinerals: case Orders::ReturnMinerals:
+		case Orders::MoveToGas: case Orders::WaitForGas: case Orders::HarvestGas: case Orders::ReturnGas:
+			break;
+		default:
+			return false;
+		}
+		const int r = 12 * 32;
+		for (auto& d : depots) {
+			if (d.first != u->owner) continue;
+			xy v = d.second - u->sprite->position;
+			if (v.x * v.x + v.y * v.y <= r * r) return true;
+		}
+		return false;
+	}
+
+	// A unit type's command icon at s x s for the clump badges, as (alpha << 8 | lightness).
+	// At this size the shaded art blurs to grey, so the badge draws the icon's silhouette
+	// (alpha: from drawing it over black and over white) with its lightness stretched to the
+	// full range, which keeps the main forms. It is drawn 4x larger, cropped to where the art
+	// actually is, and area-averaged down so the art fills the square.
+	std::map<std::tuple<int, int, bool>, a_vector<uint16_t>> minimap_icon_masks;
+	const a_vector<uint16_t>& minimap_icon_mask(int type, int s) {
+		auto key = std::make_tuple(type, s, ui_skin);
+		auto i = minimap_icon_masks.find(key);
+		if (i != minimap_icon_masks.end()) return i->second;
+		if (minimap_icon_masks.size() > 128) minimap_icon_masks.clear();
+		const int cw = 4 * s * 36 / 30, ch = cw * 34 / 36;
+		a_vector<uint32_t> on_black((size_t)cw * ch, hud_rgba(0, 0, 0, 255)), on_white((size_t)cw * ch, hud_rgba(255, 255, 255, 255));
+		draw_cmd_icon_scaled(on_black.data(), cw, cw, ch, 0, 0, type, 1, cw, ch);
+		draw_cmd_icon_scaled(on_white.data(), cw, cw, ch, 0, 0, type, 1, cw, ch);
+		auto grey = [](uint32_t p) { return (int)((p & 0xff) + (p >> 8 & 0xff) + (p >> 16 & 0xff)) / 3; };
+		// Over black a pixel is a * L; over white a * L + (1 - a).
+		a_vector<int> alpha((size_t)cw * ch), lum((size_t)cw * ch);
+		int x0 = cw, y0 = ch, x1 = -1, y1 = -1;
+		for (int y = 0; y != ch; ++y) for (int x = 0; x != cw; ++x) {
+			size_t k = (size_t)y * cw + x;
+			int a = std::max(0, std::min(255, 255 - (grey(on_white[k]) - grey(on_black[k]))));
+			alpha[k] = a, lum[k] = a ? std::min(255, grey(on_black[k]) * 255 / a) : 0;
+			if (a >= 64) x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+		}
+		a_vector<uint16_t> m((size_t)s * s, 0);
+		if (x1 < x0) return minimap_icon_masks.emplace(key, std::move(m)).first->second;  // no art
+		// Fit the art's box (its longer side) to the square, centred.
+		const int bw = x1 - x0 + 1, bh = y1 - y0 + 1, side = std::max(bw, bh);
+		const double f = (double)side / s;
+		const double ox = x0 - (side - bw) / 2.0, oy = y0 - (side - bh) / 2.0;
+		a_vector<int> sa((size_t)s * s, 0), sl((size_t)s * s, 0);
+		int lo = 255, hi = 0;
+		for (int y = 0; y != s; ++y) for (int x = 0; x != s; ++x) {
+			int fx0 = (int)(ox + x * f), fx1 = std::max(fx0 + 1, (int)(ox + (x + 1) * f));
+			int fy0 = (int)(oy + y * f), fy1 = std::max(fy0 + 1, (int)(oy + (y + 1) * f));
+			long as = 0, ls = 0, n = 0;
+			for (int yy = fy0; yy < fy1; ++yy) for (int xx = fx0; xx < fx1; ++xx) {
+				++n;
+				if (xx < 0 || yy < 0 || xx >= cw || yy >= ch) continue;
+				size_t k = (size_t)yy * cw + xx;
+				as += alpha[k], ls += (long)alpha[k] * lum[k];
+			}
+			if (!n || as / n < 24) continue;
+			size_t k = (size_t)y * s + x;
+			sa[k] = (int)(as / n), sl[k] = (int)(ls / as);
+			lo = std::min(lo, sl[k]), hi = std::max(hi, sl[k]);
+		}
+		for (size_t k = 0; k != m.size(); ++k) {
+			if (!sa[k]) continue;
+			int l = hi > lo ? (sl[k] - lo) * 255 / (hi - lo) : 255;
+			m[k] = (uint16_t)(std::min(255, sa[k] * 3 / 2) << 8 | l);  // firmer edges
+		}
+		return minimap_icon_masks.emplace(key, std::move(m)).first->second;
+	}
+
+	// Army clumps per player (see ui/minimap_clumps.h for the grouping): army that counts in
+	// the graphs, without minor units, hallucinations, workers or Overlords. Siege mode
+	// counts as the tank, so a half-sieged line keeps one label.
+	struct minimap_army_clump { int owner; minimap_clumps::clump c; };
+	a_vector<minimap_army_clump> minimap_army_clumps() const {
+		a_vector<minimap_army_clump> out;
+		for (int p = 0; p != 8; ++p) {
+			std::vector<minimap_clumps::point> pts;
+			for (const unit_t* u : ptr(st.player_units[p])) {
+				if (!unit_visble_on_minimap(u) || !minimap_clump_unit(u)) continue;
+				int type = (int)u->unit_type->id;
+				if (unit_is(u, UnitTypes::Terran_Siege_Tank_Siege_Mode)) type = (int)UnitTypes::Terran_Siege_Tank_Tank_Mode;
+				pts.push_back({u->sprite->position.x, u->sprite->position.y, type, unit_supply_half(u), unit_value(u)});
+			}
+			for (auto& c : minimap_clumps::find(pts)) out.push_back({p, c});
+		}
+		std::stable_sort(out.begin(), out.end(), [](const minimap_army_clump& a, const minimap_army_clump& b) { return a.c.supply_half > b.c.supply_half; });
+		return out;
+	}
+
 	void draw_minimap_window() {
 		rect r = minimap_window_rect();
 		const int w = r.to.x - r.from.x, h = r.to.y - r.from.y;
@@ -1637,25 +1891,7 @@ struct ui_functions: ui_util_functions {
 			for (int y = iy0; y < iy1; ++y) std::fill(buf + (size_t)y * pitch + ix0, buf + (size_t)y * pitch + std::max(ix0, ix1), c);
 		};
 		const double sx = (double)w / tw, sy = (double)h / th;
-		for (size_t i = 12; i != 0;) {
-			--i;
-			for (unit_t* u : ptr(st.player_units[i])) {
-				if (!unit_visble_on_minimap(u)) continue;
-				// Under fog, neutral units (resources, critters) show only where explored.
-				if (fog_mask && u->owner >= 8 && fog_tile_level(u->sprite->position.x / 32, u->sprite->position.y / 32, fog_mask) == 0) continue;
-				int color = img.player_minimap_colors.at(player_color(u->owner));
-				if (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) color = tileset_img.resource_minimap_color;
-				int tiles_w = u->unit_type->placement_size.x / 32, tiles_h = u->unit_type->placement_size.y / 32;
-				if (ut_building(u)) {
-					tiles_w = std::min(tiles_w, 4);
-					tiles_h = std::min(tiles_h, 4);
-				}
-				tiles_w = std::max(tiles_w, 2);
-				tiles_h = std::max(tiles_h, 2);
-				xy from = (u->sprite->position - u->unit_type->placement_size / 2) / 32u;
-				fill(from.x * sx, from.y * sy, (from.x + tiles_w) * sx, (from.y + tiles_h) * sy, palette_rgba(color));
-			}
-		}
+		draw_minimap_units(buf, pitch, w, h, sx, sy, fog_mask, fill);
 
 		// Camera: a white outline, clipped to the minimap.
 		{
@@ -2638,7 +2874,7 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
-	// Player stats, top left: one line per player in the style of Brood War's resource bar
+	// Player stats, top right: one line per player in the style of Brood War's resource bar
 	// (icon, then the number), with army and worker counts beside the race's own Marine /
 	// Zergling / Zealot and SCV / Drone / Probe icons. On the observer console's panel with
 	// the skin, a bevelled olive one without.
@@ -3320,8 +3556,23 @@ struct ui_functions: ui_util_functions {
 			auto count_icon = [&](int frame, int n, const char* what) {
 				return console_icon{frame, n, a_string(what) + ": " + a_string(std::to_string(n).c_str())};
 			};
-			if (unit_is_carrier(u)) ci.icons.push_back(count_icon((int)UnitTypes::Protoss_Interceptor, (int)unit_interceptor_count(u), "Interceptors"));
-			if (unit_is_reaver(u)) ci.icons.push_back(count_icon((int)UnitTypes::Protoss_Scarab, (int)unit_scarab_count(u), "Scarabs"));
+			// Interceptors and Scarabs carry the weapon that does the damage: add it to the tip.
+			auto launched_icon = [&](UnitTypes type, int n, const char* what) {
+				console_icon icon = count_icon((int)type, n, what);
+				const unit_type_t* lt = get_unit_type(type);
+				if (const weapon_type_t* wt = lt->ground_weapon) {
+					int level = player_upgrade_level(u->owner, wt->damage_upgrade);
+					int bonus = wt->damage_bonus * level, hits = attack_hits(lt, wt, false);
+					a_string damage = plus(wt->damage_amount, bonus);
+					if (hits > 1) damage = (bonus ? "(" + damage + ")" : damage) + "x" + a_string(std::to_string(hits).c_str());
+					icon.name += "  " + damage;
+					if (wt->damage_type == weapon_type_t::damage_type_explosive) icon.name += tip_icon(tip_icon_explosive);
+					else if (wt->damage_type == weapon_type_t::damage_type_concussive) icon.name += tip_icon(tip_icon_concussive);
+				}
+				return icon;
+			};
+			if (unit_is_carrier(u)) ci.icons.push_back(launched_icon(UnitTypes::Protoss_Interceptor, (int)unit_interceptor_count(u), "Interceptors"));
+			if (unit_is_reaver(u)) ci.icons.push_back(launched_icon(UnitTypes::Protoss_Scarab, (int)unit_scarab_count(u), "Scarabs"));
 			if (unit_is_vulture(u) && player_has_researched(u->owner, TechTypes::Spider_Mines)) {
 				ci.icons.push_back(count_icon(get_tech_type(TechTypes::Spider_Mines)->icon, (int)unit_spider_mine_count(u), "Spider Mines"));
 			}
@@ -3656,7 +3907,9 @@ struct ui_functions: ui_util_functions {
 			right_w = std::max(right_w, (int)ci.research.size() * (res_w + gap));
 			right_h += gap + res_h;
 		}
-		const int bar_w_min = 5 * (icon_w + gap) - gap;
+		// Progress bars span the content above them (lines, status icons), at least two icons
+		// wide, rather than a fixed five-slot queue width that dwarfs a small panel.
+		const int bar_w_min = std::max(2 * (icon_w + gap) - gap, right_w - gap);
 		for (auto& p : ci.progress) {
 			int row_w = std::max(bar_w_min, (int)p.frames.size() * (icon_w + gap) - gap);
 			if (!p.label.empty()) row_w = std::max(row_w, text_w(p.label) + (p.frames.empty() ? 0 : icon_w + gap));
@@ -4323,7 +4576,7 @@ struct ui_functions: ui_util_functions {
 	bool graph_value_mode = true;  // 'r': resource value <-> supply (workers unaffected)
 	bool graph_derivative = false;  // 'd': plot the rate of change per minute instead
 	bool graph_difference = false;  // 'f': first player minus second instead of a line each
-	// 'm': minimized mode. The graphs then stay up as a compact panel in the top-right
+	// 'm': minimized mode. The graphs then stay up as a compact panel in the top-left
 	// corner of the view, and 'g' (or a click) maximizes / minimizes instead of closing.
 	bool graph_minimized = false;
 	bool graph_expanded = false;  // minimized mode: the full panel is showing for now
@@ -4548,7 +4801,7 @@ struct ui_functions: ui_util_functions {
 		return s.b >= 0 ? v - graph_value(graph_tab, i, s.b, s.gas) : v;
 	}
 
-	// Full panel centred over the game view, or with 'm' a compact one in its top-right
+	// Full panel centred over the game view, or with 'm' a compact one in its top-left
 	// corner (no tabs or legend; keys and the mouse wheel still work, a click expands it).
 	void draw_graph_panel() {
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h;
@@ -4752,7 +5005,7 @@ struct ui_functions: ui_util_functions {
 		graph_surface->unlock();
 		int gx, gy;
 		if (mini) {
-			gx = viewport_x + viewport_w - w - 8;
+			gx = viewport_x + 8;  // top left (the stats overlay is top right)
 			gy = 8;
 		} else {
 			gx = viewport_x + (viewport_w - w) / 2;
@@ -5630,6 +5883,141 @@ struct ui_functions: ui_util_functions {
 		return is_paused ? "Play  (space)" : "Pause  (space)";
 	}
 
+	// ---- End of replay ----
+	// When playback reaches the end, a card in the middle of the view gives each player's
+	// result (see ui/replay_result.h) with "Watch Again" and "Exit Replay", as the game's own
+	// end-of-replay menu does. Esc or a seek back closes it; it shows again at the end.
+	bool end_card_dismissed = false;
+	std::unique_ptr<native_window_drawing::surface> end_card_surface;
+	rect end_card_rect;  // window pixels, while shown
+	enum { end_button_again, end_button_exit, end_button_count };
+
+	bool end_card_shown() const {
+		return draw_ui_elements && replay_st.end_frame > 0 && st.current_frame >= replay_st.end_frame && !end_card_dismissed;
+	}
+
+	replay_result::result end_result() const {
+		std::array<bool, 8> in_game{};
+		std::array<int, 8> state{};
+		for (int i = 0; i != 8; ++i) {
+			in_game[i] = st.players[i].initially_active && (int)st.players[i].race >= 0 && (int)st.players[i].race <= 2;
+			state[i] = st.players[i].victory_state;
+		}
+		return replay_result::decide(in_game, state);
+	}
+
+	// The card's layout in its own pixels: size, and the two buttons.
+	struct end_card_layout { int w, h; rect buttons[end_button_count]; };
+	end_card_layout end_card_layout_of(int player_lines) const {
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = panel_pad() + 4;
+		const int bw = 13 * cw, bh = ch + 12, gap = 12;
+		end_card_layout l;
+		l.w = std::max(2 * bw + gap, 36 * cw) + 2 * pad;
+		int y = pad + ch * 2 + ch / 2 + player_lines * (ch + 2) + ch + ch / 2;
+		l.h = y + bh + pad;
+		int bx = (l.w - (2 * bw + gap)) / 2;
+		l.buttons[end_button_again] = rect{{bx, y}, {bx + bw, y + bh}};
+		l.buttons[end_button_exit] = rect{{bx + bw + gap, y}, {bx + 2 * bw + gap, y + bh}};
+		return l;
+	}
+
+	int end_card_players() const {
+		auto r = end_result();
+		int n = 0;
+		for (auto o : r.players) n += o != replay_result::outcome::absent;
+		return n;
+	}
+
+	int end_button_at(int wx, int wy) const {
+		if (!end_card_shown() || end_card_rect.to.x <= end_card_rect.from.x) return -1;
+		auto l = end_card_layout_of(end_card_players());
+		for (int b = 0; b != end_button_count; ++b) {
+			rect r = l.buttons[b];
+			if (rect_contains(rect{r.from + end_card_rect.from, r.to + end_card_rect.from}, wx, wy)) return b;
+		}
+		return -1;
+	}
+
+	// Mouse down (window pixels): a click on the card is consumed.
+	bool end_card_click(int wx, int wy) {
+		if (!end_card_shown() || !rect_contains(end_card_rect, wx, wy)) return false;
+		int b = end_button_at(wx, wy);
+		if (b == end_button_again) {
+			replay_frame = 0;
+			is_paused = false;
+		} else if (b == end_button_exit) {
+			if (exit_on_close) std::exit(0);
+			window_closed = true;
+		}
+		return true;
+	}
+
+	void draw_end_card() {
+		if (st.current_frame < replay_st.end_frame) end_card_dismissed = false;  // seeked back
+		end_card_rect = rect{};
+		if (!end_card_shown()) return;
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = panel_pad() + 4;
+		auto res = end_result();
+		int lines = 0;
+		for (auto o : res.players) lines += o != replay_result::outcome::absent;
+		auto l = end_card_layout_of(lines);
+		if (!end_card_surface || end_card_surface->w != l.w || end_card_surface->h != l.h) {
+			end_card_surface = native_window_drawing::create_rgba_surface(l.w, l.h);
+			end_card_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)end_card_surface->lock();
+		size_t pitch = end_card_surface->pitch / 4;
+		const int w = l.w, h = l.h;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
+		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
+			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 225));
+			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
+			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
+		}
+		auto centred = [&](int y, const a_string& text, int r, int g, int b) {
+			hud_text(buf, pitch, w, h, (w - (int)text.size() * cw) / 2, y, text.c_str(), r, g, b);
+		};
+		int y = pad;
+		centred(y, "End of Replay", 248, 240, 170);
+		y += ch + ch / 2;
+		a_string headline;
+		if (res.winners.size() == 1) headline = player_label(res.winners[0]) + " is victorious";
+		else if (res.winners.size() > 1) headline = "Draw";
+		else headline = "No result: the game was still on";
+		centred(y, headline + "  (" + format_game_time(replay_st.end_frame) + ")", 236, 236, 236);
+		y += ch * 2;
+		// One line per player: name in their colour, result on the right.
+		const int lx = pad + cw, rx = w - pad - cw;
+		for (int i = 0; i != 8; ++i) {
+			auto o = res.players[i];
+			if (o == replay_result::outcome::absent) continue;
+			auto c = player_rgb(i);
+			a_string name = player_label(i);
+			if (name.size() > 20) name = name.substr(0, 20);
+			hud_text(buf, pitch, w, h, lx, y, name.c_str(), c.r, c.g, c.b);
+			a_string what = replay_result::label(o);
+			bool won = o == replay_result::outcome::victorious;
+			hud_text(buf, pitch, w, h, rx - (int)what.size() * cw, y, what.c_str(), won ? 140 : 200, won ? 230 : 200, won ? 120 : 200);
+			y += ch + 2;
+		}
+		int mx = -1, my = -1;
+		if (wnd.has_mouse_focus()) wnd.get_cursor_pos(&mx, &my);
+		// Window position: centred in the view, a little above the middle.
+		int ox = viewport_x + (viewport_w - w) / 2, oy = std::max(0, (window_surface->h - h) * 2 / 5);
+		end_card_rect = rect{{ox, oy}, {ox + w, oy + h}};
+		int hovered = end_button_at(mx, my);
+		static const char* labels[end_button_count] = {"Watch Again", "Exit Replay"};
+		for (int b = 0; b != end_button_count; ++b) {
+			const rect& r = l.buttons[b];
+			draw_replay_button(buf, pitch, w, h, r, hovered == b, false, true);
+			a_string t = labels[b];
+			int tx = r.from.x + (r.to.x - r.from.x - (int)t.size() * cw) / 2, ty = r.from.y + (r.to.y - r.from.y - ch) / 2;
+			hud_text(buf, pitch, w, h, tx, ty, t.c_str(), hovered == b ? 255 : 236, hovered == b ? 250 : 220, hovered == b ? 200 : 150);
+		}
+		end_card_surface->unlock();
+		end_card_surface->blit(&*window_surface, ox, oy);
+	}
+
 	void draw_replay_bar() {
 		if (replay_st.end_frame == 0) return;
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = replay_pad_y(), pad_x = replay_pad_x();
@@ -6049,6 +6437,7 @@ struct ui_functions: ui_util_functions {
 					continue;
 				}
 				if (e.type == native_window::event_t::type_mouse_button_down && settings_menu_click(e.mouse_x, e.mouse_y)) continue;
+				if (e.type == native_window::event_t::type_mouse_button_down && e.button == 1 && end_card_click(e.mouse_x, e.mouse_y)) continue;
 				if (e.type == native_window::event_t::type_mouse_button_down && e.button == 1 && replay_controls_click(e.mouse_x, e.mouse_y)) continue;
 				if (e.type == native_window::event_t::type_mouse_button_up && e.button == 1 && replay_button_held >= 0) {
 					replay_button_held = -1;
@@ -6154,6 +6543,7 @@ struct ui_functions: ui_util_functions {
 						else show_graphs = !show_graphs;
 					}
 					if (e.sym == 27 && show_settings_menu) show_settings_menu = false;  // Esc: menu first
+					else if (e.sym == 27 && end_card_shown()) end_card_dismissed = true;
 					else if (e.sym == 27 && graph_minimized && graph_expanded) graph_expanded = false;
 					else if (e.sym == 27 && show_graphs && !graph_minimized) show_graphs = false;
 					if (e.sym == '/' && (wnd.get_key_state(225) || wnd.get_key_state(229))) show_settings_menu = !show_settings_menu;  // '?'
@@ -6375,7 +6765,7 @@ struct ui_functions: ui_util_functions {
 			draw_order_lines();
 			if (show_hud) {
 				draw_hud();
-				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + 8, 8);
+				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + viewport_w - hud_surface->w - 8, 8);  // top right
 			}
 			if (draw_ui_elements) {
 				draw_minimap_window();
@@ -6395,6 +6785,7 @@ struct ui_functions: ui_util_functions {
 				panel_surface->blit(&*window_surface, px, py);
 				draw_panel_tip();
 			}
+			draw_end_card();
 			if (show_settings_menu) draw_settings_menu();
 			save_settings_if_changed();
 			wnd.update_surface();

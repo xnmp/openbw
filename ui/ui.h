@@ -2669,9 +2669,9 @@ struct ui_functions: ui_util_functions {
 		}
 		static const int army_icon[3] = {37, 0, 65}, worker_icon[3] = {41, 7, 64};  // Zergling Marine Zealot, Drone SCV Probe
 		char text[32];
-		auto right_text = [&](int x, int y, int cols, const char* t, int r, int g, int b) {
-			hud_text(buf, pitch, w, h, x + (cols - (int)std::strlen(t)) * cw, y, t, r, g, b);
-		};
+		// Each number starts right after its icon, as on Brood War's resource bar; the
+		// columns keep a fixed width, so the spare room falls before the next icon.
+		auto value_text = [&](int x, int y, const char* t, int r, int g, int b) { hud_text(buf, pitch, w, h, x, y, t, r, g, b); };
 		for (size_t i = 0; i != rows.size(); ++i) {
 			auto& row = rows[i];
 			int y = pad_y + (int)i * row_h, ty = y + (row_h - ch) / 2, iy = y + (row_h - icon) / 2;
@@ -2687,24 +2687,24 @@ struct ui_functions: ui_util_functions {
 			x += name_w + gap;
 			draw_res_icon(buf, pitch, w, h, x, iy, 0);
 			std::snprintf(text, sizeof(text), "%d", row.minerals);
-			right_text(x + icon + 4, ty, 5, text, 236, 236, 236);
+			value_text(x + icon + 4, ty, text, 236, 236, 236);
 			x += res_w + gap;
 			draw_res_icon(buf, pitch, w, h, x, iy, 1 + row.race);
 			std::snprintf(text, sizeof(text), "%d", row.gas);
-			right_text(x + icon + 4, ty, 5, text, 236, 236, 236);
+			value_text(x + icon + 4, ty, text, 236, 236, 236);
 			x += res_w + gap;
 			draw_res_icon(buf, pitch, w, h, x, iy, 4 + row.race);
 			std::snprintf(text, sizeof(text), "%d/%d", row.supply, row.supply_max);
 			bool capped = row.supply >= row.supply_max && row.supply_max < 200;  // supply blocked
-			right_text(x + icon + 4, ty, 7, text, capped ? 255 : 236, capped ? 120 : 236, capped ? 90 : 236);
+			value_text(x + icon + 4, ty, text, capped ? 255 : 236, capped ? 120 : 236, capped ? 90 : 236);
 			x += sup_w + gap;
 			draw_cmd_icon_scaled(buf, pitch, w, h, x, y + (row_h - unit_icon) / 2, army_icon[row.race], 1, unit_icon, unit_icon * 34 / 36);
 			std::snprintf(text, sizeof(text), "%d", row.army);
-			right_text(x + unit_icon + 2, ty, 3, text, 236, 236, 236);
+			value_text(x + unit_icon + 2, ty, text, 236, 236, 236);
 			x += cnt_w + gap;
 			draw_cmd_icon_scaled(buf, pitch, w, h, x, y + (row_h - unit_icon) / 2, worker_icon[row.race], 1, unit_icon, unit_icon * 34 / 36);
 			std::snprintf(text, sizeof(text), "%d", row.workers);
-			right_text(x + unit_icon + 2, ty, 3, text, 236, 236, 236);
+			value_text(x + unit_icon + 2, ty, text, 236, 236, 236);
 		}
 		hud_surface->unlock();
 	}
@@ -2916,7 +2916,11 @@ struct ui_functions: ui_util_functions {
 		int first_section = zerg ? 216 : 208;
 		std::array<uint32_t, 4> sections;
 		for (int k = 0; k != 4; ++k) sections[k] = rgb(wire_pixel_rgb(first_section + k, v));
-		scr::image img = scr::composite_wireframe(*layers, sections, rgb(wire_pixel_rgb(193, v)), rgb(wire_pixel_rgb(192, v)), zerg);
+		// Brightness by race, to look alike side by side (measured mean luminance before:
+		// Zerg ~95, Protoss ~150, of 255): Zerg lifted, Protoss toned down, Terran as is.
+		bool protoss = ut->group_flags & GroupFlags::Protoss;
+		uint32_t gain = zerg ? 340 : protoss ? 225 : 256;
+		scr::image img = scr::composite_wireframe(*layers, sections, rgb(wire_pixel_rgb(193, v)), rgb(wire_pixel_rgb(192, v)), zerg, gain);
 		for (int sy = std::max(0, -y); sy < img.h && y + sy < h; ++sy) {
 			uint32_t* dst = buf + (size_t)(y + sy) * pitch + x;
 			const uint32_t* src = &img.px[(size_t)sy * img.w];

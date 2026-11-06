@@ -663,7 +663,10 @@ inline uint32_t heat_shade(uint32_t base, uint32_t shade, uint32_t mean) {
 	return std::min<uint32_t>(255, base * k >> 8);
 }
 
-inline image composite_wireframe(const wireframe_layers& w, const std::array<uint32_t, 4>& sections, uint32_t outer, uint32_t inner, bool heat = false) {
+// `gain` (x256) scales the hull's brightness before the shield outlines go over it: the
+// races' art differs in how much of it is lit (Zerg bodies are mostly dark red and orange,
+// Protoss hulls nearly solid), so the caller can even them out.
+inline image composite_wireframe(const wireframe_layers& w, const std::array<uint32_t, 4>& sections, uint32_t outer, uint32_t inner, bool heat = false, uint32_t gain = 256) {
 	image out;
 	out.w = out.h = w.size;
 	out.px.assign((size_t)w.size * w.size, 0);
@@ -726,6 +729,11 @@ inline image composite_wireframe(const wireframe_layers& w, const std::array<uin
 			cg = mul255(heat_shade(g / total, shade, w.line_mean), a) + mul255(cg, keep);
 			cb = mul255(heat_shade(b / total, shade, w.line_mean), a) + mul255(cb, keep);
 			ca = a + mul255(ca, keep);
+		}
+		if (gain != 256) {  // premultiplied, so a colour channel may not exceed alpha
+			cr = std::min(ca, cr * gain >> 8);
+			cg = std::min(ca, cg * gain >> 8);
+			cb = std::min(ca, cb * gain >> 8);
 		}
 		for (int k : {4, 5}) {
 			uint32_t p = w.cells[k].px[i], tint = k == 4 ? outer : inner;

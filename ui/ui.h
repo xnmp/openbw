@@ -13,6 +13,7 @@
 #include "minimap_clumps.h"
 #include "replay_result.h"
 #include "supply_state.h"
+#include "minimap_block.h"
 #include "ui_theme.h"
 #include "health_bar.h"
 #ifdef OPENBW_REMASTERED
@@ -1794,9 +1795,12 @@ struct ui_functions: ui_util_functions {
 			// Under fog, neutral units (resources, critters) show only where explored.
 			return !(fog_mask && u->owner >= 8 && fog_tile_level(u->sprite->position.x / 32, u->sprite->position.y / 32, fog_mask) == 0);
 		};
-		auto box = [&](const unit_t* u, int min_tiles, int max_tiles, double& x0, double& y0, double& x1, double& y1) {
-			int tw_ = std::max(min_tiles, std::min(max_tiles, (int)u->unit_type->placement_size.x / 32));
-			int th_ = std::max(min_tiles, std::min(max_tiles, (int)u->unit_type->placement_size.y / 32));
+		// A unit's footprint on the minimap, in tiles clamped to [min_tiles, max_tiles] and
+		// scaled about its centre (players' units and buildings are drawn a little larger than
+		// their footprint so they read at the minimap's scale; resources are not).
+		auto box = [&](const unit_t* u, int min_tiles, int max_tiles, double& x0, double& y0, double& x1, double& y1, double scale = 1.0) {
+			double tw_ = std::max(min_tiles, std::min(max_tiles, (int)u->unit_type->placement_size.x / 32)) * scale;
+			double th_ = std::max(min_tiles, std::min(max_tiles, (int)u->unit_type->placement_size.y / 32)) * scale;
 			xy c = u->sprite->position;
 			x0 = (c.x / 32.0 - tw_ / 2.0) * sx, y0 = (c.y / 32.0 - th_ / 2.0) * sy;
 			x1 = x0 + tw_ * sx, y1 = y0 + th_ * sy;
@@ -1811,23 +1815,11 @@ struct ui_functions: ui_util_functions {
 			--i;
 			for (unit_t* u : ptr(st.player_units[i])) {
 				if (!shown(u) || !(ut_building(u) || u->owner >= 8)) continue;
-				box(u, 2, 4, x0, y0, x1, y1);
+				box(u, 2, 4, x0, y0, x1, y1, u->owner >= 8 ? 1.0 : minimap_owned_scale);
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
 				else {
-					// A dark hairline just outside, then a bevelled block in the units' colour, a
-					// little see-through, lit from the top left like a raised tile: bright top and
-					// left edges, dark bottom and right edges, and a flat face between them.
-					rounded(x0 - 1, y0 - 1, x1 + 1, y1 + 1, 1.5, hud_rgba(0, 0, 0, 255), 110);
-					const uint32_t base = minimap_tint(c, 70);
-					rounded_shaded(x0, y0, x1, y1, 0.8, base, minimap_building_alpha, [&](double px, double py, uint32_t& pc, int& pa) {
-						bool top = py - y0 < 1.0, left = px - x0 < 1.0, bottom = y1 - py < 1.0, right = x1 - px < 1.0;
-						int k = 0;
-						if (top || left) k = (bottom || right) ? 0 : 110;  // a corner shared by a lit and a dark edge stays neutral
-						else if (bottom || right) k = -120;
-						pc = k >= 0 ? minimap_tint(base, k) : minimap_shade(base, 256 + k, 256);
-						if (k != 0) pa = std::min(255, pa + 60);  // the edges are more solid than the face
-					});
+					draw_minimap_block(x0, y0, x1, y1, minimap_tint(c, 70), blend);
 				}
 			}
 		}
@@ -1846,7 +1838,7 @@ struct ui_functions: ui_util_functions {
 						blend((int)cx, (int)cy, c, 110);
 						continue;
 					}
-					box(u, 2, 3, x0, y0, x1, y1);
+					box(u, 2, 3, x0, y0, x1, y1, minimap_owned_scale);
 					if (minimap_worker_at_work(u, depots)) {
 						disc(x0, y0, x1, y1, minimap_tint(c, 70), minimap_building_alpha);  // as the buildings: part of the base
 						continue;
@@ -1907,6 +1899,49 @@ struct ui_functions: ui_util_functions {
 	// Buildings (and workers mining at their base) are see-through so units read over them.
 	static constexpr int minimap_building_alpha = 150;
 
+	static constexpr double minimap_owned_scale = 1.2;  // players' units and buildings, over their footprint
+
+	// A building as a block with height (see minimap_block.h): the roof in its colour, a
+	// little see-through with a lit top-left edge, and the right and front sides darker and
+	// more solid, all over a faint dark hairline that follows the block's outline.
+	// Antialiased by 4x4 supersampling; `blend(x, y, colour, alpha)` writes one pixel.
+	template<typename B>
+	void draw_minimap_block(double x0, double y0, double x1, double y1, uint32_t base, B&& blend) const {
+		using minimap_block::face;
+		const double w = x1 - x0, h = y1 - y0, d = minimap_block::depth(w, h);
+		if (!(d > 0)) return;
+		const uint32_t roof = minimap_tint(base, 30), edge = minimap_tint(base, 120);
+		const uint32_t right = minimap_shade(base, 150, 256), front = minimap_shade(base, 95, 256);
+		const uint32_t black = hud_rgba(0, 0, 0, 255);
+		const int roof_a = minimap_building_alpha, side_a = std::min(255, minimap_building_alpha + 70);
+		auto face_at = [&](double u, double v) { return minimap_block::at(u, v, w, h, d); };
+		for (int y = (int)std::floor(y0) - 1; y < (int)std::ceil(y1) + 1; ++y) {
+			for (int x = (int)std::floor(x0) - 1; x < (int)std::ceil(x1) + 1; ++x) {
+				// Average the samples' colours (premultiplied) and coverage.
+				double r = 0, g = 0, b = 0, a = 0, outline = 0;
+				for (int sy_ = 0; sy_ != 4; ++sy_) for (int sx_ = 0; sx_ != 4; ++sx_) {
+					double u = x + (sx_ + 0.5) / 4 - x0, v = y + (sy_ + 0.5) / 4 - y0;
+					face f = face_at(u, v);
+					if (f == face::none) {
+						// The hairline: within a pixel of the block.
+						if (face_at(u + 1, v) != face::none || face_at(u - 1, v) != face::none || face_at(u, v + 1) != face::none || face_at(u, v - 1) != face::none) outline += 1;
+						continue;
+					}
+					uint32_t c;
+					int ca;
+					if (f == face::roof) {
+						bool lit = u < 1.0 || v < 1.0;  // the roof's top and left edges catch the light
+						c = lit ? edge : roof, ca = lit ? side_a : roof_a;
+					} else c = f == face::right ? right : front, ca = side_a;
+					r += (c & 0xff) * ca, g += (c >> 8 & 0xff) * ca, b += (c >> 16 & 0xff) * ca, a += ca;
+				}
+				if (outline > 0) blend(x, y, black, (int)(110 * outline / 16));
+				if (a <= 0) continue;
+				uint32_t c = (uint32_t)(r / a) | (uint32_t)(g / a) << 8 | (uint32_t)(b / a) << 16 | 0xff000000u;
+				blend(x, y, c, (int)(a / 16));
+			}
+		}
+	}
 	// Each player's completed resource depots (Nexus, Command Center, Hatchery, Lair, Hive).
 	a_vector<std::pair<int, xy>> minimap_depots() const {
 		a_vector<std::pair<int, xy>> out;

@@ -32,6 +32,24 @@ target_include_directories(openbw-player PRIVATE
 target_compile_definitions(openbw-player PRIVATE OPENBW_ENABLE_UI OPENBW_NO_SDL_IMAGE)
 target_link_libraries(openbw-player PRIVATE ${SDL2_LIBRARIES})
 
+# Remastered graphics (F2) read a StarCraft: Remastered install's CASC store, which needs
+# zlib; without zlib the player builds with the classic graphics only. Decoding the art
+# uses a few threads.
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+  find_package(Threads REQUIRED)
+  target_compile_definitions(openbw-player PRIVATE OPENBW_REMASTERED)
+  target_link_libraries(openbw-player PRIVATE ZLIB::ZLIB Threads::Threads)
+  message(STATUS "openbw-player: remastered graphics enabled (zlib)")
+
+  # Behaviour tests for the remastered asset readers and raster operations.
+  add_executable(openbw-scr-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/scr_test.cpp")
+  target_include_directories(openbw-scr-test PRIVATE "${OPENBW_DIR}/ui")
+  target_link_libraries(openbw-scr-test PRIVATE ZLIB::ZLIB Threads::Threads)
+else()
+  message(STATUS "openbw-player: zlib not found, building without remastered graphics")
+endif()
+
 # Sound is optional: uses SDL2_mixer when installed, otherwise builds silent.
 find_package(SDL2_mixer CONFIG QUIET)
 if(SDL2_mixer_FOUND)

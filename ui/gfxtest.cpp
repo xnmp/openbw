@@ -9,6 +9,7 @@
 #include "replay.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 
 using namespace bwgame;
@@ -667,6 +668,9 @@ int main(int argc, char** argv) {
 		title += " - " + (slash == a_string::npos ? path : path.substr(slash + 1));
 	}
 	wnd.create(title.c_str(), 0, 0, screen_width, screen_height);
+	// Frames shown on the display's refresh, for even motion; OPENBW_NO_VSYNC=1 turns it off.
+	const char* no_vsync = std::getenv("OPENBW_NO_VSYNC");
+	wnd.present_with_vsync(!(no_vsync && *no_vsync && *no_vsync != '0'));
 #else
 	wnd.create("OpenBW", 0, 0, screen_width, screen_height);
 #endif
@@ -692,9 +696,15 @@ int main(int argc, char** argv) {
 	}, &m, 0, 1);
 #else
 	::g_m = &m;
+	// One frame per display refresh (ui.frame_interval()); a frame that runs late is followed
+	// straight away by the next rather than by a burst of catching up.
+	auto next_frame = std::chrono::steady_clock::now();
 	while (true) {
 		m.update();
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		next_frame += m.ui.frame_interval();
+		auto now = std::chrono::steady_clock::now();
+		if (next_frame < now) next_frame = now;
+		else std::this_thread::sleep_until(next_frame);
 	}
 #endif
 	::g_m = nullptr;

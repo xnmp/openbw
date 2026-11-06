@@ -7,7 +7,11 @@
 #include "native_sound.h"
 #include "hud_font.h"
 #include "order_names.h"
+#ifdef OPENBW_REMASTERED
+#include "scr_render.h"
+#endif
 
+#include <climits>
 #include <functional>
 #ifdef _WIN32
 #include <direct.h>
@@ -1238,10 +1242,12 @@ struct ui_functions: ui_util_functions {
 		for (auto* image : ptr(reverse(sprite->images))) {
 			if (i_flag(image, image_t::flag_hidden)) continue;
 			if (draw_selection_u && image->modifier != 10) {
-				draw_selection_circle(sprite, draw_selection_u, data, data_pitch);
+				if (hd_drawing) hd_draw_selection_circle(sprite, draw_selection_u);
+				else draw_selection_circle(sprite, draw_selection_u, data, data_pitch);
 				draw_selection_u = nullptr;
 			}
-			draw_image(image, data, data_pitch, player_color(sprite->owner));
+			if (hd_drawing) hd_draw_image(image, player_color(sprite->owner));
+			else draw_image(image, data, data_pitch, player_color(sprite->owner));
 		}
 		if (draw_health_bars_u && !u_invincible(draw_health_bars_u)) {
 			draw_health_bars(sprite, draw_health_bars_u, data, data_pitch);
@@ -1277,7 +1283,10 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 
-		std::sort(sorted_sprites.begin(), sorted_sprites.end());
+		// Equal depths keep the game's own order (tile line, then list order). Breaking ties
+		// by sprite address made overlapping translucent sprites blend in a different order
+		// from run to run, as heap layout varies.
+		std::stable_sort(sorted_sprites.begin(), sorted_sprites.end(), [](auto& a, auto& b) { return a.first < b.first; });
 
 		for (auto uid : current_selection) {
 			auto* u = get_unit(uid);
@@ -1296,6 +1305,7 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 
+		if (hd_drawing) hd_prepare_sprites();
 		for (auto& v : sorted_sprites) {
 			draw_sprite(v.second, data, data_pitch);
 		}
@@ -1326,40 +1336,27 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
-	void line_rectangle(uint8_t* data, size_t data_pitch, rect area, uint8_t index) {
-		if (area.from.x < 0) area.from.x = 0;
-		if (area.from.y < 0) area.from.y = 0;
-		if (area.to.x > (int)screen_width) area.to.x = screen_width;
-		if (area.to.y > (int)screen_height) area.to.y = screen_height;
-		if (area.from.x >= area.to.x || area.from.y >= area.to.y) return;
-		size_t width = area.to.x - area.from.x;
-		size_t height = area.to.y - area.from.y;
-		uint8_t* p = data + data_pitch * (size_t)area.from.y + (size_t)area.from.x;
-		memset(p, index, width);
-		memset(p + data_pitch * height, index, width);
-		for (size_t y = 0; y != height; ++y) {
-			p[data_pitch * y] = index;
-			p[data_pitch * y + width - 1] = index;
+	// Outlines the rectangle with corners `from` and `to` (both inclusive) in a screen-sized
+	// buffer. Edges outside the screen are left out rather than drawn at its border.
+	template <typename T>
+	void outline_rect(T* data, size_t pitch, xy from, xy to, T value) {
+		const int w = (int)screen_width, h = (int)screen_height;
+		if (from.x > to.x || from.y > to.y || to.x < 0 || to.y < 0 || from.x >= w || from.y >= h) return;
+		const int x0 = std::max(0, from.x), x1 = std::min(w - 1, to.x);
+		const int y0 = std::max(0, from.y), y1 = std::min(h - 1, to.y);
+		for (int x = x0; x <= x1; ++x) {
+			if (from.y >= 0) data[(size_t)from.y * pitch + x] = value;
+			if (to.y < h) data[(size_t)to.y * pitch + x] = value;
+		}
+		for (int y = y0; y <= y1; ++y) {
+			if (from.x >= 0) data[(size_t)y * pitch + from.x] = value;
+			if (to.x < w) data[(size_t)y * pitch + to.x] = value;
 		}
 	}
 
-	void line_rectangle_rgba(uint32_t* data, size_t data_pitch, rect area, uint32_t color) {
-		if (area.from.x < 0) area.from.x = 0;
-		if (area.from.y < 0) area.from.y = 0;
-		if (area.to.x > (int)screen_width) area.to.x = screen_width;
-		if (area.to.y > (int)screen_height) area.to.y = screen_height;
-		if (area.from.x >= area.to.x || area.from.y >= area.to.y) return;
-		size_t width = area.to.x - area.from.x;
-		size_t height = area.to.y - area.from.y;
-		uint32_t* p = data + data_pitch * (size_t)area.from.y + (size_t)area.from.x;
-		for (size_t x = 0; x != width; ++x) {
-			p[x] = color;
-			p[height * data_pitch + x] = color;
-		}
-		for (size_t y = 0; y != height; ++y) {
-			p[data_pitch * y] = color;
-			p[data_pitch * y + width - 1] = color;
-		}
+	// The outline of the pixels in `area` (`to` exclusive).
+	void line_rectangle(uint8_t* data, size_t data_pitch, rect area, uint8_t index) {
+		outline_rect<uint8_t>(data, data_pitch, area.from, area.to - xy(1, 1), index);
 	}
 
 	bool unit_visble_on_minimap(unit_t* u) {
@@ -1371,21 +1368,177 @@ struct ui_functions: ui_util_functions {
 		return true;
 	}
 
+	// ---- Minimap: drawn in window pixels, crisp at any zoom, flush in the bottom-left ----
+	// Each tile shows its megatile averaged over a 4x4 grid (the remastered tiles while those
+	// are drawn), rather than one sample pixel per tile scaled up with the game view.
+	enum { minimap_grid = 4 };
+	std::unique_ptr<native_window_drawing::surface> minimap_surface;
+	struct minimap_megatile {
+		bool ready = false;
+		std::array<uint32_t, minimap_grid * minimap_grid> cells{};  // hud_rgba, opaque
+	};
+	a_vector<minimap_megatile> minimap_cells[2];  // classic, remastered; by megatile index
+	int minimap_cells_tileset = -1;
+	bool minimap_hd = false;  // the frame being drawn uses the remastered art
+
+	// Window pixels: the longer side about a quarter of the window height.
+	rect minimap_window_rect() const {
+		int tw = (int)game_st.map_tile_width, th = (int)game_st.map_tile_height;
+		if (tw <= 0 || th <= 0 || window_height <= 0 || viewport_w <= 0) return {};
+		int side = std::max(128, std::min(384, (int)(window_height * 0.26)));
+		side = std::min(side, std::min(viewport_w, window_height) / 2);
+		int w = std::max(1, side * tw / std::max(tw, th)), h = std::max(1, side * th / std::max(tw, th));
+		return rect{{viewport_x, window_height - h}, {viewport_x + w, window_height}};
+	}
+
+	// The same rect in logical (pre-zoom) coordinates, for mouse hit tests.
 	rect get_minimap_area() {
-		size_t minimap_width = std::max(game_st.map_tile_width, game_st.map_tile_height);
-		size_t minimap_height = std::max(game_st.map_tile_width, game_st.map_tile_height);
-		if (game_st.map_width < game_st.map_height) {
-			minimap_width = minimap_width * minimap_width * game_st.map_tile_width / (minimap_height * game_st.map_tile_height);
-		} else if (game_st.map_height < game_st.map_width) {
-			minimap_height = minimap_height * minimap_height * game_st.map_tile_height / (minimap_width* game_st.map_tile_width);
+		rect r = minimap_window_rect();
+		if (r.to.x <= r.from.x || zoom <= 0) return {};
+		rect a;
+		a.from = {(int)((r.from.x - viewport_x) / zoom), (int)(r.from.y / zoom)};
+		a.to = {(int)std::ceil((r.to.x - viewport_x) / zoom), (int)std::ceil(r.to.y / zoom)};
+		return a;
+	}
+
+	size_t minimap_tile_megatile(size_t ti) const {
+		if (st.tiles[ti].flags & tile_t::flag_has_creep) return game_st.cv5.at(1).mega_tile_index[creep_random_tile_indices[ti]];
+		return st.tiles_mega_tile_index[ti];
+	}
+
+	const minimap_megatile& minimap_megatile_cells(size_t index) {
+		if (minimap_cells_tileset != (int)game_st.tileset_index) {
+			for (auto& c : minimap_cells) c.clear();
+			minimap_cells_tileset = (int)game_st.tileset_index;
 		}
-		if (screen_width < minimap_width || screen_height < minimap_height) return {};
-		int map_screen_x = 4;
-		int map_screen_y = screen_height - 4 - minimap_height;
-		rect area;
-		area.from = {map_screen_x, map_screen_y};
-		area.to = area.from + xy{(int)minimap_width, (int)minimap_height};
-		return area;
+		auto& cache = minimap_cells[minimap_hd ? 1 : 0];
+		if (cache.size() <= index) cache.resize(index + 1);
+		auto& m = cache[index];
+		if (m.ready) return m;
+		m.ready = true;
+#ifdef OPENBW_REMASTERED
+		if (minimap_hd && hd) {
+			std::vector<uint32_t> v;
+			if (hd->megatile_cells(index, minimap_grid, v) && v.size() == m.cells.size()) {
+				for (size_t i = 0; i != v.size(); ++i) m.cells[i] = v[i] | 0xff000000u;
+				return m;
+			}
+		}
+#endif
+		// Classic: each cell is one 8x8 minitile, averaged through the tileset palette.
+		if (index >= tileset_img.vx4.size() || tileset_img.wpe.size() != 256 * 4) return m;
+		auto& images = tileset_img.vx4[index].images;
+		const size_t word = sizeof(vr4_entry::bitmap_t);
+		for (size_t c = 0; c != 16; ++c) {
+			size_t vi = images[c] / 2;
+			if (vi >= tileset_img.vr4.size()) continue;
+			auto& bm = tileset_img.vr4[vi].bitmap;
+			unsigned r = 0, g = 0, b = 0;
+			for (size_t i = 0; i != 64; ++i) {
+				uint8_t ci = (uint8_t)(bm[i / word] >> (8 * (i % word)));
+				r += tileset_img.wpe[4 * ci];
+				g += tileset_img.wpe[4 * ci + 1];
+				b += tileset_img.wpe[4 * ci + 2];
+			}
+			m.cells[c] = hud_rgba(r / 64, g / 64, b / 64, 255);
+		}
+		return m;
+	}
+
+	uint32_t palette_rgba(int index) const {
+		if (tileset_img.wpe.size() != 256 * 4) return hud_rgba(255, 255, 255, 255);
+		index &= 0xff;
+		return hud_rgba(tileset_img.wpe[4 * index], tileset_img.wpe[4 * index + 1], tileset_img.wpe[4 * index + 2], 255);
+	}
+
+	void draw_minimap_window() {
+		rect r = minimap_window_rect();
+		const int w = r.to.x - r.from.x, h = r.to.y - r.from.y;
+		if (w <= 0 || h <= 0) return;
+		if (!minimap_surface || minimap_surface->w != w || minimap_surface->h != h) {
+			minimap_surface = native_window_drawing::create_rgba_surface(w, h);
+			minimap_surface->set_blend_mode(native_window_drawing::blend_mode::none);
+		}
+		uint32_t* buf = (uint32_t*)minimap_surface->lock();
+		const size_t pitch = minimap_surface->pitch / 4;
+		const int tw = (int)game_st.map_tile_width, th = (int)game_st.map_tile_height;
+		const uint8_t fog_mask = show_fog ? fog_vision_mask() : 0;
+
+		// Per column / row: the tile, the cell within it, and the position between tile
+		// centres for the fog's interpolation (as draw_fog does it on the map).
+		struct axis { int tile, cell, fog_tile; double fog_frac; };
+		auto make_axis = [&](int n, int tiles) {
+			a_vector<axis> v((size_t)n);
+			for (int i = 0; i != n; ++i) {
+				double f = (i + 0.5) * tiles / n;
+				int t = std::min(tiles - 1, (int)f);
+				double c = f - 0.5;
+				int ct = (int)std::floor(c);
+				v[i] = {t, std::min((int)minimap_grid - 1, (int)((f - t) * minimap_grid)), ct, c - ct};
+			}
+			return v;
+		};
+		auto ax = make_axis(w, tw), ay = make_axis(h, th);
+		for (int y = 0; y != h; ++y) {
+			uint32_t* row = buf + (size_t)y * pitch;
+			const axis& yv = ay[y];
+			for (int x = 0; x != w; ++x) {
+				const axis& xv = ax[x];
+				size_t ti = (size_t)yv.tile * tw + xv.tile;
+				uint32_t c = minimap_megatile_cells(minimap_tile_megatile(ti)).cells[yv.cell * minimap_grid + xv.cell];
+				if (fog_mask) {
+					double a = fog_tile_level(xv.fog_tile, yv.fog_tile, fog_mask), b = fog_tile_level(xv.fog_tile + 1, yv.fog_tile, fog_mask);
+					double cc = fog_tile_level(xv.fog_tile, yv.fog_tile + 1, fog_mask), d = fog_tile_level(xv.fog_tile + 1, yv.fog_tile + 1, fog_mask);
+					double top = a + (b - a) * xv.fog_frac, bottom = cc + (d - cc) * xv.fog_frac;
+					unsigned k = (unsigned)((top + (bottom - top) * yv.fog_frac) * 256 / 31);
+					if (k < 256) c = hud_rgba((c & 0xff) * k >> 8, (c >> 8 & 0xff) * k >> 8, (c >> 16 & 0xff) * k >> 8, 255);
+				}
+				row[x] = c;
+			}
+		}
+
+		auto fill = [&](double x0, double y0, double x1, double y1, uint32_t c) {
+			int ix0 = std::max(0, (int)std::floor(x0)), iy0 = std::max(0, (int)std::floor(y0));
+			int ix1 = std::min(w, std::max(ix0 + 1, (int)std::floor(x1))), iy1 = std::min(h, std::max(iy0 + 1, (int)std::floor(y1)));
+			for (int y = iy0; y < iy1; ++y) std::fill(buf + (size_t)y * pitch + ix0, buf + (size_t)y * pitch + std::max(ix0, ix1), c);
+		};
+		const double sx = (double)w / tw, sy = (double)h / th;
+		for (size_t i = 12; i != 0;) {
+			--i;
+			for (unit_t* u : ptr(st.player_units[i])) {
+				if (!unit_visble_on_minimap(u)) continue;
+				// Under fog, neutral units (resources, critters) show only where explored.
+				if (fog_mask && u->owner >= 8 && fog_tile_level(u->sprite->position.x / 32, u->sprite->position.y / 32, fog_mask) == 0) continue;
+				int color = img.player_minimap_colors.at(player_color(u->owner));
+				if (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) color = tileset_img.resource_minimap_color;
+				int tiles_w = u->unit_type->placement_size.x / 32, tiles_h = u->unit_type->placement_size.y / 32;
+				if (ut_building(u)) {
+					tiles_w = std::min(tiles_w, 4);
+					tiles_h = std::min(tiles_h, 4);
+				}
+				tiles_w = std::max(tiles_w, 2);
+				tiles_h = std::max(tiles_h, 2);
+				xy from = (u->sprite->position - u->unit_type->placement_size / 2) / 32u;
+				fill(from.x * sx, from.y * sy, (from.x + tiles_w) * sx, (from.y + tiles_h) * sy, palette_rgba(color));
+			}
+		}
+
+		// Camera: a white outline, clipped to the minimap.
+		{
+			int x0 = (int)std::floor(screen_pos.x / 32.0 * sx), y0 = (int)std::floor(screen_pos.y / 32.0 * sy);
+			int x1 = (int)std::ceil((screen_pos.x + view_width) / 32.0 * sx) - 1, y1 = (int)std::ceil((screen_pos.y + view_height) / 32.0 * sy) - 1;
+			x0 = std::max(0, x0), y0 = std::max(0, y0), x1 = std::min(w - 1, x1), y1 = std::min(h - 1, y1);
+			uint32_t white = hud_rgba(255, 255, 255, 255);
+			if (x0 <= x1 && y0 <= y1) {
+				for (int x = x0; x <= x1; ++x) buf[(size_t)y0 * pitch + x] = buf[(size_t)y1 * pitch + x] = white;
+				for (int y = y0; y <= y1; ++y) buf[(size_t)y * pitch + x0] = buf[(size_t)y * pitch + x1] = white;
+			}
+		}
+		// Edge on the top and right (the other two are the window's).
+		for (int x = 0; x != w; ++x) buf[x] = hud_rgba(0, 0, 0, 255);
+		for (int y = 0; y != h; ++y) buf[(size_t)y * pitch + w - 1] = hud_rgba(0, 0, 0, 255);
+		minimap_surface->unlock();
+		minimap_surface->blit(&*window_surface, r.from.x, r.from.y);
 	}
 
 	// ---- Fog of war ('f' with the graphs closed) ----
@@ -1441,73 +1594,14 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
-	void draw_minimap(uint8_t* data, size_t data_pitch) {
-		auto area = get_minimap_area();
-		size_t minimap_width = area.to.x - area.from.x;
-		size_t minimap_height = area.to.y - area.from.y;
-		if (minimap_width != game_st.map_tile_width) return;
-		if (minimap_height != game_st.map_tile_height) return;
-		fill_rectangle(data, data_pitch, area, 0);
-		line_rectangle(data, data_pitch, {area.from - xy(1, 1), area.to + xy(1, 1)}, 0);
-
-		uint8_t* p = data + data_pitch * (size_t)area.from.y + (size_t)area.from.x;
-
-		size_t pitch = data_pitch - game_st.map_tile_width;
-		uint8_t fog_mask = show_fog ? fog_vision_mask() : 0;
-		for (size_t y = 0; y != game_st.map_tile_height; ++y) {
-			for (size_t x = 0; x != game_st.map_tile_width; ++x) {
-				size_t index;
-				if (~st.tiles[y * game_st.map_tile_width + x].flags & tile_t::flag_has_creep) index = st.tiles_mega_tile_index[y * game_st.map_tile_width + x];
-				else index = game_st.cv5.at(1).mega_tile_index[creep_random_tile_indices[y * game_st.map_tile_width + x]];
-				auto* images = &tileset_img.vx4.at(index).images[0];
-				auto* bitmap = &tileset_img.vr4.at(*images / 2).bitmap[0];
-				auto val = bitmap[55 / sizeof(vr4_entry::bitmap_t)];
-				size_t shift = 8 * (55 % sizeof(vr4_entry::bitmap_t));
-				val >>= shift;
-				if (fog_mask) val = tileset_img.dark_pcx.data[fog_tile_level((int)x, (int)y, fog_mask) * 256 + (uint8_t)val];
-				*p++ = (uint8_t)val;
-			}
-			p += pitch;
-		}
-
-		for (size_t i = 12; i != 0;) {
-			--i;
-			for (unit_t* u : ptr(st.player_units[i])) {
-				if (!unit_visble_on_minimap(u)) continue;
-				// Under fog, neutral units (resources, critters) show only where explored.
-				if (fog_mask && u->owner >= 8 && fog_tile_level(u->sprite->position.x / 32, u->sprite->position.y / 32, fog_mask) == 0) continue;
-				int color = img.player_minimap_colors.at(player_color(u->owner));
-				size_t w = u->unit_type->placement_size.x / 32u;
-				size_t h = u->unit_type->placement_size.y / 32u;
-				if (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) {
-					color = tileset_img.resource_minimap_color;
-				}
-				if (ut_building(u)) {
-					if (w > 4) w = 4;
-					if (h > 4) h = 4;
-				}
-				if (w < 2) w = 2;
-				if (h < 2) h = 2;
-				rect unit_area;
-				unit_area.from = area.from + (u->sprite->position - u->unit_type->placement_size / 2) / 32u;
-				unit_area.to = unit_area.from + xy(w, h);
-				fill_rectangle(data, data_pitch, unit_area, color);
-			}
-		}
-
-		rect view_rect;
-		view_rect.from = area.from + xy(screen_pos.x / 32u, screen_pos.y / 32u);
-		view_rect.to = view_rect.from + xy((view_width + 31) / 32u, (view_height + 31) / 32u);
-		line_rectangle(data, data_pitch, view_rect, 255);
-
-	}
 
 	int replay_frame = 0;
 
 	// The replay bar lives in window pixels (drawn crisp after scaling, see draw_replay_bar);
 	// this is its bottom-right placement there.
 	rect replay_bar_window_rect() const {
-		int w = std::max(160, std::min(440, viewport_w / 3));
+		// The whole panel, buttons included, takes about a third of the view's width.
+		int w = std::max(160, std::min(440, viewport_w / 3) - (int)replay_controls_w);
 		int h = 14;
 		int x1 = viewport_x + viewport_w - 16, y1 = window_height - 14;
 		return rect{{x1 - w, y1 - h}, {x1, y1}};
@@ -1732,6 +1826,472 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+	// ---- Remastered graphics (F2) ----
+	// With a StarCraft: Remastered install available, the map and sprites are drawn from its
+	// HD assets (scr_render.h) straight into a window-resolution canvas; health bars, the
+	// minimap and draw_callback() still draw into the indexed buffer, which is then laid over
+	// the canvas with a sentinel index as transparency. Without an install (or with the
+	// setting off) the classic indexed path runs unchanged.
+	bool use_remastered = true;
+	bool hd_drawing = false;  // inside draw_sprites() for a remastered frame
+#ifdef OPENBW_REMASTERED
+	std::unique_ptr<scr::graphics> hd;
+	bool hd_tried = false;
+	std::unique_ptr<native_window_drawing::surface> hd_surface;
+	a_vector<uint8_t> hd_shadow;  // all zero between frames (resolve_shadows clears what it uses)
+	bool hd_shadow_clean = false;
+	scr::box hd_shadow_area;
+	scr::draw_list hd_list;  // the frame's map and sprite draws, run by hd_flush()
+	scr::image hd_black_tile;  // drawn (in order, through hd_list) for a megatile that fails to decode
+	scr::canvas hd_canvas;
+	int hd_cam_x = 0;
+	int hd_cam_y = 0;
+
+	// $OPENBW_REMASTERED_DIR, else the platform's default install location. The folder is
+	// the one holding .build.info (e.g. ".../Program Files (x86)/StarCraft").
+	static a_string remastered_install_dir() {
+		auto exists = [](const a_string& dir) {
+			FILE* f = std::fopen((dir + "/.build.info").c_str(), "rb");
+			if (f) std::fclose(f);
+			return f != nullptr;
+		};
+		const char* env = std::getenv("OPENBW_REMASTERED_DIR");
+		if (env && *env) return env;
+		a_vector<a_string> candidates;
+#ifdef _WIN32
+		candidates.push_back("C:/Program Files (x86)/StarCraft");
+#elif defined(__APPLE__)
+		candidates.push_back("/Applications/StarCraft");
+#else
+		// Wine's default prefix, and Lutris's default Battle.net prefix.
+		const char* home = std::getenv("HOME");
+		if (home && *home) {
+			candidates.push_back(a_string(home) + "/.wine/drive_c/Program Files (x86)/StarCraft");
+			candidates.push_back(a_string(home) + "/Games/battlenet/drive_c/Program Files (x86)/StarCraft");
+		}
+#endif
+		for (auto& c : candidates) if (exists(c)) return c;
+		return {};
+	}
+
+	bool hd_ready() {
+		if (!use_remastered || !wnd) {
+			if (hd) hd->release();  // classic graphics: free the decoded art
+			return false;
+		}
+		if (!hd_tried) {
+			hd_tried = true;
+			a_string dir = remastered_install_dir();
+			if (dir.empty()) {
+				ui::log("remastered graphics: no install found (set OPENBW_REMASTERED_DIR)\n");
+			} else {
+				hd = std::make_unique<scr::graphics>();
+				std::string error;
+				if (!hd->open(dir.c_str(), error)) {
+					ui::log("remastered graphics: %s: %s\n", dir, error.c_str());
+					hd.reset();
+				} else {
+					ui::log("remastered graphics from %s\n", dir);
+				}
+			}
+		}
+		if (!hd) return false;
+		hd->set_zoom(hd_zoom());  // may switch HD/HD2 sets, so before the tileset check
+		static const char* names[8] = {"badlands", "platform", "install", "AshWorld", "Jungle", "Desert", "Ice", "Twilight"};
+		return hd->set_tileset(names[game_st.tileset_index % 8]);
+	}
+
+	// The HD canvas scale: the zoom rounded to whole pixels per 32 px tile, so terrain,
+	// sprites and fog share one grid (equal to `zoom` at every zoom step).
+	double hd_zoom() const { return std::max(1L, std::lround(32 * zoom)) / 32.0; }
+
+	uint32_t hd_palette_rgb(size_t index) const {
+		return scr::rgba(tileset_img.wpe[4 * index], tileset_img.wpe[4 * index + 1], tileset_img.wpe[4 * index + 2], 255);
+	}
+
+	// Team colour: the player's minimap colour, as Remastered uses.
+	uint32_t hd_team_rgb(size_t color_index) const {
+		return hd_palette_rgb(img.player_minimap_colors.at(color_index));
+	}
+
+	int hd_screen_x(double map_x) const { return (int)std::lround(map_x * hd_zoom()) - hd_cam_x; }
+	int hd_screen_y(double map_y) const { return (int)std::lround(map_y * hd_zoom()) - hd_cam_y; }
+
+	void hd_begin_frame() {
+		int w = viewport_w, h = window_height;
+		if (!hd_surface || hd_surface->w != w || hd_surface->h != h) {
+			hd_surface = native_window_drawing::create_rgba_surface(w, h);
+			hd_surface->set_blend_mode(native_window_drawing::blend_mode::none);
+		}
+		// A frame that did not reach hd_flush() may have left coverage behind.
+		if (hd_shadow.size() != (size_t)w * h || !hd_shadow_clean) hd_shadow.assign((size_t)w * h, 0);
+		hd_shadow_clean = false;
+		hd_shadow_area = {};
+		hd_list.clear();
+		hd_canvas.px = (uint32_t*)hd_surface->lock();
+		hd_canvas.pitch = hd_surface->pitch / 4;
+		hd_canvas.w = w;
+		hd_canvas.h = h;
+		hd_canvas.shadow = hd_shadow.data();
+		hd_canvas.shadow_area = &hd_shadow_area;
+		hd_cam_x = (int)std::lround(screen_pos.x * hd_zoom());
+		hd_cam_y = (int)std::lround(screen_pos.y * hd_zoom());
+	}
+
+	// Draws the recorded map and sprites (in parallel bands), then applies their shadows.
+	void hd_flush() {
+		hd_list.run(hd_canvas);
+		scr::resolve_shadows(hd_canvas);
+		hd_shadow_clean = true;
+	}
+
+	void hd_fill_black(int x0, int y0, int x1, int y1) {
+		auto& c = hd_canvas;
+		x0 = std::max(x0, 0), y0 = std::max(y0, 0), x1 = std::min(x1, c.w), y1 = std::min(y1, c.h);
+		for (int y = y0; y < y1; ++y) {
+			if (x0 < x1) std::fill_n(c.px + (size_t)y * c.pitch + x0, x1 - x0, scr::rgba(0, 0, 0, 255));
+		}
+	}
+
+	void hd_end_frame() {
+		hd_surface->unlock();
+		hd_canvas = {};
+		hd->end_frame();
+	}
+
+	// The megatile drawn for map tile `ti` (creep tiles use a random creep megatile).
+	size_t hd_tile_megatile(size_t ti) const {
+		if (st.tiles[ti].flags & tile_t::flag_has_creep) return game_st.cv5.at(1).mega_tile_index[creep_random_tile_indices[ti]];
+		return st.tiles_mega_tile_index[ti];
+	}
+
+	// Art wanted for the frame being drawn, gathered so that whatever the current zoom lacks
+	// (after a zoom step, most of the screen) is decoded and scaled in parallel up front
+	// rather than one item at a time while drawing.
+	std::vector<size_t> hd_wanted_tiles, hd_wanted_images;
+	std::vector<std::pair<size_t, size_t>> hd_wanted_frames;
+
+	void hd_draw_tiles() {
+		auto& c = hd_canvas;
+		int tp = hd->tile_pixels();
+		int tx0 = std::max(0, hd_cam_x / tp), ty0 = std::max(0, hd_cam_y / tp);
+		int tx1 = std::min((int)game_st.map_tile_width, (hd_cam_x + c.w + tp - 1) / tp);
+		int ty1 = std::min((int)game_st.map_tile_height, (hd_cam_y + c.h + tp - 1) / tp);
+		hd_wanted_tiles.clear();
+		for (int ty = ty0; ty < ty1; ++ty) {
+			for (int tx = tx0; tx < tx1; ++tx) hd_wanted_tiles.push_back(hd_tile_megatile((size_t)ty * game_st.map_tile_width + tx));
+		}
+		hd->prepare_megatiles(hd_wanted_tiles);
+		// Black where no tile is drawn: past the map's edges (a map smaller than the view).
+		// Nothing recorded so far reaches there, so filling now rather than in order is safe.
+		int mx0 = tx0 * tp - hd_cam_x, my0 = ty0 * tp - hd_cam_y, mx1 = tx1 * tp - hd_cam_x, my1 = ty1 * tp - hd_cam_y;
+		hd_fill_black(0, 0, c.w, my0);
+		hd_fill_black(0, my1, c.w, c.h);
+		hd_fill_black(0, my0, mx0, my1);
+		hd_fill_black(mx1, my0, c.w, my1);
+		static const xy dirs[9] = {{1, 1}, {0, 1}, {-1, 1}, {1, 0}, {-1, 0}, {1, -1}, {0, -1}, {-1, -1}, {0, 0}};
+		for (int ty = ty0; ty < ty1; ++ty) {
+			for (int tx = tx0; tx < tx1; ++tx) {
+				size_t ti = (size_t)ty * game_st.map_tile_width + tx;
+				auto& tile = st.tiles[ti];
+				int left = tx * tp - hd_cam_x, top = ty * tp - hd_cam_y;
+				if (auto* m = hd->megatile(hd_tile_megatile(ti))) {
+					hd_list.opaque(c, *m, left, top);
+				} else {
+					if (hd_black_tile.w != tp) {
+						hd_black_tile.w = hd_black_tile.h = tp;
+						hd_black_tile.px.assign((size_t)tp * tp, scr::rgba(0, 0, 0, 255));
+					}
+					hd_list.opaque(c, hd_black_tile, left, top);
+				}
+				if (tile.flags & tile_t::flag_has_creep) continue;
+				size_t creep_index = 0;
+				for (size_t i = 0; i != 9; ++i) {
+					size_t nx = tx + dirs[i].x, ny = ty + dirs[i].y;
+					if (nx >= game_st.map_tile_width || ny >= game_st.map_tile_height) continue;
+					if (st.tiles[nx + ny * game_st.map_tile_width].flags & tile_t::flag_has_creep) creep_index |= 1 << i;
+				}
+				size_t creep_frame = img.creep_edge_frame_index[creep_index];
+				if (!creep_frame) continue;
+				auto& sd = tileset_img.creep_grp.frames.at(creep_frame - 1);
+				int x = hd_screen_x(tx * 32.0 + sd.offset.x), y = hd_screen_y(ty * 32.0 + sd.offset.y);
+				int w = (int)std::lround(sd.size.x * hd_zoom()), h = (int)std::lround(sd.size.y * hd_zoom());
+				if (auto* e = hd->creep_edge(creep_frame - 1, w, h)) hd_list.sprite(c, *e, x, y, false, scr::blend::normal, 0, 255);
+			}
+		}
+	}
+
+	// Where an image is drawn from: its map position (for a y-frozen image, the centre that
+	// keeps its frame's top where the classic path pins it) and whether it is mirrored.
+	struct hd_anchor {
+		double x, y;
+		bool flipped;
+	};
+	hd_anchor hd_image_anchor(const image_t* image) const {
+		xy centre = get_image_center_map_position(image);
+		hd_anchor a{(double)centre.x, (double)centre.y, i_flag(image, image_t::flag_horizontally_flipped)};
+		if (i_flag(image, image_t::flag_y_frozen)) {
+			auto& sd = image->grp->frames.at(image->frame_index);
+			a.y = image->frozen_y_value - ((int)sd.offset.y - (int)(image->grp->height / 2));
+		}
+		return a;
+	}
+
+	// draw_sprites() visits whole map-width rows, so first drop images far from the screen
+	// without loading their HD art: the HD frames reach at most 66 game pixels past the SD
+	// grp box (measured over every image; images.dat 578 is the worst), so twice that is safe.
+	bool hd_image_near_screen(const image_t* image, const hd_anchor& a) const {
+		auto& c = hd_canvas;
+		int mx = (int)image->grp->width / 2 + 132, my = (int)image->grp->height / 2 + 132;
+		if (hd_screen_x(a.x + mx) < 0 || hd_screen_x(a.x - mx) > c.w) return false;
+		if (hd_screen_y(a.y + my) < 0 || hd_screen_y(a.y - my) > c.h) return false;
+		return true;
+	}
+
+	// Whether any of the image's HD frames reach the screen; loads its atlas (not a frame).
+	bool hd_image_on_screen(const image_t* image, const hd_anchor& a) {
+		auto& c = hd_canvas;
+		auto* b = hd->bounds((size_t)image->image_type->id);
+		if (!b) return false;
+		double left = a.flipped ? -b->right : b->left, right = a.flipped ? -b->left : b->right;
+		if (hd_screen_x(a.x + right) < -2 || hd_screen_x(a.x + left) > c.w + 2) return false;
+		if (hd_screen_y(a.y + b->bottom) < -2 || hd_screen_y(a.y + b->top) > c.h + 2) return false;
+		return true;
+	}
+
+	size_t hd_selection_circle_image(const sprite_t* sprite) const {
+		return (size_t)ImageTypes::IMAGEID_Selection_Circle_22pixels + sprite->sprite_type->selection_circle;
+	}
+
+	// Loads and scales, in parallel, what draw_sprites() is about to draw (with the same
+	// culling); anything this misses is still scaled when drawn.
+	void hd_prepare_sprites() {
+		auto each_image = [&](auto&& f) {
+			for (auto& v : sorted_sprites) {
+				for (auto* image : ptr(v.second->images)) {
+					if (!i_flag(image, image_t::flag_hidden)) f(image, hd_image_anchor(image));
+				}
+			}
+		};
+		hd_wanted_images.clear();
+		each_image([&](const image_t* image, const hd_anchor& a) {
+			if (hd_image_near_screen(image, a)) hd_wanted_images.push_back((size_t)image->image_type->id);
+		});
+		hd->load(hd_wanted_images);
+		hd_wanted_frames.clear();
+		each_image([&](const image_t* image, const hd_anchor& a) {
+			if (!hd_image_near_screen(image, a) || !hd_image_on_screen(image, a)) return;
+			hd_wanted_frames.emplace_back((size_t)image->image_type->id, (size_t)image->frame_index);
+			if (image->modifier == 12) hd_wanted_frames.emplace_back((size_t)ImageTypes::IMAGEID_Warp_Texture, (size_t)image->modifier_data1);
+		});
+		for (auto* s : current_selection_sprites) hd_wanted_frames.emplace_back(hd_selection_circle_image(s), 0);
+		hd->prepare(hd_wanted_frames);
+	}
+
+	void hd_draw_image(const image_t* image, size_t color_index) {
+		auto& c = hd_canvas;
+		hd_anchor a = hd_image_anchor(image);
+		if (!hd_image_near_screen(image, a) || !hd_image_on_screen(image, a)) return;
+		bool flipped = a.flipped;
+		auto* f = hd->sprite((size_t)image->image_type->id, image->frame_index);
+		if (!f || f->px.empty()) return;
+		int x = hd_screen_x(a.x + (flipped ? f->left_flipped : f->left));
+		int y = hd_screen_y(a.y + f->top);
+		if (x >= c.w || y >= c.h || x + f->px.w <= 0 || y + f->px.h <= 0) return;
+		uint32_t team = hd_team_rgb(color_index);
+		switch (image->modifier) {
+		case 2:
+		case 4:  // cloaking / decloaking: fade towards the cloaked look over modifier_data1 0..8
+			hd_list.sprite(c, *f, x, y, flipped, scr::blend::normal, team, 255 - std::min(8, (int)image->modifier_data1) * 15);
+			break;
+		case 3:  // cloaked, drawn for whoever can see it
+			hd_list.sprite(c, *f, x, y, flipped, scr::blend::normal, team, 135);
+			break;
+		case 8:  // distortion (classic: refracts what is underneath)
+			hd_list.sprite(c, *f, x, y, flipped, scr::blend::normal, team, 110);
+			break;
+		case 9:  // remapped: fire, smoke, glows, explosions. The classic path remaps through
+			// ofire/gfire/bfire/bexpl/trans50 tables; the HD textures carry real alpha (dark
+			// smoke included), so they are alpha blended, with trans50 kept at half strength.
+			hd_list.sprite(c, *f, x, y, flipped, scr::blend::normal, team, image->image_type->color_shift == 5 ? 128 : 255);
+			break;
+		case 10:
+			hd_list.sprite(c, *f, x, y, flipped, scr::blend::shadow, team, 255);
+			break;
+		case 12:  // Protoss warp-in: the warp texture through the sprite's shape
+			if (auto* t = hd->sprite((size_t)ImageTypes::IMAGEID_Warp_Texture, image->modifier_data1)) {
+				hd_list.mapped(c, *f, *t, x, y, flipped);
+			}
+			break;
+		case 17:  // warp flash: brightens what is underneath, rising over modifier_data1 48..63
+			hd_list.sprite(c, *f, x, y, flipped, scr::blend::brighten, team, std::min(255, std::max(0, ((int)image->modifier_data1 - 47) * 16)));
+			break;
+		default:
+			hd_list.sprite(c, *f, x, y, flipped, scr::blend::normal, team, 255);
+			break;
+		}
+	}
+
+	void hd_draw_selection_circle(const sprite_t* sprite, const unit_t* u) {
+		auto* f = hd->sprite(hd_selection_circle_image(sprite), 0);
+		if (!f) return;
+		xy centre = sprite->position + xy(0, sprite->sprite_type->selection_circle_vpos);
+		uint32_t colour = hd_team_rgb(player_color(sprite->owner));
+		if (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) {
+			colour = hd_palette_rgb(tileset_img.resource_minimap_color);
+		}
+		hd_list.sprite(hd_canvas, *f, hd_screen_x(centre.x + f->left), hd_screen_y(centre.y + f->top), false, scr::blend::tinted, colour, 255);
+	}
+
+	// Same vision and levels as draw_fog(), interpolated per window pixel: the level (0 dark
+	// .. 31 clear) is bilinear between tile centres. Fixed point, rows in parallel.
+	void hd_draw_fog() {
+		if (!show_fog) return;
+		uint8_t mask = fog_vision_mask();
+		if (!mask) return;
+		auto& c = hd_canvas;
+		const int tp = hd->tile_pixels();
+		// Tile-centre grid coordinate of window pixel p (camera offset `cam`): (p + cam + 0.5)
+		// / tp - 0.5, as tile index and 1/256 fraction.
+		auto grid = [&](int p, int cam, int& cell, int& frac) {
+			double g = (p + cam + 0.5) / tp - 0.5;
+			cell = (int)std::floor(g);
+			frac = std::min(256, (int)((g - cell) * 256.0 + 0.5));
+		};
+		int gx0, gy0, gx1, gy1, f;
+		grid(0, hd_cam_x, gx0, f);
+		grid(0, hd_cam_y, gy0, f);
+		grid(c.w - 1, hd_cam_x, gx1, f);
+		grid(c.h - 1, hd_cam_y, gy1, f);
+		const int gw = gx1 - gx0 + 2, gh = gy1 - gy0 + 2;
+		hd_fog_levels.resize((size_t)gw * gh);
+		for (int y = 0; y != gh; ++y) {
+			for (int x = 0; x != gw; ++x) hd_fog_levels[(size_t)y * gw + x] = (uint8_t)fog_tile_level(gx0 + x, gy0 + y, mask);
+		}
+		hd_fog_col.resize(c.w);
+		hd_fog_u.resize(c.w);
+		for (int x = 0; x != c.w; ++x) {
+			int cell;
+			grid(x, hd_cam_x, cell, hd_fog_u[x]);
+			hd_fog_col[x] = cell - gx0;
+		}
+		// Brightness 0..255 for a level scaled by 256 * 256 (looked up at 1/256 precision).
+		if (hd_fog_scale.empty()) {
+			hd_fog_scale.resize(31 * 256 + 1);
+			for (int i = 0; i <= 31 * 256; ++i) hd_fog_scale[i] = (uint8_t)((i * 255 + 31 * 128) / (31 * 256));
+		}
+		scr::parallel_ranges((size_t)c.h, 16, [&](size_t from, size_t to) {
+			std::vector<int> col(gw);  // the row's level at each grid column, scaled by 256
+			for (int y = (int)from; y != (int)to; ++y) {
+				int cy, v;
+				grid(y, hd_cam_y, cy, v);
+				const uint8_t* top = &hd_fog_levels[(size_t)(cy - gy0) * gw];
+				const uint8_t* bottom = top + gw;
+				bool all_clear = true;
+				for (int i = 0; i != gw; ++i) {
+					col[i] = top[i] * (256 - v) + bottom[i] * v;
+					all_clear &= col[i] == 31 * 256;
+				}
+				if (all_clear) continue;
+				uint32_t* row = c.px + (size_t)y * c.pitch;
+				for (int x = 0; x != c.w;) {
+					int i = hd_fog_col[x];
+					int end = x;
+					while (end != c.w && hd_fog_col[end] == i) ++end;
+					int l = col[i], r = col[i + 1];
+					if (l == 31 * 256 && r == 31 * 256) {
+						x = end;
+						continue;
+					}
+					for (; x != end; ++x) {
+						int u = hd_fog_u[x];
+						uint32_t k = hd_fog_scale[(l * (256 - u) + r * u) >> 8];
+						uint32_t p = row[x];
+						uint32_t rb = (p & 0x00ff00ff) * k + 0x00800080;
+						rb = ((rb + ((rb >> 8) & 0x00ff00ff)) >> 8) & 0x00ff00ff;
+						uint32_t g = ((p >> 8) & 0xff) * k + 0x80;
+						g = ((g + (g >> 8)) >> 8) & 0xff;
+						row[x] = rb | g << 8 | 0xff000000u;
+					}
+				}
+			}
+		});
+	}
+	std::vector<uint8_t> hd_fog_levels, hd_fog_scale;
+	std::vector<int> hd_fog_col, hd_fog_u;
+
+	// A palette index the overlay pass never writes (health bars, the minimap view box,
+	// selection colours), used as "transparent" in the indexed buffer.
+	uint8_t hd_overlay_sentinel() const {
+		std::array<bool, 256> used{};
+		for (auto c : img.hp_bar_colors) used[(uint8_t)c] = true;
+		used[255] = true;
+		used[0] = true;
+		used[(uint8_t)tileset_img.resource_minimap_color] = true;
+		for (auto& colors : img.player_unit_colors) for (auto c : colors) used[(uint8_t)c] = true;
+		for (int i = 1; i != 255; ++i) if (!used[i]) return (uint8_t)i;
+		return 1;
+	}
+
+	// Lays the indexed overlay (logical pixels) over the canvas, nearest-neighbour scaled.
+	// Inside `opaque` (the minimap) every pixel is copied. The overlay is mostly sentinel,
+	// which is skipped 8 bytes at a time; rows in parallel.
+	void hd_composite_overlay(const uint8_t* data, size_t pitch, uint8_t sentinel, rect opaque) {
+		auto& c = hd_canvas;
+		std::array<uint32_t, 256> rgb;
+		for (size_t i = 0; i != 256; ++i) rgb[i] = hd_palette_rgb(i);
+		// Window column span of each logical column: window x samples logical column
+		// min(W - 1, x / zoom); a column no window x samples gets an empty span.
+		const int lw = (int)screen_width;
+		hd_overlay_x.assign(lw + 1, c.w);
+		for (int x = c.w - 1; x >= 0; --x) hd_overlay_x[std::min(lw - 1, (int)(x / zoom))] = x;
+		for (int l = lw - 1; l >= 0; --l) hd_overlay_x[l] = std::min(hd_overlay_x[l], hd_overlay_x[l + 1]);
+		const uint64_t pattern = sentinel * 0x0101010101010101ull;
+		const int ox0 = std::max(0, opaque.from.x), ox1 = std::min(lw, opaque.to.x);
+		scr::parallel_ranges((size_t)c.h, 16, [&](size_t from, size_t to) {
+			for (int y = (int)from; y != (int)to; ++y) {
+				int ly = (int)(y / zoom);
+				if (ly >= (int)screen_height) break;
+				const uint8_t* src = data + (size_t)ly * pitch;
+				uint32_t* dst = c.px + (size_t)y * c.pitch;
+				auto put = [&](int l) {
+					std::fill(dst + hd_overlay_x[l], dst + hd_overlay_x[l + 1], rgb[src[l]]);
+				};
+				for (int l = 0; l < lw;) {
+					if (l + 8 <= lw) {
+						uint64_t w;
+						std::memcpy(&w, src + l, 8);
+						if (w == pattern) {
+							l += 8;
+							continue;
+						}
+					}
+					if (src[l] != sentinel) put(l);
+					++l;
+				}
+				if (ly >= opaque.from.y && ly < opaque.to.y) {
+					for (int l = ox0; l < ox1; ++l) put(l);
+				}
+			}
+		});
+	}
+	std::vector<int> hd_overlay_x;
+
+	void hd_draw_rect_outline(rect r, uint32_t colour) {
+		auto& c = hd_canvas;
+		int x0 = std::max(0, (int)(r.from.x * zoom)), x1 = std::min(c.w - 1, (int)(r.to.x * zoom));
+		int y0 = std::max(0, (int)(r.from.y * zoom)), y1 = std::min(c.h - 1, (int)(r.to.y * zoom));
+		if (x0 > x1 || y0 > y1) return;
+		for (int x = x0; x <= x1; ++x) c.px[(size_t)y0 * c.pitch + x] = c.px[(size_t)y1 * c.pitch + x] = colour;
+		for (int y = y0; y <= y1; ++y) c.px[(size_t)y * c.pitch + x0] = c.px[(size_t)y * c.pitch + x1] = colour;
+	}
+#else
+	bool hd_ready() { return false; }
+	void hd_prepare_sprites() {}
+	void hd_draw_image(const image_t*, size_t) {}
+	void hd_draw_selection_circle(const sprite_t*, const unit_t*) {}
+#endif
+
 	fp8 game_speed = fp8::integer(1);
 
 	std::unique_ptr<native_window_drawing::surface> window_surface;
@@ -1743,7 +2303,20 @@ struct ui_functions: ui_util_functions {
 	std::chrono::high_resolution_clock::time_point last_input_poll;
 	std::chrono::high_resolution_clock::time_point last_fps;
 	int fps_counter = 0;
+	int refresh_hz = 0;  // of the window's display; 0 if unknown
+
+	// Frame pacing for the main loop: a frame per display refresh (60 Hz if unknown), so
+	// scrolling moves every time the screen does. With vsync presentation the present call
+	// itself waits for the refresh; half an interval is then only a floor, for when it
+	// returns at once (a hidden window, a driver that ignores vsync).
+	std::chrono::microseconds frame_interval() const {
+		int hz = refresh_hz > 0 ? std::max(30, std::min(240, refresh_hz)) : 60;
+		auto interval = std::chrono::microseconds(1000000 / hz);
+		return wnd && wnd.has_vsync() ? interval / 2 : interval;
+	}
 	size_t scroll_speed_n = 0;
+	std::chrono::high_resolution_clock::duration scroll_held{};  // how long the current scroll has lasted
+	double scroll_rem_x = 0, scroll_rem_y = 0;  // sub-pixel camera movement not yet applied
 
 	// Zoom: the game is drawn into a logical screen_width x screen_height buffer
 	// (window size / zoom) and scaled to the window, so every draw/clip path
@@ -1760,11 +2333,11 @@ struct ui_functions: ui_util_functions {
 	int edge_pan_px = 4;
 	// Keyboard and edge scroll speed, a level in the settings menu: level 3 is the original
 	// speed, and the default (5) scrolls twice as fast.
-	static constexpr int scroll_speed_levels = 9;
+	enum { scroll_speed_levels = 9 };
 	int scroll_speed_level = 5;
 	double scroll_speed_factor() const {
 		static const double factors[scroll_speed_levels] = {0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5};
-		return factors[std::max(1, std::min(scroll_speed_levels, scroll_speed_level)) - 1];
+		return factors[std::max(1, std::min((int)scroll_speed_levels, scroll_speed_level)) - 1];
 	}
 
 	void resize(int width, int height) {
@@ -1805,15 +2378,26 @@ struct ui_functions: ui_util_functions {
 		screen_pos = anchor - xy((int)(anchor_x / zoom), (int)(anchor_y / zoom));
 	}
 
+	static const std::array<double, 9>& zoom_steps() {
+		static const std::array<double, 9> steps = {{0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0}};
+		return steps;
+	}
+
+	static double nearest_zoom_step(double z) {
+		double best = 1.0;
+		for (double s : zoom_steps()) if (std::abs(s - z) < std::abs(best - z)) best = s;
+		return best;
+	}
+
 	void step_zoom(int direction, int anchor_x = -1, int anchor_y = -1) {
-		static const double steps[] = {0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0};
-		const int n = sizeof(steps) / sizeof(steps[0]);
+		auto& zoom_steps = this->zoom_steps();
+		const int n = (int)zoom_steps.size();
 		int i = 0;
-		while (i + 1 < n && steps[i] < zoom - 1e-9) ++i;
+		while (i + 1 < n && zoom_steps[i] < zoom - 1e-9) ++i;
 		i += direction;
 		if (i < 0) i = 0;
 		if (i >= n) i = n - 1;
-		set_zoom(steps[i], anchor_x, anchor_y);
+		set_zoom(zoom_steps[i], anchor_x, anchor_y);
 	}
 
 	// Doubling steps from 1/4x to 128x, with 1.5x between 1x and 2x.
@@ -2109,6 +2693,38 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+#ifdef OPENBW_REMASTERED
+	// The selection panel's wireframe of `ut` in the remastered art, `size` pixels square at
+	// (x, y) of an RGBA buffer, coloured by health and shields like the classic one (see
+	// wire_pixel_rgb). False, drawing nothing, while the classic graphics are in use or the
+	// install lacks it.
+	bool hd_draw_wireframe(uint32_t* buf, size_t pitch, int w, int h, int x, int y, const unit_type_t* ut, int size, const unit_vitals& v) {
+		if (!use_remastered || !hd) return false;
+		auto* layers = hd->wireframe((size_t)ut->id, size);
+		if (!layers) return false;
+		auto rgb = [](wire_rgb c) { return scr::rgba(c.r, c.g, c.b, 255); };
+		bool zerg = ut->group_flags & GroupFlags::Zerg;
+		int first_section = zerg ? 216 : 208;
+		std::array<uint32_t, 4> sections;
+		for (int k = 0; k != 4; ++k) sections[k] = rgb(wire_pixel_rgb(first_section + k, v));
+		scr::image img = scr::composite_wireframe(*layers, sections, rgb(wire_pixel_rgb(193, v)), rgb(wire_pixel_rgb(192, v)), zerg);
+		for (int sy = std::max(0, -y); sy < img.h && y + sy < h; ++sy) {
+			uint32_t* dst = buf + (size_t)(y + sy) * pitch + x;
+			const uint32_t* src = &img.px[(size_t)sy * img.w];
+			for (int sx = std::max(0, -x); sx < img.w && x + sx < w; ++sx) {
+				uint32_t s = src[sx], a = scr::ch_a(s);
+				if (!a) continue;
+				uint32_t d = dst[sx], ia = 255 - a;
+				dst[sx] = scr::rgba(scr::ch_r(s) + scr::mul255(scr::ch_r(d), ia), scr::ch_g(s) + scr::mul255(scr::ch_g(d), ia),
+				                    scr::ch_b(s) + scr::mul255(scr::ch_b(d), ia), 255);
+			}
+		}
+		return true;
+	}
+#else
+	bool hd_draw_wireframe(uint32_t*, size_t, int, int, int, int, const unit_type_t*, int, const unit_vitals&) { return false; }
+#endif
+
 	static bool is_wireframe_role(int index) {
 		return index == 192 || index == 193 || (index >= 208 && index <= 211) || (index >= 216 && index <= 219);
 	}
@@ -2179,6 +2795,7 @@ struct ui_functions: ui_util_functions {
 	struct console_icon {
 		int frame;          // cmdicons.grp frame
 		int number = -1;    // drawn bottom-right when >= 0
+		a_string name = {};  // shown when hovered, if set
 	};
 	struct console_progress {
 		a_vector<int> frames;  // first is the item in progress; the rest are queued
@@ -2188,6 +2805,7 @@ struct ui_functions: ui_util_functions {
 	struct console_info {
 		a_vector<panel_line> vitals, lines;
 		a_vector<console_icon> icons;
+		a_vector<console_icon> research;  // completed research that affects this unit
 		a_vector<console_progress> progress;
 		a_vector<const unit_t*> cargo;
 	};
@@ -2195,6 +2813,52 @@ struct ui_functions: ui_util_functions {
 	static double progress_frac(int done, int total) {
 		if (total <= 0) return 0;
 		return std::max(0.0, std::min(1.0, (double)done / total));
+	}
+
+	// Research (single-level upgrades and techs) that changes what a unit type does, in the
+	// order the game's buttons list them. Techs every player starts with are left out.
+	struct research_item {
+		bool tech;
+		int id;  // TechTypes or UpgradeTypes
+	};
+	static a_vector<research_item> research_affecting(UnitTypes t) {
+		using U = UpgradeTypes;
+		using T = TechTypes;
+		auto up = [](U u) { return research_item{false, (int)u}; };
+		auto te = [](T x) { return research_item{true, (int)x}; };
+		switch (t) {
+		case UnitTypes::Terran_Marine: return {te(T::Stim_Packs), up(U::U_238_Shells)};
+		case UnitTypes::Terran_Firebat: return {te(T::Stim_Packs)};
+		case UnitTypes::Terran_Medic: return {te(T::Restoration), te(T::Optical_Flare), up(U::Caduceus_Reactor)};
+		case UnitTypes::Terran_Ghost: return {te(T::Lockdown), te(T::Personnel_Cloaking), up(U::Ocular_Implants), up(U::Moebius_Reactor)};
+		case UnitTypes::Terran_Vulture: return {up(U::Ion_Thrusters)};
+		case UnitTypes::Terran_Siege_Tank_Tank_Mode:
+		case UnitTypes::Terran_Siege_Tank_Siege_Mode: return {te(T::Tank_Siege_Mode)};
+		case UnitTypes::Terran_Goliath: return {up(U::Charon_Boosters)};
+		case UnitTypes::Terran_Wraith: return {te(T::Cloaking_Field), up(U::Apollo_Reactor)};
+		case UnitTypes::Terran_Science_Vessel: return {te(T::EMP_Shockwave), te(T::Irradiate), up(U::Titan_Reactor)};
+		case UnitTypes::Terran_Battlecruiser: return {te(T::Yamato_Gun), up(U::Colossus_Reactor)};
+		case UnitTypes::Zerg_Drone: return {te(T::Burrowing)};
+		case UnitTypes::Zerg_Zergling: return {up(U::Metabolic_Boost), up(U::Adrenal_Glands), te(T::Burrowing)};
+		case UnitTypes::Zerg_Hydralisk: return {up(U::Muscular_Augments), up(U::Grooved_Spines), te(T::Lurker_Aspect), te(T::Burrowing)};
+		case UnitTypes::Zerg_Overlord: return {up(U::Ventral_Sacs), up(U::Antennae), up(U::Pneumatized_Carapace)};
+		case UnitTypes::Zerg_Ultralisk: return {up(U::Anabolic_Synthesis), up(U::Chitinous_Plating)};
+		case UnitTypes::Zerg_Queen: return {te(T::Spawn_Broodlings), te(T::Ensnare), up(U::Gamete_Meiosis)};
+		case UnitTypes::Zerg_Defiler: return {te(T::Plague), te(T::Consume), up(U::Metasynaptic_Node), te(T::Burrowing)};
+		case UnitTypes::Zerg_Infested_Terran: return {te(T::Burrowing)};
+		case UnitTypes::Protoss_Zealot: return {up(U::Leg_Enhancements)};
+		case UnitTypes::Protoss_Dragoon: return {up(U::Singularity_Charge)};
+		case UnitTypes::Protoss_High_Templar: return {te(T::Psionic_Storm), te(T::Hallucination), up(U::Khaydarin_Amulet)};
+		case UnitTypes::Protoss_Dark_Archon: return {te(T::Mind_Control), te(T::Maelstrom), up(U::Argus_Talisman)};
+		case UnitTypes::Protoss_Reaver: return {up(U::Scarab_Damage), up(U::Reaver_Capacity)};
+		case UnitTypes::Protoss_Shuttle: return {up(U::Gravitic_Drive)};
+		case UnitTypes::Protoss_Observer: return {up(U::Sensor_Array), up(U::Gravitic_Boosters)};
+		case UnitTypes::Protoss_Scout: return {up(U::Apial_Sensors), up(U::Gravitic_Thrusters)};
+		case UnitTypes::Protoss_Carrier: return {up(U::Carrier_Capacity)};
+		case UnitTypes::Protoss_Arbiter: return {te(T::Recall), te(T::Stasis_Field), up(U::Khaydarin_Core)};
+		case UnitTypes::Protoss_Corsair: return {te(T::Disruption_Web), up(U::Argus_Jewel)};
+		default: return {};
+		}
 	}
 
 	console_info console_info_of(const unit_t* u) const {
@@ -2266,6 +2930,17 @@ struct ui_functions: ui_util_functions {
 				ci.icons.push_back({get_tech_type(TechTypes::Spider_Mines)->icon, (int)unit_spider_mine_count(u)});
 			}
 			ci.icons.erase(std::remove_if(ci.icons.begin(), ci.icons.end(), [](const console_icon& i) { return i.frame < 0; }), ci.icons.end());
+			if (u->owner < 8) {
+				for (auto r : research_affecting(shown_type(u)->id)) {
+					if (r.tech) {
+						auto* t = get_tech_type((TechTypes)r.id);
+						if (player_has_researched(u->owner, (TechTypes)r.id)) ci.research.push_back({t->icon, -1, stat_text(t->label)});
+					} else {
+						auto* t = get_upgrade_type((UpgradeTypes)r.id);
+						if (player_upgrade_level(u->owner, (UpgradeTypes)r.id) > 0) ci.research.push_back({t->icon, -1, stat_text(t->label)});
+					}
+				}
+			}
 		}
 
 		if (!u_completed(u) && !unit_is_egg(u)) {
@@ -2398,6 +3073,10 @@ struct ui_functions: ui_util_functions {
 			right_w = std::max(right_w, (int)ci.icons.size() * (icon_w + gap));
 			right_h += gap + icon_h;
 		}
+		if (!ci.research.empty()) {
+			right_w = std::max(right_w, (int)ci.research.size() * (icon_w + gap));
+			right_h += gap + icon_h;
+		}
 		const int bar_w_min = 5 * (icon_w + gap) - gap;
 		for (auto& p : ci.progress) {
 			int row_w = std::max(bar_w_min, (int)p.frames.size() * (icon_w + gap) - gap);
@@ -2417,7 +3096,9 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = panel_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(8, 10, 16, 190));
 
-		draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, wireframe_grp, (size_t)shown_type(u)->id, scale, 1, vitals_of(u));
+		if (!hd_draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, shown_type(u), wire, vitals_of(u))) {
+			draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, wireframe_grp, (size_t)shown_type(u)->id, scale, 1, vitals_of(u));
+		}
 		for (size_t i = 0; i != ci.vitals.size(); ++i) {
 			auto& l = ci.vitals[i];
 			hud_text(buf, pitch, w, h, pad + (left_w - text_w(l.text)) / 2, pad + wire + (int)i * ch, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
@@ -2441,6 +3122,17 @@ struct ui_functions: ui_util_functions {
 				fill_rgba(buf, pitch, w, h, x, y, icon_w, icon_h, hud_rgba(0, 0, 0, 255));
 				draw_cmd_icon(buf, pitch, w, h, x, y, ci.icons[i].frame, scale);
 				if (ci.icons[i].number >= 0) draw_number(x, y, ci.icons[i].number);
+			}
+			y += icon_h;
+		}
+		if (!ci.research.empty()) {
+			y += gap;
+			for (size_t i = 0; i != ci.research.size(); ++i) {
+				int x = x0 + (int)i * (icon_w + gap);
+				fill_rgba(buf, pitch, w, h, x, y, icon_w, icon_h, hud_rgba(0, 0, 0, 255));
+				draw_cmd_icon(buf, pitch, w, h, x, y, ci.research[i].frame, scale);
+				bevel(buf, pitch, w, h, x, y, icon_w, icon_h, hud_rgba(150, 164, 108, 255), hud_rgba(44, 50, 32, 255));
+				panel_tips.push_back({rect{{x, y}, {x + icon_w, y + icon_h}}, ci.research[i].name});
 			}
 			y += icon_h;
 		}
@@ -2469,6 +3161,7 @@ struct ui_functions: ui_util_functions {
 				const unit_t* c = ci.cargo[i];
 				size_t id = (size_t)shown_type(c)->id;
 				int x = x0 + (int)i * cargo_cell;
+				if (hd_draw_wireframe(buf, pitch, w, h, x, y, shown_type(c), 32 * scale, vitals_of(c))) continue;
 				if (id < group_wireframe_valid.size() && group_wireframe_valid[id]) draw_wireframe(buf, pitch, w, h, x, y, group_wireframe_grp, id, scale, 1, vitals_of(c));
 				else draw_wireframe(buf, pitch, w, h, x, y, wireframe_grp, id, scale, 2, vitals_of(c));
 			}
@@ -2486,6 +3179,24 @@ struct ui_functions: ui_util_functions {
 	};
 	rect panel_area_window;
 	a_vector<panel_cell> panel_cells;
+	struct panel_tip {
+		rect r;  // panel-relative
+		a_string text;
+	};
+	a_vector<panel_tip> panel_tips;  // hover labels on the panel (research icons)
+
+	// The hover label of whatever panel item is under the cursor, if any.
+	void draw_panel_tip() {
+		if (!wnd.has_mouse_focus()) return;
+		int mx = -1, my = -1;
+		wnd.get_cursor_pos(&mx, &my);
+		int x = mx - panel_area_window.from.x, y = my - panel_area_window.from.y;
+		for (auto& t : panel_tips) {
+			if (t.text.empty() || x < t.r.from.x || x >= t.r.to.x || y < t.r.from.y || y >= t.r.to.y) continue;
+			draw_replay_tip(t.text, panel_area_window.from.x + (t.r.from.x + t.r.to.x) / 2, panel_area_window.from.y + t.r.from.y);
+			return;
+		}
+	}
 
 	// Click on the selection panel, Brood War style: a wireframe selects just that unit,
 	// shift-click removes it, ctrl-click keeps only units of its type. Returns true if the
@@ -2514,6 +3225,7 @@ struct ui_functions: ui_util_functions {
 
 	bool draw_selection_panel() {
 		panel_cells.clear();
+		panel_tips.clear();
 		if (!selection_panel_data_loaded) return false;
 		auto units = selected_units();
 		if (units.empty()) return false;
@@ -2552,7 +3264,9 @@ struct ui_functions: ui_util_functions {
 				if (X < w && Y < h) buf[(size_t)Y * pitch + X] = hud_rgba(pc.r, pc.g, pc.b, 255);
 			}
 			size_t id = (size_t)shown_type(u)->id;
-			if (id < group_wireframe_valid.size() && group_wireframe_valid[id]) {
+			if (hd_draw_wireframe(buf, pitch, w, h, x + 1, y, shown_type(u), 32 * scale, vitals_of(u))) {
+				// remastered art: the full wireframe, scaled down
+			} else if (id < group_wireframe_valid.size() && group_wireframe_valid[id]) {
 				draw_wireframe(buf, pitch, w, h, x + 1, y, group_wireframe_grp, id, scale, 1, vitals_of(u));
 			} else {
 				draw_wireframe(buf, pitch, w, h, x + 1, y, wireframe_grp, id, scale, 2, vitals_of(u));
@@ -2591,12 +3305,20 @@ struct ui_functions: ui_util_functions {
 		return nullptr;
 	}
 
-	// Army value excludes workers and Overlords (supply, not fighting units); an egg is
-	// classed by what it will hatch into.
-	bool unit_counts_as_army(const unit_t* u) const {
+	// What a unit counts as in the value graphs: an egg is classed by what it will hatch into.
+	const unit_type_t* valued_type(const unit_t* u) const {
 		const unit_type_t* t = egg_target(u);
-		if (!t) t = u->unit_type;
-		return !ut_worker(t) && t->id != UnitTypes::Zerg_Overlord && t->id != UnitTypes::Zerg_Larva;
+		return t ? t : u->unit_type;
+	}
+	// Overlords provide supply, like Supply Depots and Pylons (buildings, which the value
+	// graphs leave out), so they are not counted as units at all.
+	bool unit_counts_as_unit(const unit_t* u) const {
+		return valued_type(u)->id != UnitTypes::Zerg_Overlord;
+	}
+	// Army value also excludes workers.
+	bool unit_counts_as_army(const unit_t* u) const {
+		const unit_type_t* t = valued_type(u);
+		return unit_counts_as_unit(u) && !ut_worker(t) && t->id != UnitTypes::Zerg_Larva;
 	}
 	int unit_value(const unit_t* u) const {
 		if (auto* t = egg_target(u)) return unit_type_value(t) * (ut_two_units_in_one_egg(t) ? 2 : 1);
@@ -3020,7 +3742,7 @@ struct ui_functions: ui_util_functions {
 	// pass through record_graph_sample), so the graphs cover the part of the game simulated
 	// so far. The x axis spans the whole replay, or with time zoom ([ ] or the mouse wheel
 	// over the panel) only the last N game seconds up to the current frame. Income is the
-	// gathering rate per minute, smoothed over roughly the last 15 game seconds.
+	// gathering rate per minute, smoothed over roughly the last 7-8 game seconds.
 	struct graph_player_sample {
 		int minerals_gathered = 0, gas_gathered = 0, supply = 0, army = 0, workers = 0;
 		int value_total = 0, value_army = 0;   // resource value of units owned
@@ -3033,7 +3755,7 @@ struct ui_functions: ui_util_functions {
 	static constexpr int graph_sample_interval = 24;  // frames; ~1 game second at Fastest
 	a_vector<graph_sample> graph_samples;
 	bool show_graphs = false;
-	int graph_tab = 0;
+	int graph_tab = 1;  // unit value (supply with 'r' off)
 	// Time zoom: index into graph_window_seconds; 0 = whole game. Starts at the last 5 min.
 	static constexpr int graph_window_count = 7;
 	int graph_window = 2;
@@ -3045,7 +3767,7 @@ struct ui_functions: ui_util_functions {
 		graph_window = std::max(0, std::min(graph_window_count - 1, graph_window + dir));
 	}
 	static constexpr int graph_tab_count = 5;
-	bool graph_value_mode = false;  // 'r': supply <-> resource value (workers unaffected)
+	bool graph_value_mode = true;  // 'r': resource value <-> supply (workers unaffected)
 	bool graph_derivative = false;  // 'd': plot the rate of change per minute instead
 	bool graph_difference = false;  // 'f': first player minus second instead of a line each
 	// 'm': minimized mode. The graphs then stay up as a compact panel in the top-right
@@ -3076,10 +3798,10 @@ struct ui_functions: ui_util_functions {
 			p.workers = row.workers;
 			p.value_total = p.value_army = 0;
 			// Units in production exist as incomplete units (Terran/Protoss training, morphs)
-			// or eggs, and count; queued ones do not exist yet. Workers and Overlords count in
-			// the total but not the army.
+			// or eggs, and count; queued ones do not exist yet. Workers count in the total but
+			// not the army; Overlords count in neither.
 			for (unit_t* u : ptr(st.player_units[row.player])) {
-				if (ut_building(u) || u_hallucination(u)) continue;
+				if (ut_building(u) || u_hallucination(u) || !unit_counts_as_unit(u)) continue;
 				int v = unit_value(u);
 				p.value_total += v;
 				if (unit_counts_as_army(u)) p.value_army += v;
@@ -3102,11 +3824,12 @@ struct ui_functions: ui_util_functions {
 
 	// Value plotted for one player at sample index i (the second series is gas income).
 	// Income, and every series in derivative mode, is a per-minute rate: per-second deltas
-	// averaged with a Hann window over 24 s (similar noise to a 15 s box average). Plain box
-	// windows jitter, because mining arrives in 8-mineral trips that step in and out of it.
+	// averaged with a Hann window, over 12 s for income (similar to a 7-8 s box average) and
+	// 24 s for derivatives. Plain box windows jitter, because mining arrives in 8-mineral
+	// trips that step in and out of them.
+	static constexpr int income_window_s = 12, derivative_window_s = 24;
 	template<typename level_F>
-	double smoothed_rate(level_F&& level, size_t i) const {
-		const int window = 24;
+	double smoothed_rate(level_F&& level, size_t i, int window) const {
 		double sum = 0, wsum = 0;
 		for (int k = 0; k != window && (size_t)k < i; ++k) {
 			size_t j = i - k;
@@ -3121,8 +3844,8 @@ struct ui_functions: ui_util_functions {
 
 	double graph_value(int tab, size_t i, int player, bool gas) const {
 		auto level = [&](size_t j) { return graph_level(tab, j, player, gas); };
-		auto shown = [&](size_t j) { return tab == 0 ? smoothed_rate(level, j) : level(j); };
-		return graph_derivative ? smoothed_rate(shown, i) : shown(i);
+		auto shown = [&](size_t j) { return tab == 0 ? smoothed_rate(level, j, income_window_s) : level(j); };
+		return graph_derivative ? smoothed_rate(shown, i, derivative_window_s) : shown(i);
 	}
 
 	// Raw level: cumulative minerals/gas gathered for income, else the tab's quantity.
@@ -3144,11 +3867,28 @@ struct ui_functions: ui_util_functions {
 		return 10 * mag;
 	}
 
-	void graph_line(uint32_t* buf, size_t pitch, int w, int h, int x0, int y0, int x1, int y1, uint32_t px, int thickness) {
+	// A dash pattern that runs on along a polyline: `on` pixels drawn, then `off` skipped.
+	// `joined`: the next segment starts where the last one ended, so its first pixel is
+	// not counted twice.
+	struct dash_pattern {
+		int on = 0, off = 0;
+		int phase = 0;
+		bool joined = false;
+	};
+
+	// Solid, or dashed by `dash` (which then carries on to the next call).
+	void graph_line(uint32_t* buf, size_t pitch, int w, int h, int x0, int y0, int x1, int y1, uint32_t px, int thickness, dash_pattern* dash = nullptr) {
 		int dx = std::abs(x1 - x0), dy = -std::abs(y1 - y0);
 		int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1, err = dx + dy;
+		bool first = true;
 		for (;;) {
-			for (int ty = 0; ty != thickness; ++ty) for (int tx = 0; tx != thickness; ++tx) {
+			bool draw = true;
+			if (dash && dash->on > 0 && dash->off > 0) {
+				if (first && dash->joined) draw = false;  // drawn (or skipped) as the last segment's end
+				else draw = dash->phase++ % (dash->on + dash->off) < dash->on;
+			}
+			first = false;
+			if (draw) for (int ty = 0; ty != thickness; ++ty) for (int tx = 0; tx != thickness; ++tx) {
 				int X = x0 + tx, Y = y0 + ty;
 				if (X >= 0 && X < w && Y >= 0 && Y < h) buf[(size_t)Y * pitch + X] = px;
 			}
@@ -3157,6 +3897,7 @@ struct ui_functions: ui_util_functions {
 			if (e2 >= dy) { err += dy; x0 += sx; }
 			if (e2 <= dx) { err += dx; y0 += sy; }
 		}
+		if (dash) dash->joined = true;
 	}
 
 	static a_string format_game_time(int frame) {
@@ -3342,23 +4083,30 @@ struct ui_functions: ui_util_functions {
 		else if (vmin < 0) fill_rgba(buf, pitch, w, h, px0, to_y(0), px1 - px0, 1, hud_rgba(140, 150, 170, 255));
 
 		// Series. A segment crossing zero is split there so each part takes its sign's colour.
+		// The minimized panel has no legend, so gas is dotted there to tell it apart.
 		int y_zero = to_y(0);
 		for (auto& s : series) {
+			dash_pattern dots{2, 3};
+			dash_pattern* dash = mini && s.gas ? &dots : nullptr;
 			bool have_prev = false;
 			int prev_x = 0, prev_y = 0;
 			double prev_v = 0;
 			for (size_t i = i_from; i < n; ++i) {
-				if (!graph_samples[i].valid) { have_prev = false; continue; }
+				if (!graph_samples[i].valid) {
+					have_prev = false;
+					dots.joined = false;
+					continue;
+				}
 				double v = graph_series_value(s, i);
 				int x = to_x((int)i * graph_sample_interval);
 				int y = to_y(v);
 				if (have_prev) {
 					if ((prev_v < 0) != (v < 0)) {
 						int xm = prev_x + (int)std::lround((x - prev_x) * (prev_v / (prev_v - v)));
-						graph_line(buf, pitch, w, h, prev_x, prev_y, xm, y_zero, prev_v < 0 ? s.px_neg : s.px_pos, 2);
-						graph_line(buf, pitch, w, h, xm, y_zero, x, y, v < 0 ? s.px_neg : s.px_pos, 2);
+						graph_line(buf, pitch, w, h, prev_x, prev_y, xm, y_zero, prev_v < 0 ? s.px_neg : s.px_pos, 2, dash);
+						graph_line(buf, pitch, w, h, xm, y_zero, x, y, v < 0 ? s.px_neg : s.px_pos, 2, dash);
 					} else {
-						graph_line(buf, pitch, w, h, prev_x, prev_y, x, y, v < 0 ? s.px_neg : s.px_pos, 2);
+						graph_line(buf, pitch, w, h, prev_x, prev_y, x, y, v < 0 ? s.px_neg : s.px_pos, 2, dash);
 					}
 				}
 				prev_x = x; prev_y = y; prev_v = v; have_prev = true;
@@ -3443,6 +4191,9 @@ struct ui_functions: ui_util_functions {
 		add("selection_panel", "Selection panel", "i", true, flag(show_selection_panel));
 		add("health_bars", "Health bars under all units", "b", true, flag(show_all_health_bars));
 		add("fog", "Fog of war", "f", true, flag(show_fog));
+#ifdef OPENBW_REMASTERED
+		add("remastered", "Remastered graphics", "F2", true, flag(use_remastered));
+#endif
 		add("two_colour", "Two-colour mode (red / teal)", "shift tab", true, flag(two_colour_mode));
 		add("auto_observer", "Auto observer", "o", true, std::make_pair(std::function<bool()>([this] { return auto_observer; }),
 			std::function<void()>([this] { toggle_auto_observer(); })));
@@ -3453,7 +4204,7 @@ struct ui_functions: ui_util_functions {
 				[this] { scroll_speed_level = scroll_speed_level % scroll_speed_levels + 1; }};
 			v.levels = scroll_speed_levels;
 			v.level = [this] { return scroll_speed_level; };
-			v.set_level = [this](int l) { scroll_speed_level = std::max(1, std::min(scroll_speed_levels, l)); };
+			v.set_level = [this](int l) { scroll_speed_level = std::max(1, std::min((int)scroll_speed_levels, l)); };
 			r.push_back(std::move(v));
 		}
 		add("graphs", "Graphs", "g", false, flag(show_graphs));
@@ -3492,6 +4243,9 @@ struct ui_functions: ui_util_functions {
 
 	// Fingerprint of the persisted settings, to save only when one changes.
 	a_string settings_saved_state;
+	// Only a viewer that loaded the settings saves them, so tools that embed the UI
+	// (frame dumps, evaluations) never overwrite the user's file with their defaults.
+	bool settings_loaded = false;
 
 	a_string settings_state() {
 		a_string s;
@@ -3518,7 +4272,7 @@ struct ui_functions: ui_util_functions {
 				if (std::strcmp(line, "zoom") == 0) {
 					// Before the window exists, so set it directly; resize() applies it.
 					double z = std::atof(eq + 1);
-					if (z >= 0.5 && z <= 4.0) zoom = z;
+					if (z >= 0.5 && z <= 4.0) zoom = nearest_zoom_step(z);
 					continue;
 				}
 				bool want = eq[1] == '1';
@@ -3531,9 +4285,11 @@ struct ui_functions: ui_util_functions {
 			std::fclose(f);
 		}
 		settings_saved_state = settings_state();
+		settings_loaded = true;
 	}
 
 	void save_settings_if_changed() {
+		if (!settings_loaded) return;
 		a_string now = settings_state();
 		if (now == settings_saved_state) return;
 		settings_saved_state = now;
@@ -3553,7 +4309,7 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
-	static constexpr int notch_pitch = 12;  // level notches: 9 px wide, 3 px apart
+	enum { notch_pitch = 12 };  // level notches: 9 px wide, 3 px apart
 
 	// Panel-relative x of a level row's first notch.
 	static int notches_x(int panel_w, int levels) { return panel_w - 16 - levels * notch_pitch + 3; }
@@ -3685,7 +4441,7 @@ struct ui_functions: ui_util_functions {
 
 	// ---- Replay controls: slower, pause/play and faster, left of the seek bar ----
 	enum replay_button { replay_button_slower, replay_button_pause, replay_button_faster, replay_button_count };
-	static constexpr int replay_controls_w = 24 + 4 + 32 + 4 + 24 + 12;  // buttons, then a divider
+	enum { replay_controls_w = 24 + 4 + 32 + 4 + 24 + 12 };  // buttons, then a divider
 
 	// The replay panel in window pixels: its outer rect and each button's rect.
 	struct replay_panel_layout {
@@ -3920,13 +4676,133 @@ struct ui_functions: ui_util_functions {
 	int drag_select_to_y = 0;
 	xy drag_screen_pos;
 
+	// ---- Mouse cursor ----
+	// Brood War's arrow, animated (a glint runs round its outline): Remastered's art with the
+	// remastered graphics on, else the classic cursor/arrow.grp in the game palette, at the
+	// selection panel's scale. The hotspot is the arrow's tip.
+	int cursor_key = -1;  // what the window's cursor was built for (see update_cursor)
+	size_t cursor_frame_count = 0;
+	std::chrono::high_resolution_clock::time_point cursor_start;
+
+	// Calls f(x, y, palette index) for each opaque pixel of a classic grp frame.
+	template <typename F>
+	static void for_each_grp_pixel(const grp_t::frame_t& f, F&& fn) {
+		for (size_t y = 0; y != f.size.y; ++y) {
+			const uint8_t* p = f.data_container.data() + f.line_data_offset.at(y);
+			for (size_t x = 0; x < f.size.x;) {
+				uint8_t c = *p++;
+				if (c & 0x80) {
+					x += c & 0x7f;
+				} else if (c & 0x40) {
+					uint8_t v = *p++;
+					for (int i = 0; i != (c & 0x3f) && x < f.size.x; ++i, ++x) fn(x, y, v);
+				} else {
+					for (int i = 0; i != c && x < f.size.x; ++i, ++x) fn(x, y, *p++);
+				}
+			}
+		}
+	}
+
+	// The classic arrow's frames, `scale` x enlarged and coloured by `palette` (256 RGBx
+	// entries). A Brood War cursor's hotspot is the centre of its grp.
+	static std::vector<native_window::cursor_image> classic_cursor_frames(const grp_t& grp, const uint8_t* palette, int scale) {
+		std::vector<native_window::cursor_image> out;
+		for (auto& f : grp.frames) {
+			native_window::cursor_image c;
+			c.w = (int)f.size.x * scale;
+			c.h = (int)f.size.y * scale;
+			if (c.w <= 0 || c.h <= 0) continue;
+			c.hot_x = std::max(0, std::min(c.w - 1, ((int)grp.width / 2 - (int)f.offset.x) * scale));
+			c.hot_y = std::max(0, std::min(c.h - 1, ((int)grp.height / 2 - (int)f.offset.y) * scale));
+			c.px.assign((size_t)c.w * c.h, 0);
+			for_each_grp_pixel(f, [&](size_t x, size_t y, uint8_t v) {
+				uint32_t rgb = palette[4 * v] | palette[4 * v + 1] << 8 | palette[4 * v + 2] << 16 | 0xffu << 24;
+				for (int Y = (int)y * scale; Y != ((int)y + 1) * scale; ++Y) {
+					std::fill_n(c.px.begin() + (size_t)Y * c.w + x * scale, scale, rgb);
+				}
+			});
+			out.push_back(std::move(c));
+		}
+		return out;
+	}
+
+#ifdef OPENBW_REMASTERED
+	// Remastered's arrow (the HD2 set, which is twice the classic size) at the size of
+	// `classic`'s frames, with their hotspots; empty without the art or on a frame mismatch.
+	std::vector<native_window::cursor_image> hd_cursor_frames(const std::vector<native_window::cursor_image>& classic) {
+		std::vector<native_window::cursor_image> out;
+		if (!hd || classic.empty()) return out;
+		auto frames = hd->read_frames("HD2/cursor/arrow.dds.grp");
+		if (frames.size() != classic.size()) return out;
+		for (size_t i = 0; i != frames.size(); ++i) {
+			auto& src = frames[i];
+			native_window::cursor_image c = classic[i];
+			if (src.w <= 0 || src.h <= 0) return {};
+			if (src.w != c.w || src.h != c.h) {
+				scr::premultiply(src);
+				src = scr::resample(src, 0, 0, src.w, src.h, c.w, c.h, true);
+				scr::unpremultiply(src);
+			}
+			c.px = std::move(src.px);
+			out.push_back(std::move(c));
+		}
+		return out;
+	}
+#endif
+
+	// The cursor frames for the current settings (remastered on/off, panel scale).
+	std::vector<native_window::cursor_image> cursor_frames(bool remastered, int scale) {
+		std::vector<native_window::cursor_image> classic;
+		if (tileset_img.wpe.size() < 256 * 4) return classic;
+		try {
+			a_vector<uint8_t> data;
+			load_data_file(data, "cursor/arrow.grp");
+			auto grp = read_grp(data_loading::data_reader_le(data.data(), data.data() + data.size()));
+			classic = classic_cursor_frames(grp, tileset_img.wpe.data(), scale);
+		} catch (const std::exception& e) {
+			ui::log("cursor: %s\n", e.what());
+			return {};
+		}
+#ifdef OPENBW_REMASTERED
+		if (remastered) {
+			auto frames = hd_cursor_frames(classic);
+			if (!frames.empty()) return frames;
+		}
+#else
+		(void)remastered;
+#endif
+		return classic;
+	}
+
+	// Rebuilds the window's cursor when the graphics or scale change, and animates it.
+	void update_cursor(std::chrono::high_resolution_clock::time_point now) {
+		if (!wnd || tileset_img.wpe.size() < 256 * 4) return;
+		const int scale = window_height >= 1000 ? 2 : 1;
+		bool remastered = false;
+#ifdef OPENBW_REMASTERED
+		remastered = use_remastered && hd;
+#endif
+		const int key = scale * 2 + remastered;
+		if (key != cursor_key) {
+			cursor_key = key;
+			cursor_frame_count = wnd.set_cursor_frames(cursor_frames(remastered, scale));
+			cursor_start = now;
+		}
+		if (cursor_frame_count > 1) {
+			const auto frame_time = std::chrono::milliseconds(100);
+			wnd.show_cursor_frame((size_t)((now - cursor_start) / frame_time) % cursor_frame_count);
+		}
+	}
+
 	void update() {
 		auto now = clock.now();
+		update_cursor(now);
 
 		if (now - last_fps >= std::chrono::seconds(1)) {
 			//ui::log("draw fps: %g\n", fps_counter / std::chrono::duration_cast<std::chrono::duration<double, std::ratio<1, 1>>>(now - last_fps).count());
 			last_fps = now;
 			fps_counter = 0;
+			if (wnd) refresh_hz = wnd.refresh_rate();  // the window may have moved to another display
 		}
 		++fps_counter;
 
@@ -4128,6 +5004,7 @@ struct ui_functions: ui_util_functions {
 						else if (plus) step_speed(true);
 					}
 					if (e.sym == 'b') show_all_health_bars = !show_all_health_bars;
+					if (e.sym == 0x4000003B) use_remastered = !use_remastered;  // F2
 					if (e.sym == 'i') show_selection_panel = !show_selection_panel;
 					if (e.sym == 'g') {
 						if (graph_minimized) graph_expanded = !graph_expanded;  // maximize / minimize
@@ -4199,43 +5076,53 @@ struct ui_functions: ui_util_functions {
 		}
 
 		if (wnd) {
-			auto input_poll_speed = std::chrono::milliseconds(12);
-
-			auto input_poll_t = now - last_input_poll;
-			while (input_poll_t >= input_poll_speed) {
-				if (input_poll_t >= input_poll_speed * 20) last_input_poll = now - input_poll_speed;
-				else last_input_poll += input_poll_speed;
-				std::array<int, 6> scroll_speeds = {3, 3, 5, 8, 8, 10};
-
-				if (!is_drag_selecting) {
-					int scroll_speed = std::max(1, (int)std::lround(scroll_speeds[scroll_speed_n] * scroll_speed_factor()));
-					auto prev_screen_pos = screen_pos;
-					if (wnd.get_key_state(81)) screen_pos.y += scroll_speed;
-					else if (wnd.get_key_state(82)) screen_pos.y -= scroll_speed;
-					// With the full graph pane open, left/right switch its tabs instead.
-					if (!graph_arrows_switch_tabs()) {
-						if (wnd.get_key_state(79)) screen_pos.x += scroll_speed;
-						else if (wnd.get_key_state(80)) screen_pos.x -= scroll_speed;
-					}
-					// Edge pan: cursor within edge_pan_px of the window edge (only while the
-					// cursor is over this window, so leaving it doesn't keep scrolling).
-					if (edge_pan && !is_moving_minimap && !is_moving_replay_slider && wnd.has_mouse_focus()) {
-						int cx = -1, cy = -1;
-						wnd.get_cursor_pos(&cx, &cy);
-						if (cx >= 0 && cy >= 0) {
-							// Edges of the game view, not the window (the bars are outside it).
-							if (cx < viewport_x + edge_pan_px) screen_pos.x -= scroll_speed;
-							else if (cx >= viewport_x + viewport_w - edge_pan_px) screen_pos.x += scroll_speed;
-							if (cy < edge_pan_px) screen_pos.y -= scroll_speed;
-							else if (cy >= window_height - edge_pan_px) screen_pos.y += scroll_speed;
-						}
-					}
-					if (screen_pos != prev_screen_pos) {
-						if (scroll_speed_n != scroll_speeds.size() - 1) ++scroll_speed_n;
-					} else scroll_speed_n = 0;
+			// Keyboard and edge scrolling: scroll_speeds[n] logical pixels per 12 ms, n rising
+			// every 12 ms the scroll is held. The camera moves by the time since the last frame,
+			// keeping the sub-pixel remainder, so the motion is even at any frame rate.
+			const auto scroll_step = std::chrono::milliseconds(12);
+			static const std::array<int, 6> scroll_speeds = {3, 3, 5, 8, 8, 10};
+			auto elapsed = now - last_input_poll;
+			if (elapsed > scroll_step * 20) elapsed = scroll_step * 20;
+			last_input_poll = now;
+			int dx = 0, dy = 0;
+			if (!is_drag_selecting) {
+				if (wnd.get_key_state(81)) ++dy;
+				else if (wnd.get_key_state(82)) --dy;
+				// With the full graph pane open, left/right switch its tabs instead.
+				if (!graph_arrows_switch_tabs()) {
+					if (wnd.get_key_state(79)) ++dx;
+					else if (wnd.get_key_state(80)) --dx;
 				}
-
-				input_poll_t = now - last_input_poll;
+				// Edge pan: cursor within edge_pan_px of the window edge (only while the
+				// cursor is over this window, so leaving it doesn't keep scrolling).
+				if (edge_pan && !is_moving_minimap && !is_moving_replay_slider && wnd.has_mouse_focus()) {
+					int cx = -1, cy = -1;
+					wnd.get_cursor_pos(&cx, &cy);
+					if (cx >= 0 && cy >= 0) {
+						// Edges of the game view, not the window (the bars are outside it).
+						if (cx < viewport_x + edge_pan_px) --dx;
+						else if (cx >= viewport_x + viewport_w - edge_pan_px) ++dx;
+						if (cy < edge_pan_px) --dy;
+						else if (cy >= window_height - edge_pan_px) ++dy;
+					}
+				}
+			}
+			if (dx || dy) {
+				scroll_speed_n = std::min(scroll_speeds.size() - 1, (size_t)(scroll_held / scroll_step));
+				double steps = std::chrono::duration<double>(elapsed) / scroll_step;
+				scroll_held += elapsed;
+				double speed = scroll_speeds[scroll_speed_n] * steps * scroll_speed_factor();
+				scroll_rem_x += dx * speed;
+				scroll_rem_y += dy * speed;
+				int mx = (int)scroll_rem_x, my = (int)scroll_rem_y;
+				screen_pos.x += mx;
+				screen_pos.y += my;
+				scroll_rem_x -= mx;
+				scroll_rem_y -= my;
+			} else {
+				scroll_speed_n = 0;
+				scroll_held = {};
+				scroll_rem_x = scroll_rem_y = 0;
 			}
 
 			if (is_moving_minimap) {
@@ -4259,38 +5146,77 @@ struct ui_functions: ui_util_functions {
 		if (screen_pos.x < 0) screen_pos.x = 0;
 		observer_last_screen_pos = screen_pos;
 
+		const bool hd_frame = hd_ready();
+		minimap_hd = hd_frame;
+		auto drag_rect = [&] {
+			auto r = rect{{drag_select_from_x, drag_select_from_y}, {drag_select_to_x, drag_select_to_y}};
+			if (r.from.x > r.to.x) std::swap(r.from.x, r.to.x);
+			if (r.from.y > r.to.y) std::swap(r.from.y, r.to.y);
+			return r;
+		};
+
 		uint8_t* data = (uint8_t*)indexed_surface->lock();
-		draw_tiles(data, indexed_surface->pitch);
+#ifdef OPENBW_REMASTERED
+		// Remastered: map and sprites go to the canvas; the indexed buffer only collects
+		// the overlay (health bars, minimap, callback drawing) over a transparent sentinel.
+		uint8_t overlay_sentinel = 0;
+		if (hd_frame) {
+			hd_begin_frame();
+			hd_draw_tiles();
+			overlay_sentinel = hd_overlay_sentinel();
+			std::memset(data, overlay_sentinel, (size_t)indexed_surface->pitch * indexed_surface->h);
+		}
+#endif
+		if (!hd_frame) draw_tiles(data, indexed_surface->pitch);
+		hd_drawing = hd_frame;
 		draw_sprites(data, indexed_surface->pitch);
-		draw_fog(data, indexed_surface->pitch);
+		hd_drawing = false;
+#ifdef OPENBW_REMASTERED
+		if (hd_frame) {
+			hd_flush();
+			if (show_fog) {
+				// Health bars drawn with the sprites sit under the fog, as in the classic view.
+				hd_composite_overlay(data, indexed_surface->pitch, overlay_sentinel, rect{});
+				std::memset(data, overlay_sentinel, (size_t)indexed_surface->pitch * indexed_surface->h);
+				hd_draw_fog();
+			}
+		}
+#endif
+		if (!hd_frame) draw_fog(data, indexed_surface->pitch);
 
 		draw_callback(data, indexed_surface->pitch);
 
-		if (draw_ui_elements) {
-			draw_minimap(data, indexed_surface->pitch);
-			draw_ui(data, indexed_surface->pitch);
+		if (draw_ui_elements) draw_ui(data, indexed_surface->pitch);
+#ifdef OPENBW_REMASTERED
+		if (hd_frame) {
+			hd_composite_overlay(data, indexed_surface->pitch, overlay_sentinel, rect{});
+			if (is_drag_selecting) hd_draw_rect_outline(drag_rect(), 0xff18fc10);
+			hd_end_frame();
 		}
+#endif
 		indexed_surface->unlock();
 
-		rgba_surface->fill(0, 0, 0, 255);
-		indexed_surface->blit(&*rgba_surface, 0, 0);
+		if (!hd_frame) {
+			rgba_surface->fill(0, 0, 0, 255);
+			indexed_surface->blit(&*rgba_surface, 0, 0);
 
-		draw_image_queue();
+			draw_image_queue();
 
-		if (is_drag_selecting) {
-			uint32_t* data = (uint32_t*)rgba_surface->lock();
 			if (is_drag_selecting) {
-				auto r = rect{{drag_select_from_x, drag_select_from_y}, {drag_select_to_x, drag_select_to_y}};
-				if (r.from.x > r.to.x) std::swap(r.from.x, r.to.x);
-				if (r.from.y > r.to.y) std::swap(r.from.y, r.to.y);
-
-				line_rectangle_rgba(data, rgba_surface->pitch / 4, r, 0xff18fc10);
+				uint32_t* data = (uint32_t*)rgba_surface->lock();
+				auto r = drag_rect();
+				outline_rect<uint32_t>(data, rgba_surface->pitch / 4, r.from, r.to, 0xff18fc10);
+				rgba_surface->unlock();
 			}
-			rgba_surface->unlock();
 		}
 
 		if (wnd) {
 			if (viewport_x > 0) window_surface->fill(0, 0, 0, 255);
+#ifdef OPENBW_REMASTERED
+			if (hd_frame) {
+				hd_surface->blit(&*window_surface, viewport_x, 0);
+			} else
+#endif
 			if (rgba_surface->w == viewport_w && rgba_surface->h == window_surface->h) {
 				rgba_surface->blit(&*window_surface, viewport_x, 0);
 			} else {
@@ -4300,14 +5226,23 @@ struct ui_functions: ui_util_functions {
 				draw_hud();
 				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + 8, 8);
 			}
-			if (draw_ui_elements) draw_replay_bar();
+			if (draw_ui_elements) {
+				draw_minimap_window();
+				draw_replay_bar();
+			}
 			if (graphs_visible()) draw_graph_panel();
 			panel_area_window = rect{};
 			if (show_selection_panel && draw_selection_panel()) {
-				int px = std::max(viewport_x, viewport_x + (viewport_w - panel_surface->w) / 2);
+				// Centred, but kept between the minimap and the replay panel where they allow.
+				int px = viewport_x + (viewport_w - panel_surface->w) / 2;
+				int right = draw_ui_elements && replay_st.end_frame ? replay_panel().panel.from.x - 8 : viewport_x + viewport_w;
+				int left = draw_ui_elements ? minimap_window_rect().to.x + 8 : viewport_x;
+				px = std::max(left, std::min(px, right - panel_surface->w));
+				px = std::max(viewport_x, px);
 				int py = std::max(0, window_surface->h - panel_surface->h - 8);
 				panel_area_window = rect{{px, py}, {px + panel_surface->w, py + panel_surface->h}};
 				panel_surface->blit(&*window_surface, px, py);
+				draw_panel_tip();
 			}
 			if (show_settings_menu) draw_settings_menu();
 			save_settings_if_changed();

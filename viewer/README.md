@@ -15,15 +15,17 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   Drag-select to get a grid of health-coloured wireframes, grouped by unit type. As in Brood War, a box that
   catches units leaves buildings out. Click a wireframe in the grid to select just that unit,
   `shift`-click to drop it, `ctrl`-click to keep only units of its type.
-- **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute, a
-  smoothed over about 15 s), supply, army supply, workers and units lost over game time.
+- **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute,
+  smoothed over about 7-8 s), unit value, army value, workers and value lost over game
+  time; it opens on unit value.
   `d` switches to the first derivative (change per minute). `f` plots the first player
   minus the second, coloured by whoever is ahead. `m` pins the graphs minimized in the
-  top-right corner of the view, where they keep updating; `g` or a click then maximizes /
-  minimizes them instead of closing them, and `m` on the full panel unpins. Graph keys act
-  only on the full panel.
-  `r` switches supply, army and losses between supply and resource value (minerals + gas,
-  with Zergling/Scourge pairs, morphs and Archons valued correctly).
+  top-right corner of the view, where they keep updating (gas income dotted, as there is no
+  legend); `g` or a click then maximizes / minimizes them instead of closing them, and `m`
+  on the full panel unpins. Graph keys act only on the full panel.
+  `r` switches units, army and losses between resource value (minerals + gas, with
+  Zergling/Scourge pairs, morphs and Archons valued correctly; Overlords count as supply,
+  like depots and pylons, not as units) and supply.
   It shows the last 5 minutes at first; zoom the time axis from the whole game down to
   the last 15 s with `[` / `]` or the mouse wheel over the panel. It covers the part of the game simulated so far, so seek to
   the end to see the whole game.
@@ -38,11 +40,17 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Fog of war** (`f`, with the graphs closed): the combined vision of all players, drawn
   as Brood War does (explored ground dimmed, unexplored black, soft edges), on the
   minimap too.
+- **Remastered graphics** (`F2`): with a StarCraft: Remastered install on the machine, the
+  map, units, buildings and effects are drawn from its HD art instead of the 1998
+  sprites, at the window's resolution (the half-resolution HD2 set up to 2x zoom, full HD
+  above). See *Remastered graphics* below.
 - **Settings menu** (`?`): checkboxes for every toggle (overlay, selection panel, health
   bars, fog, two-colour mode, auto observer, mute, graph modes) and a scroll speed slider
   (keyboard and edge scrolling; default twice the original speed). Choices, whether made
   there or with the keys, are saved to `$XDG_CONFIG_HOME/openbw-viewer/settings`
   (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
+- **Minimap** flush in the bottom-left corner; click or drag on it to move the camera.
+- **Brood War's cursor**: the animated green arrow, from Remastered with its graphics on.
 - **Replay bar** in the bottom-right corner: slower / pause-play / faster buttons, game timer,
   speed or pause state, and a seek bar. Hover the seek bar to see the game time under the cursor.
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls.
@@ -58,12 +66,36 @@ directory. Remastered stores its data in CASC, not MPQ, so it can't supply them.
 plays replays recorded by 1.16.1-compatible engines: BWAPI 4.x bots and OpenBW.
 Replays from Remastered versions newer than 1.18 are not supported.
 
+## Remastered graphics
+
+The viewer reads the art straight from an installed StarCraft: Remastered (the free
+Battle.net download; under Wine on Linux). It looks for the install in
+`$OPENBW_REMASTERED_DIR` (the folder holding `.build.info`), then in
+`C:/Program Files (x86)/StarCraft` (Windows), `/Applications/StarCraft` (macOS), or
+`~/.wine/drive_c/Program Files (x86)/StarCraft` and Lutris's
+`~/Games/battlenet/drive_c/Program Files (x86)/StarCraft` (Linux). Without one, or with
+`F2` off, the classic graphics are used. The game still runs from the 1.16.1 MPQs; the
+install only supplies graphics.
+
+What is drawn from Remastered: terrain (HD megatiles and creep edges), every images.dat
+sprite with team colour, shadows, cloaking, warp-in and warp flash, fire, smoke and
+explosions, selection circles, selection-panel wireframes and the mouse cursor. Sprites are composited the way Remastered's own
+shaders do it (team colour mask, shadows that darken by up to half without stacking).
+Not reproduced: the dynamic lighting from normal/specular maps, animated water, and HD
+health bars (the classic ones are drawn over the HD view). Assets load the first time
+they are seen and stay block-compressed; frames are decoded and scaled as they are drawn,
+with both kept within fixed budgets (384 MB of atlases, 256 MB of scaled frames; past
+one, what was drawn least recently is dropped). Over a whole
+game this measured about 110 MB more than the classic graphics at 1.5x zoom and 280 MB more
+at 3x.
+
 ## Build
 
-Requires CMake, a C++14 compiler and SDL2. SDL2_mixer is optional and enables sound.
+Requires CMake, a C++14 compiler and SDL2. SDL2_mixer is optional and enables sound;
+zlib is optional and enables the remastered graphics.
 
 ```sh
-# Arch: pacman -S cmake sdl2 sdl2_mixer    Debian/Ubuntu: apt install cmake libsdl2-dev libsdl2-mixer-dev
+# Arch: pacman -S cmake sdl2 sdl2_mixer zlib    Debian/Ubuntu: apt install cmake libsdl2-dev libsdl2-mixer-dev zlib1g-dev
 cmake -S viewer -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 cmake --build build -j
 ```
@@ -88,10 +120,11 @@ cmake --build build -j
 | click or drag the replay bar | seek |
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |
+| `F2` | remastered or classic graphics (remastered when an install is found) |
 | `b` | health bars under all units, or only selected ones (all by default) |
 | `i` | toggle the selection panel |
 | `g` / `esc` | toggle / close the graphs (`g` on the minimized panel restores it); `tab`, `←` / `→` or `1`-`5` (or click a tab) to switch |
-| `r` | graphs: supply or resource value |
+| `r` | graphs: resource value or supply |
 | `d` | graphs: level or rate of change (with the graphs closed, `d` slows playback) |
 | `f` | graphs: players' difference or a line each (with the graphs closed, fog of war) |
 | `o` | auto observer on / off |
@@ -110,7 +143,8 @@ Playback starts at 1×, so press `=` a few times.
 - The overlay font in `ui/hud_font.h` is a bitmap rendering of JetBrains Mono Bold
   (SIL OFL 1.1, see `LICENSE-JetBrainsMono.txt`). Regenerate it with `gen_hud_font.py`.
 - `ui/order_names.h` is generated from `bwenums.h` by `gen_order_names.py`.
-- Wireframes come from the game's own `unit/wirefram/*.grp` files. Colours are remapped
+- Wireframes come from the game's own `unit/wirefram/*.grp` files (with the remastered
+  graphics, from Remastered's `wirefram.dds.grp`, coloured the same way). Colours are remapped
   through `game/twire.pcx` by missing health and shields, as the game does. This covers
   the blue shield outline, green/yellow/red hull sections, and the Zerg heat-map
   ramp, using the tables documented on

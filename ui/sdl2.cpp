@@ -11,8 +11,10 @@
 #include "SDL_mixer.h"
 #endif
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <vector>
 #include <memory>
 #include <csignal>
 
@@ -42,18 +44,126 @@ struct window_impl {
 
 	SDL_Window* window = nullptr;
 
+	// Vsync presentation (see window::present_with_vsync): the program draws into `frame`,
+	// which update_surface() uploads to `texture` and presents through `renderer`.
+	bool want_vsync = false;
+	bool vsync = false;
+	SDL_Renderer* renderer = nullptr;
+	SDL_Texture* texture = nullptr;
+	SDL_Surface* frame = nullptr;
+
+	std::vector<SDL_Cursor*> cursors;
+	size_t cursor_shown = 0;
+
 	window_impl() {
 		sdl_init();
 	}
 	~window_impl() {
-		if (window) SDL_DestroyWindow(window);
+		destroy();
+	}
+
+	void free_cursors() {
+		if (!cursors.empty()) SDL_SetCursor(SDL_GetDefaultCursor());
+		for (auto* c : cursors) SDL_FreeCursor(c);
+		cursors.clear();
+	}
+
+	size_t set_cursor_frames(const std::vector<cursor_image>& frames) {
+		free_cursors();
+		for (auto& f : frames) {
+			if (f.w <= 0 || f.h <= 0 || f.px.size() != (size_t)f.w * f.h) continue;
+			SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormatFrom(const_cast<uint32_t*>(f.px.data()), f.w, f.h, 32, f.w * 4, SDL_PIXELFORMAT_RGBA32);
+			if (!surf) continue;
+			SDL_Cursor* c = SDL_CreateColorCursor(surf, f.hot_x, f.hot_y);
+			SDL_FreeSurface(surf);
+			if (c) cursors.push_back(c);
+		}
+		cursor_shown = 0;
+		if (!cursors.empty()) SDL_SetCursor(cursors[0]);
+		return cursors.size();
+	}
+
+	void show_cursor_frame(size_t index) {
+		if (index >= cursors.size() || index == cursor_shown) return;
+		cursor_shown = index;
+		SDL_SetCursor(cursors[index]);
 	}
 	
 	void destroy() {
+		free_cursors();
+		release_presenter();
 		if (window) {
 			SDL_DestroyWindow(window);
 			window = nullptr;
 		}
+	}
+
+	void release_presenter() {
+		if (frame) SDL_FreeSurface(frame);
+		if (texture) SDL_DestroyTexture(texture);
+		if (renderer) SDL_DestroyRenderer(renderer);
+		frame = nullptr;
+		texture = nullptr;
+		renderer = nullptr;
+		vsync = false;
+	}
+
+	// The surface the program draws a frame into: the window's own surface, or with vsync
+	// presentation an RGBA surface of the window's size (recreated when that changes). The
+	// caller frees its reference with SDL_FreeSurface.
+	SDL_Surface* draw_surface() {
+		if (want_vsync && !renderer && window) {
+			renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+			SDL_RendererInfo info;
+			if (renderer && SDL_GetRendererInfo(renderer, &info) == 0 && (info.flags & SDL_RENDERER_PRESENTVSYNC)) {
+				vsync = true;
+			} else {
+				// Without vsync this gains nothing over the window surface.
+				if (renderer) SDL_DestroyRenderer(renderer);
+				renderer = nullptr;
+				want_vsync = false;
+				log("vsync presentation unavailable (%s); using the window surface\n", SDL_GetError());
+			}
+		}
+		if (!renderer) return SDL_GetWindowSurface(window);
+		int w = 0, h = 0;
+		SDL_GetWindowSize(window, &w, &h);
+		w = std::max(w, 1);  // a minimized window may report 0 x 0
+		h = std::max(h, 1);
+		if (!frame || frame->w != w || frame->h != h) {
+			if (frame) SDL_FreeSurface(frame);
+			if (texture) SDL_DestroyTexture(texture);
+			Uint32 format = texture_format();
+			frame = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, format);
+			texture = SDL_CreateTexture(renderer, format, SDL_TEXTUREACCESS_STREAMING, w, h);
+			if (!frame || !texture) {
+				log("vsync presentation failed (%s); using the window surface\n", SDL_GetError());
+				release_presenter();
+				want_vsync = false;
+				return SDL_GetWindowSurface(window);
+			}
+		}
+		++frame->refcount;
+		return frame;
+	}
+
+	// The texture (and frame) format: RGBA byte order like the program's own surfaces when
+	// the renderer takes it (OpenGL), else the renderer's own 8-bit-per-channel format
+	// (Direct3D: ARGB8888), so uploads are never converted.
+	Uint32 texture_format() const {
+		SDL_RendererInfo info;
+		if (SDL_GetRendererInfo(renderer, &info) == 0) {
+			auto rgb8888 = [](Uint32 f) {
+				return !SDL_ISPIXELFORMAT_FOURCC(f) && SDL_PIXELTYPE(f) == SDL_PIXELTYPE_PACKED32 && SDL_PIXELLAYOUT(f) == SDL_PACKEDLAYOUT_8888;
+			};
+			for (Uint32 i = 0; i != info.num_texture_formats; ++i) {
+				if (info.texture_formats[i] == SDL_PIXELFORMAT_RGBA32) return SDL_PIXELFORMAT_RGBA32;
+			}
+			for (Uint32 i = 0; i != info.num_texture_formats; ++i) {
+				if (rgb8888(info.texture_formats[i])) return info.texture_formats[i];
+			}
+		}
+		return SDL_PIXELFORMAT_RGBA32;  // SDL converts uploads to whatever the renderer takes
 	}
 
 	bool create(const char* title, int x, int y, int width, int height) {
@@ -172,7 +282,19 @@ struct window_impl {
 	}
 	
 	void update_surface() {
-		SDL_UpdateWindowSurface(window);
+		if (!renderer) {
+			SDL_UpdateWindowSurface(window);
+			return;
+		}
+		SDL_UpdateTexture(texture, nullptr, frame->pixels, frame->pitch);
+		SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+		SDL_RenderPresent(renderer);  // waits for the display's refresh
+	}
+
+	int refresh_rate() {
+		SDL_DisplayMode mode;
+		if (!window || SDL_GetWindowDisplayMode(window, &mode) != 0) return 0;
+		return mode.refresh_rate;
 	}
 	
 	explicit operator bool() const {
@@ -230,6 +352,26 @@ bool window::get_mouse_button_state(int button) {
 
 void window::update_surface() {
 	return impl->update_surface();
+}
+
+int window::refresh_rate() {
+	return impl->refresh_rate();
+}
+
+size_t window::set_cursor_frames(const std::vector<cursor_image>& frames) {
+	return impl->set_cursor_frames(frames);
+}
+
+void window::show_cursor_frame(size_t index) {
+	impl->show_cursor_frame(index);
+}
+
+void window::present_with_vsync(bool on) {
+	impl->want_vsync = on;
+}
+
+bool window::has_vsync() const {
+	return impl->vsync;
 }
 
 window::operator bool() const {
@@ -332,7 +474,7 @@ std::unique_ptr<surface> create_rgba_surface(int width, int height) {
 }
 
 std::unique_ptr<surface> get_window_surface(native_window::window* wnd) {
-	auto* surf = SDL_GetWindowSurface(wnd->impl->window);
+	auto* surf = wnd->impl->draw_surface();
 	if (!surf) fatal_error("SDL_GetWindowSurface failed: %s", SDL_GetError());
 	auto r = std::make_unique<sdl_surface>();
 	r->set(surf);

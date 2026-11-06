@@ -1,7 +1,9 @@
 #ifndef NATIVE_WINDOW_H
 #define NATIVE_WINDOW_H
 
+#include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace native_window {
 	struct window_impl;
@@ -33,6 +35,13 @@ namespace native_window {
 		int wheel_y = 0; // type_mouse_wheel: +up / -down; mouse_x/y hold the cursor
 	};
 
+	// A cursor image: w x h pixels as r | g << 8 | b << 16 | a << 24 (straight alpha), with
+	// the pointer's hotspot at (hot_x, hot_y).
+	struct cursor_image {
+		int w = 0, h = 0, hot_x = 0, hot_y = 0;
+		std::vector<uint32_t> px;
+	};
+
 	struct window {
 		std::unique_ptr<window_impl> impl;
 		window();
@@ -50,6 +59,18 @@ namespace native_window {
 		bool get_key_state(int scancode);
 		bool get_mouse_button_state(int button);
 		void update_surface();
+		// The refresh rate of the display the window is on, in Hz; 0 if unknown.
+		int refresh_rate();
+		// Before the first frame: present each frame on the display's refresh (through a
+		// renderer) instead of copying it to the window as soon as it is drawn. Falls back
+		// to the latter where vsync is unavailable; has_vsync() tells which is in use.
+		void present_with_vsync(bool on);
+		bool has_vsync() const;
+		// Replaces the mouse cursor with these frames (an animation; see show_cursor_frame),
+		// starting with the first, and returns how many could be made into cursors. None
+		// restores the system cursor.
+		size_t set_cursor_frames(const std::vector<cursor_image>& frames);
+		void show_cursor_frame(size_t index);
 		explicit operator bool() const;
 	};
 }

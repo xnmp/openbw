@@ -193,6 +193,7 @@ cmake --build build -j
 | click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |
 | `F2` | remastered or classic graphics (remastered when an install is found) |
 | `b` | health bars under all units, or only selected ones (all by default) |
+| hold `Alt` | health bars under all units while held, when `b` has them on selected units only (as in Warcraft III) |
 | `i` | toggle the selection panel |
 | `g` / `esc` | toggle / close the graphs (`g` on the minimized panel restores it); `tab`, `←` / `→` or `1`-`5` (`6` with Pluto data; or click a tab) to switch |
 | `r` | graphs: resource value or supply |

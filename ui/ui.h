@@ -1525,8 +1525,12 @@ struct ui_functions: ui_util_functions {
 	a_vector<std::pair<uint32_t, const sprite_t*>> sorted_sprites;
 
 	// 'b': health bars under every player's units, not just the selected ones (on by default,
-	// like Remastered's "always show HP bars").
+	// like Remastered's "always show HP bars"). With it off, holding Alt shows them all while
+	// it is held, as in Warcraft III.
 	bool show_all_health_bars = true;
+	bool alt_held() {
+		return wnd && (wnd.get_key_state(226) || wnd.get_key_state(230));  // left or right Alt (SDL scancodes)
+	}
 	a_vector<const unit_t*> health_bar_sprites_set = a_vector<const unit_t*>(2500);
 	a_vector<const sprite_t*> health_bar_sprites;
 
@@ -1563,7 +1567,7 @@ struct ui_functions: ui_util_functions {
 			current_selection_sprites.push_back(u->sprite);
 		}
 
-		if (show_all_health_bars) {
+		if (show_all_health_bars || alt_held()) {
 			for (int i = 0; i != 8; ++i) {
 				for (unit_t* u : ptr(st.player_units[i])) {
 					if (!u->sprite || s_hidden(u->sprite)) continue;

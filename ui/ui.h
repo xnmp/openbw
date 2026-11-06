@@ -1765,6 +1765,7 @@ struct ui_functions: ui_util_functions {
 				}
 			}
 		}
+		draw_minimap_order_lines(buf, pitch, w, h, sx, sy);
 		// 5: army icons, the costliest placed first. A row that would overlap a costlier
 		// one is left out: at the minimap's scale the two read as one army.
 		const int icon = std::max(16, std::min(30, w * 2 / 19));
@@ -1838,10 +1839,12 @@ struct ui_functions: ui_util_functions {
 		return out;
 	}
 	// A worker gathering (on its way to, at, or returning from minerals or gas) within 12
-	// tiles of one of its own depots: ordinary economy. A worker that is building, fighting,
-	// scouting or long-distance mining (no depot of its own nearby) is not.
+	// tiles of one of its own depots, or an SCV constructing a building: ordinary economy,
+	// drawn like a small building. A worker that is fighting, scouting or long-distance
+	// mining (no depot of its own nearby) is not.
 	bool minimap_worker_at_work(const unit_t* u, const a_vector<std::pair<int, xy>>& depots) const {
 		if (!ut_worker(u)) return false;
+		if (u->order_type->id == Orders::ConstructingBuilding) return true;
 		switch (u->order_type->id) {
 		case Orders::Harvest1: case Orders::Harvest2: case Orders::ResetHarvestCollision:
 		case Orders::MoveToMinerals: case Orders::WaitForMinerals: case Orders::MiningMinerals: case Orders::ReturnMinerals:
@@ -4160,6 +4163,8 @@ struct ui_functions: ui_util_functions {
 		if (!hd_draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, shown_type(u), wire, vitals_of(u))) {
 			draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, wireframe_grp, (size_t)shown_type(u)->id, scale, 1, vitals_of(u));
 		}
+		// Clicking the wireframe centres the view on the unit (see selection_panel_click).
+		panel_cells.push_back({rect{{pad + (left_w - wire) / 2, pad}, {pad + (left_w - wire) / 2 + wire, pad + wire}}, get_unit_id(const_cast<unit_t*>(u))});
 		for (size_t i = 0; i != ci.vitals.size(); ++i) {
 			auto& l = ci.vitals[i];
 			int lx = pad + (left_w - vital_w(l)) / 2, ly = pad + wire + (int)i * ch;
@@ -4281,8 +4286,9 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// Click on the selection panel, Brood War style: a wireframe selects just that unit,
-	// shift-click removes it, ctrl-click keeps only units of its type. Returns true if the
-	// click was on the panel (it does not fall through to the map).
+	// shift-click removes it, ctrl-click keeps only units of its type. With one unit
+	// selected, clicking its wireframe centres the view on it. Returns true if the click was
+	// on the panel (it does not fall through to the map).
 	bool selection_panel_click(int wx, int wy, bool shift, bool ctrl) {
 		auto& a = panel_area_window;
 		if (wx < a.from.x || wx >= a.to.x || wy < a.from.y || wy >= a.to.y) return false;
@@ -4291,6 +4297,11 @@ struct ui_functions: ui_util_functions {
 			if (x < c.r.from.x || x >= c.r.to.x || y < c.r.from.y || y >= c.r.to.y) continue;
 			unit_t* clicked = get_unit(c.uid);
 			if (!clicked) break;
+			auto sel = selected_units();
+			if (!shift && !ctrl && sel.size() == 1 && sel[0] == clicked) {
+				if (clicked->sprite) center_view_on(clicked->sprite->position);
+				break;
+			}
 			if (shift) {
 				current_selection_remove(clicked);
 			} else if (ctrl) {
@@ -4303,6 +4314,12 @@ struct ui_functions: ui_util_functions {
 			break;
 		}
 		return true;
+	}
+
+	// Move the view so `pos` (map pixels) is at its centre. While the auto observer runs, a
+	// camera move by the viewer holds it off for a few seconds (see observer_step).
+	void center_view_on(xy pos) {
+		screen_pos = pos - xy((int)view_width / 2, (int)view_height / 2);
 	}
 
 	bool draw_selection_panel() {
@@ -5391,6 +5408,79 @@ struct ui_functions: ui_util_functions {
 		return true;
 	}
 
+	// One straight piece of what a unit is doing: from it (or the previous leg's end) to its
+	// current order's target, then on through its queued (shift) orders. A building has one
+	// leg, to its rally point. `all`: every unit is shown, so gathering is left out (every
+	// worker would be noise). Shared by the order lines over the map and on the minimap.
+	struct order_leg {
+		xy from, to;
+		order_kind kind = order_kind::none;
+		const unit_type_t* building = nullptr;  // a footprint about to be placed at `to`
+		bool rally = false;                     // a building's rally point
+		bool to_unit = false;                   // the target is a unit (no ground marker)
+	};
+	a_vector<order_leg> order_legs_of(const unit_t* u, bool all) const {
+		a_vector<order_leg> out;
+		if (!u->sprite || ut_turret(u) || unit_is(u, UnitTypes::Protoss_Interceptor) || unit_is(u, UnitTypes::Protoss_Scarab)) return out;
+		xy from = u->sprite->position;
+		if (ut_building(u)) {
+			xy to;
+			if (order_target_pos(u->building.rally, to) && to != from) {
+				order_leg l;
+				l.from = from, l.to = to, l.rally = true, l.to_unit = u->building.rally.unit != nullptr;
+				out.push_back(l);
+			}
+			return out;
+		}
+		// A turret (tank, Goliath) attacks for its unit, which may just be guarding.
+		const order_type_t* order = u->order_type;
+		target_t target = u->order_target;
+		if (kind_of_order(order) == order_kind::none && u->subunit && kind_of_order(u->subunit->order_type) == order_kind::attack) {
+			order = u->subunit->order_type;
+			target = u->subunit->order_target;
+		}
+		xy prev = from;
+		auto leg = [&](const order_type_t* o, const target_t& t, const unit_type_t* building) {
+			order_kind k = kind_of_order(o);
+			if (k == order_kind::none || (k == order_kind::gather && all)) return;
+			xy to;
+			if (!order_target_pos(t, to)) return;
+			order_leg l;
+			l.from = prev, l.to = to, l.kind = k, l.to_unit = t.unit != nullptr;
+			if (k == order_kind::build) l.building = building;
+			out.push_back(l);
+			prev = to;
+		};
+		const unit_type_t* building = kind_of_order(order) == order_kind::build && u->order_type != (const order_type_t*)nullptr && (Orders)u->order_type->id != Orders::ConstructingBuilding ? u->order_unit_type : nullptr;
+		leg(order, target, building);
+		for (auto& q : u->order_queue) {
+			target_t t;
+			t.pos = q.target.position;
+			t.unit = q.target.unit;
+			leg(q.order_type, t, nullptr);
+		}
+		return out;
+	}
+
+	// On the minimap, with order lines on selected units only: each leg whose end is off the
+	// screen, so where a selected unit is heading can still be seen. Map pixels scale by
+	// (sx, sy) per tile; `buf` is the minimap's w x h pixels.
+	void draw_minimap_order_lines(uint32_t* buf, size_t pitch, int w, int h, double sx, double sy) {
+		if (order_lines_mode != order_lines_selected) return;
+		const int vx0 = screen_pos.x, vy0 = screen_pos.y, vx1 = vx0 + (int)view_width, vy1 = vy0 + (int)view_height;
+		auto on_screen = [&](xy p) { return p.x >= vx0 && p.x < vx1 && p.y >= vy0 && p.y < vy1; };
+		auto mx = [&](int x) { return x / 32.0 * sx; };
+		auto my = [&](int y) { return y / 32.0 * sy; };
+		for (unit_t* u : selected_units()) {
+			for (auto& l : order_legs_of(u, false)) {
+				if (on_screen(l.to)) continue;
+				uint32_t c = l.rally ? hud_rgba(250, 245, 170, 255) : order_kind_rgba(l.kind) | 0xff000000u;
+				dotted_line(buf, pitch, w, h, mx(l.from.x), my(l.from.y), mx(l.to.x), my(l.to.y), c);
+				if (!l.to_unit) order_marker(buf, pitch, w, h, (int)mx(l.to.x), (int)my(l.to.y), c);
+			}
+		}
+	}
+
 	void draw_order_lines() {
 		if (order_lines_mode == order_lines_off) return;
 		const int w = viewport_w, h = window_height;
@@ -5414,59 +5504,35 @@ struct ui_functions: ui_util_functions {
 		struct production { int x, y, icon; double frac; };
 		a_vector<production> produced;
 		for (unit_t* u : units) {
-			if (!u->sprite || ut_turret(u) || unit_is(u, UnitTypes::Protoss_Interceptor) || unit_is(u, UnitTypes::Protoss_Scarab)) continue;
-			xy from = u->sprite->position;
-			if (ut_building(u)) {
-				xy to;
-				if (order_target_pos(u->building.rally, to) && to != from) {
+			if (!u->sprite) continue;
+			for (auto& l : order_legs_of(u, all)) {
+				if (l.rally) {
 					// Fainter than unit orders: they are standing settings, often across the map.
 					uint32_t c = hud_rgba(250, 245, 170, 110), shadow = hud_rgba(0, 0, 0, 60);
-					dotted_line(buf, pitch, w, h, wx(from.x), wy(from.y), wx(to.x), wy(to.y), c, shadow);
-					if (!u->building.rally.unit) order_marker(buf, pitch, w, h, (int)wx(to.x), (int)wy(to.y), c, shadow);
+					dotted_line(buf, pitch, w, h, wx(l.from.x), wy(l.from.y), wx(l.to.x), wy(l.to.y), c, shadow);
+					if (!l.to_unit) order_marker(buf, pitch, w, h, (int)wx(l.to.x), (int)wy(l.to.y), c, shadow);
+					continue;
 				}
-				if (u_completed(u)) {
-					auto ci = console_info_of(u);
-					for (auto& p : ci.progress) {
-						if (p.frames.empty()) continue;
-						produced.push_back({(int)wx(from.x), (int)wy(from.y), p.frames.front(), p.frac});
-						break;
-					}
-				}
-				continue;
-			}
-			// A turret (tank, Goliath) attacks for its unit, which may just be guarding.
-			const order_type_t* order = u->order_type;
-			target_t target = u->order_target;
-			if (kind_of_order(order) == order_kind::none && u->subunit && kind_of_order(u->subunit->order_type) == order_kind::attack) {
-				order = u->subunit->order_type;
-				target = u->subunit->order_target;
-			}
-			xy prev = from;
-			auto leg = [&](const order_type_t* o, const target_t& t, const unit_type_t* building) {
-				order_kind k = kind_of_order(o);
-				if (k == order_kind::none || (k == order_kind::gather && all)) return;
-				xy to;
-				if (!order_target_pos(t, to)) return;
-				uint32_t c = order_kind_rgba(k);
-				if ((to - prev).x || (to - prev).y) dotted_line(buf, pitch, w, h, wx(prev.x), wy(prev.y), wx(to.x), wy(to.y), c);
-				if (k == order_kind::build && building) {
+				uint32_t c = order_kind_rgba(l.kind);
+				if ((l.to - l.from).x || (l.to - l.from).y) dotted_line(buf, pitch, w, h, wx(l.from.x), wy(l.from.y), wx(l.to.x), wy(l.to.y), c);
+				if (l.building) {
 					// The footprint about to be placed.
-					xy size = building->placement_size;
-					double x0 = wx(to.x - size.x / 2), y0 = wy(to.y - size.y / 2), x1 = wx(to.x + size.x / 2), y1 = wy(to.y + size.y / 2);
+					xy size = l.building->placement_size;
+					double x0 = wx(l.to.x - size.x / 2), y0 = wy(l.to.y - size.y / 2), x1 = wx(l.to.x + size.x / 2), y1 = wy(l.to.y + size.y / 2);
 					dotted_line(buf, pitch, w, h, x0, y0, x1, y0, c);
 					dotted_line(buf, pitch, w, h, x1, y0, x1, y1, c);
 					dotted_line(buf, pitch, w, h, x1, y1, x0, y1, c);
 					dotted_line(buf, pitch, w, h, x0, y1, x0, y0, c);
-				} else if (!t.unit) order_marker(buf, pitch, w, h, (int)wx(to.x), (int)wy(to.y), c);
-				prev = to;
-			};
-			const unit_type_t* building = kind_of_order(order) == order_kind::build && u->order_type != (const order_type_t*)nullptr && (Orders)u->order_type->id != Orders::ConstructingBuilding ? u->order_unit_type : nullptr;
-			leg(order, target, building);
-			for (auto& q : u->order_queue) {
-				target_t t;
-				t.pos = q.target.position;
-				t.unit = q.target.unit;
-				leg(q.order_type, t, nullptr);
+				} else if (!l.to_unit) order_marker(buf, pitch, w, h, (int)wx(l.to.x), (int)wy(l.to.y), c);
+			}
+			if (ut_building(u) && u_completed(u) && !ut_turret(u)) {
+				xy from = u->sprite->position;
+				auto ci = console_info_of(u);
+				for (auto& p : ci.progress) {
+					if (p.frames.empty()) continue;
+					produced.push_back({(int)wx(from.x), (int)wy(from.y), p.frames.front(), p.frac});
+					break;
+				}
 			}
 		}
 		// Production icons last, over the lines: half-size like a small command button.

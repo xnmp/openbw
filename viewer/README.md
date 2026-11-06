@@ -66,7 +66,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   units' colour, part transparent, inside a dark border; units are dots on top, air army outlined in black.
   Players' units and buildings are drawn 1.2x their footprint. Spider
   Mines, Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
-  12 tiles of one of their own bases are drawn as small tiles like the buildings,
+  12 tiles of one of their own bases, and SCVs constructing, are drawn as small tiles like the buildings,
   so armies stand out. A concentration of one
   unit type gets a round badge with that type's icon (a pill for several types): each type's units are grouped (linked within 6 tiles,
   DBSCAN-style, and cut by 2-means until no group is wider than 10 tiles), and a group shows
@@ -84,7 +84,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   order's target and on through queued orders, coloured by kind (move green, attack red,
   spell violet, build and repair cyan, gathering amber for selected units only). Builders
   outline the footprint they are placing; buildings show their rally line and an icon with a
-  progress bar for what they are producing.
+  progress bar for what they are producing. With selected units only, a line whose target is
+  off the screen is also drawn on the minimap.
 - **Brood War's cursor**: the animated green arrow, from Remastered with its graphics on.
 - **Replay bar** in the bottom-right corner: slower / pause-play / faster buttons, game timer,
   speed or pause state, and a seek bar. Hover the seek bar to see the game time under the cursor.
@@ -187,6 +188,7 @@ cmake --build build -j
 | click or drag the replay bar | seek |
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |
+| click the wireframe of a single selected unit | centre the view on it |
 | `F2` | remastered or classic graphics (remastered when an install is found) |
 | `b` | health bars under all units, or only selected ones (all by default) |
 | hold `Alt` | health bars under all units while held, when `b` has them on selected units only (as in Warcraft III) |

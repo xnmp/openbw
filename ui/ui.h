@@ -1722,26 +1722,33 @@ struct ui_functions: ui_util_functions {
 			return palette_rgba(img.player_minimap_colors.at(player_color(u->owner)));
 		};
 		double x0, y0, x1, y1;
-		// 1: neutrals and buildings.
+		// 1: neutrals, and everything in the building style: buildings and workers at work.
+		const auto depots = minimap_depots();
 		std::array<a_vector<std::array<double, 4>>, 8> building_rects;
 		for (size_t i = 12; i != 0;) {
 			--i;
 			for (unit_t* u : ptr(st.player_units[i])) {
-				if (!shown(u) || !(ut_building(u) || u->owner >= 8)) continue;
+				if (!shown(u)) continue;
+				if (u->owner < 8 && !ut_building(u)) {
+					if (minimap_worker_at_work(u, depots)) {
+						box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale);
+						building_rects[u->owner].push_back({x0, y0, x1, y1});
+					}
+					continue;
+				}
 				box(u, 2, 4, x0, y0, x1, y1, u->owner >= 8 ? 1.0 : minimap_owned_scale);
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
 				else building_rects[u->owner].push_back({x0, y0, x1, y1});
 			}
 		}
-		// A player's buildings are drawn together, so where they overlap they make one shape
-		// with one outer border.
+		// A player's building-style tiles are drawn together, so where they overlap (a base's
+		// buildings, its SCVs at work) they make one shape with one outer border.
 		for (int p = 0; p != 8; ++p) {
 			if (building_rects[p].empty()) continue;
 			draw_minimap_blob(building_rects[p], palette_rgba(img.player_minimap_colors.at(player_color(p))), w, h, blend);
 		}
 		// 2: minor units, faint; 3: ground units; 4: air units, outlined.
-		const auto depots = minimap_depots();
 		for (int pass = 2; pass != 5; ++pass) {
 			for (size_t i = 12; i != 0;) {
 				--i;
@@ -1758,11 +1765,8 @@ struct ui_functions: ui_util_functions {
 						else blend((int)cx, (int)cy, c, 110);
 						continue;
 					}
+					if (minimap_worker_at_work(u, depots)) continue;  // drawn with the buildings
 					box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale);
-					if (minimap_worker_at_work(u, depots)) {
-						draw_minimap_blob({{x0, y0, x1, y1}}, c, w, h, blend);  // as the buildings: part of the base
-						continue;
-					}
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
 					disc(x0, y0, x1, y1, c, 255);

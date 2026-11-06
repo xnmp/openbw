@@ -65,7 +65,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   remastered tiles with those graphics on). Buildings are flat tiles in the
   units' colour, part transparent, inside a dark border; units are dots on top, air army outlined in black.
   Players' buildings are drawn 1.2x their footprint and units 1.35x; overlapping buildings of
-  one player merge into one shape with a single outer border. Spider
+  one player, and its workers drawn in their style, merge into one shape with a single outer
+  border. Spider
   Mines are tiny solid dots; Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
   12 tiles of one of their own bases (or idle there), and workers building or sent to build, are drawn as small tiles like the buildings,
   so armies stand out. A concentration of one

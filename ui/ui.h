@@ -15,7 +15,7 @@
 #include "supply_state.h"
 #include "ui_theme.h"
 #include "modal_layout.h"
-#include "skin_strip.h"
+#include "skin_frame.h"
 #ifdef OPENBW_REMASTERED
 #include "scr_render.h"
 #endif
@@ -2136,11 +2136,13 @@ struct ui_functions: ui_util_functions {
 		// The whole panel, buttons included, takes about a third of the view's width.
 		int w = std::max(160, std::min(440, viewport_w / 3) - (int)replay_controls_w);
 		int h = ui_skin ? 18 : 14;  // the skin's progress bar at its own height
-		int x1 = viewport_x + viewport_w - 8 - replay_pad_x(), y1 = window_height - 6 - replay_pad_y();
+		int x1 = viewport_x + viewport_w - 8 - replay_pad_x(), y1 = window_height - 6 - replay_pad_bottom();
 		return rect{{x1 - w, y1 - h}, {x1, y1}};
 	}
-	int replay_pad_x() const { return ui_skin ? 16 : 8; }
+	int replay_pad_x() const { return std::max(ui_skin ? 16 : 8, frame_side() + 6); }
 	int replay_pad_y() const { return ui_skin ? 12 : 8; }
+	int replay_pad_top() const { return std::max(replay_pad_y(), frame_top() + 3); }
+	int replay_pad_bottom() const { return std::max(replay_pad_y(), frame_bottom() + 3); }
 
 	// Same rect in logical (pre-zoom) coordinates, for mouse hit tests.
 	rect get_replay_slider_area() {
@@ -3044,7 +3046,8 @@ struct ui_functions: ui_util_functions {
 		auto rows = hud_rows();
 		if (rows.empty()) return;
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h;
-		const int pad_x = ui_skin ? 16 : 10, pad_y = ui_skin ? 12 : 8, row_h = ch + 4;
+		const int pad_y = ui_skin ? 12 : 8, row_h = ch + 4;
+		const int pad_x = std::max(ui_skin ? 16 : 10, frame_side() + 6), pad_t = std::max(pad_y, frame_top() + 3), pad_b = std::max(pad_y, frame_bottom() + 3);
 		int name_cols = 6;
 		for (auto& row : rows) name_cols = std::max(name_cols, std::min(16, (int)row.name.size()));
 		const int icon = 14, unit_icon = 20;
@@ -3052,7 +3055,7 @@ struct ui_functions: ui_util_functions {
 		const int name_w = cw + 6 + name_cols * cw;
 		const int res_w = icon + 4 + 5 * cw, sup_w = icon + 4 + 7 * cw, cnt_w = unit_icon + 2 + 3 * cw, gap = 12;
 		int w = pad_x * 2 + name_w + gap + res_w + gap + res_w + gap + sup_w + gap + cnt_w + gap + cnt_w;
-		int h = pad_y * 2 + (int)rows.size() * row_h;
+		int h = pad_t + pad_b + (int)rows.size() * row_h;
 		if (!hud_surface || hud_surface->w != w || hud_surface->h != h) {
 			hud_surface = native_window_drawing::create_rgba_surface(w, h);
 			hud_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
@@ -3072,7 +3075,7 @@ struct ui_functions: ui_util_functions {
 		auto value_text = [&](int x, int y, const char* t, int r, int g, int b) { hud_text(buf, pitch, w, h, x, y, t, r, g, b); };
 		for (size_t i = 0; i != rows.size(); ++i) {
 			auto& row = rows[i];
-			int y = pad_y + (int)i * row_h, ty = y + (row_h - ch) / 2, iy = y + (row_h - icon) / 2;
+			int y = pad_t + (int)i * row_h, ty = y + (row_h - ch) / 2, iy = y + (row_h - icon) / 2;
 			if (i && !ui_skin) fill_rgba(buf, pitch, w, h, pad_x, y, w - 2 * pad_x, 1, hud_rgba(36, 42, 26, 255));
 			if (i && ui_skin) blend_rect(buf, pitch, w, h, pad_x, y, w - 2 * pad_x, 1, hud_rgba(120, 126, 128, 40));
 			int x = pad_x;
@@ -3921,9 +3924,18 @@ struct ui_functions: ui_util_functions {
 		int themed = -1;  // the ui_theme::race the images above are made for
 		int bar_height = 0;  // bar_empty/bar_full resampled to this height (0: native)
 		// How skin_panel cuts left/right/center: rows kept at the top and bottom, and the band of
-		// rows repeated between them. The observer art's values; a race's own strips set theirs.
+		// rows repeated between them: the observer art's values.
 		int caps_top = 30, caps_bottom = 30, centre_top = 16, centre_bottom = 16, band_from = 40, band_rows = 20;
 		scr::image bar_empty_h, bar_full_h;
+		// Protoss and Zerg: a frame cut from the race's console art (skin_frame.h) instead of
+		// the observer strips; `frame_open` is it with the screen cleared, for the minimap.
+		// Protoss also wears its console's gold rail and leaf ornaments along the top, in the
+		// `crown` rows above the frame.
+		bool framed = false;
+		scr::image frame, frame_open, rail, leaf;
+		skin_frame::layout lay;
+		uint32_t face = 0;  // the screen's colour inside the frame
+		int crown = 0, rail_y = 0, inset_top = 0, inset_side = 0;
 	};
 	observer_skin skin;
 
@@ -3978,38 +3990,65 @@ struct ui_functions: ui_util_functions {
 		skin.themed = (int)active_theme;
 	}
 
-	// Protoss and Zerg: the panel strips are cut from the race's own console art
-	// (HD2/game/consoles/<race>/console_*.dds) instead of the recoloured observer metal.
-	// Protoss: console_left's gold rail over the blue psionic panel and its hexagon fill.
-	// Zerg: console_center's flesh ridge over console_left's riveted, hazard-striped plates.
-	// The regions are source pixels in those files. Leaves the recoloured observer art when
-	// the files are missing or the regions do not fit.
+	// Protoss and Zerg: panels are framed like the race's main screen, cut from its console art
+	// (HD2/game/consoles/<race>/console_center.dds): the blue bezel with its cyan inner rail
+	// under the gold rail and leaves, or the flesh ring. The regions are source pixels in that
+	// file; the art is resampled first, to a size that suits panels a few text lines high.
+	// Leaves the observer strips when the file is missing or the regions do not fit.
 	void skin_race_panels() {
-		using skin_strip::box;
-		const int W = 1500, H = 230, top = 22, lip = 22, cap_w = 28;
-		scr::image left, centre, strip;
-		std::string dir = std::string("HD2/game/consoles/") + theme().console_dir + "/";
-		if (active_theme == ui_theme::race::protoss) {
-			if (!hd->read_ui_image(dir + "console_left.dds", left)) return;
-			if (!skin_strip::build(left, left, {box{640, 128, 960, 150}, box{640, 225, 900, 335}, 140}, W, H, top, lip, strip)) return;
-		} else if (active_theme == ui_theme::race::zerg) {
-			if (!hd->read_ui_image(dir + "console_left.dds", left) || !hd->read_ui_image(dir + "console_center.dds", centre)) return;
-			if (!skin_strip::build(centre, left, {box{200, 14, 380, 36}, box{548, 228, 636, 292}, 235}, W, H, top, lip, strip)) return;
-		} else return;
-		skin.center = strip;
-		skin_strip::cap(strip, cap_w, true, 3, skin.left);
-		skin_strip::cap(strip, cap_w, false, 3, skin.right);
-		skin.caps_top = skin.centre_top = top;
-		skin.caps_bottom = skin.centre_bottom = lip;
-		skin.band_from = top;
-		skin.band_rows = 120;
+		skin.framed = false;
+		skin.rail = {};
+		skin.leaf = {};
+		const bool protoss = active_theme == ui_theme::race::protoss;
+		if (!protoss && active_theme != ui_theme::race::zerg) return;
+		scr::image art;
+		if (!hd->read_ui_image(std::string("HD2/game/consoles/") + theme().console_dir + "/console_center.dds", art)) return;
+		// Protoss: the bezel's top-left corner at (0, 48), 17 rows to the screen at the top and
+		// 14 columns at the side; the gold rail runs over rows 20..48, the leaves 2..60.
+		// Zerg: the flesh ring's corner at (0, 0), 60 rows of ribbed tube at the top, 41 of
+		// flesh at the side (48 allows for the bulging corners).
+		skin_frame::spec sp;
+		if (protoss) sp = {0, 48, 32, 40, 120, 100, 140, 17, 14};
+		else sp = {0, 0, 100, 110, 240, 110, 230, 60, 48};
+		const double s = protoss ? 0.55 : 0.5;
+		const int aw = (int)std::lround(art.w * s), ah = (int)std::lround(art.h * s);
+		if (aw <= 0 || ah <= 0) return;
+		scr::image small = scr::resample(art, 0, 0, art.w, art.h, aw, ah, true);
+		skin_frame::spec ss = skin_frame::scaled(sp, s);
+		scr::image frame;
+		skin_frame::layout lay;
+		if (!skin_frame::build(small, ss, frame, lay)) return;
+		skin.frame_open = frame;
+		skin_frame::open_face(skin.frame_open, lay, 24);
+		skin.frame = std::move(frame);
+		skin.lay = lay;
+		skin.face = small.at(ss.x + ss.corner - 1, ss.y + ss.corner - 1);
+		skin.inset_top = ss.inset_top;
+		skin.inset_side = ss.inset_side;
+		skin.crown = 0;
+		if (protoss) {
+			auto crop = [&](int x0, int y0, int x1, int y1) {
+				int X0 = (int)std::lround(x0 * s), Y0 = (int)std::lround(y0 * s), X1 = (int)std::lround(x1 * s), Y1 = (int)std::lround(y1 * s);
+				scr::image o;
+				if (X1 <= X0 || Y1 <= Y0 || X1 > small.w || Y1 > small.h) return o;
+				o.w = X1 - X0;
+				o.h = Y1 - Y0;
+				for (int y = Y0; y != Y1; ++y) o.px.insert(o.px.end(), small.px.begin() + (size_t)y * small.w + X0, small.px.begin() + (size_t)y * small.w + X1);
+				return o;
+			};
+			skin.rail = crop(272, 20, 336, 48);  // one stud and the plain rail after it
+			skin.leaf = crop(146, 2, 266, 60);
+			skin.crown = (int)std::lround((48 - 2) * s);  // the leaves' top to the bezel's
+			skin.rail_y = skin.crown - skin.rail.h;
+		}
+		skin.framed = true;
 	}
 
 	// A dialog button in the active race's own art (HD2/game/consoles/<race>/dlg.dds.grp,
 	// frame 0: the plain 120 x 48 plate): the end caps kept, the middle repeated to the width.
 	// The art has no hover frame; the game lights the plate, so a hovered one gets a glow.
-	int skin_edge_top() const { return skin.caps_top; }  // rows a panel's frame takes at its top and bottom
-	int skin_edge_bottom() const { return skin.caps_bottom; }
+	int skin_edge_top() const { return skin.framed ? frame_top() + 4 : skin.caps_top; }  // rows a panel's frame takes at its top and bottom
+	int skin_edge_bottom() const { return skin.framed ? frame_bottom() + 4 : skin.caps_bottom; }
 	scr::image dialog_plate;
 	int dialog_plate_race = -1;
 	bool skin_dialog_button(uint32_t* buf, size_t pitch, int w, int h, const rect& r, bool hover) {
@@ -4065,6 +4104,10 @@ struct ui_functions: ui_util_functions {
 	// each cut into top, bottom and a plain middle band repeated to the height.
 	bool skin_panel(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int pw, int ph) {
 		if (!ui_skin) return false;
+		if (skin.framed) {
+			draw_race_frame(buf, pitch, w, h, x, y, pw, ph, skin.frame, true);
+			return true;
+		}
 		const int band_from = skin.band_from, band_rows = skin.band_rows;
 		auto column = [&](const scr::image& img, int dx, int dw, int edge_top, int edge_bottom, bool tile_x) {
 			int top = std::min(edge_top, ph / 2), bottom = std::min(edge_bottom, ph - top), mid = ph - top - bottom;
@@ -4078,6 +4121,54 @@ struct ui_functions: ui_util_functions {
 		column(skin.right, x + pw - rw, rw, skin.caps_top, skin.caps_bottom, false);
 		return true;
 	}
+
+	// A race frame filling (x, y, pw, ph): the crown's rows at the top, then the frame's
+	// corners, its edges repeated between them, and (`face`) the screen's colour inside.
+	// A panel too small for whole corners gets their outer parts.
+	void draw_race_frame(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int pw, int ph, const scr::image& f, bool face) {
+		const auto& L = skin.lay;
+		const int fy = y + skin.crown, fh = ph - skin.crown;
+		if (pw <= 0 || fh <= 0) return;
+		const int c = L.corner, cw = std::min(c, pw / 2), ch = std::min(c, fh / 2), W = L.w(), H = L.h();
+		const int mw = pw - 2 * cw, mh = fh - 2 * ch;
+		if (face && mw > 0 && mh > 0) {
+			uint32_t p = skin.face, a = scr::ch_a(p);
+			if (a) fill_rgba(buf, pitch, w, h, x + cw, fy + ch, mw, mh, hud_rgba(scr::ch_r(p) * 255 / a, scr::ch_g(p) * 255 / a, scr::ch_b(p) * 255 / a, 235));
+		}
+		skin_blit(buf, pitch, w, h, f, 0, 0, cw, ch, x, fy, cw, ch);
+		skin_blit(buf, pitch, w, h, f, W - cw, 0, cw, ch, x + pw - cw, fy, cw, ch);
+		skin_blit(buf, pitch, w, h, f, 0, H - ch, cw, ch, x, fy + fh - ch, cw, ch);
+		skin_blit(buf, pitch, w, h, f, W - cw, H - ch, cw, ch, x + pw - cw, fy + fh - ch, cw, ch);
+		if (mw > 0) {
+			skin_blit(buf, pitch, w, h, f, c, 0, L.edge_x, ch, x + cw, fy, mw, ch, true);
+			skin_blit(buf, pitch, w, h, f, c, H - ch, L.edge_x, ch, x + cw, fy + fh - ch, mw, ch, true);
+		}
+		if (mh > 0) {
+			skin_blit(buf, pitch, w, h, f, 0, c, cw, L.edge_y, x, fy + ch, cw, mh, false, true);
+			skin_blit(buf, pitch, w, h, f, W - cw, c, cw, L.edge_y, x + pw - cw, fy + ch, cw, mh, false, true);
+		}
+		// Protoss's crown: the rail from the left corner to the right, a leaf over each end
+		// (one in the middle when the panel is too narrow for two).
+		if (!skin.rail.empty()) {
+			const scr::image& r = skin.rail;
+			const int rx = x + cw / 2, rw = pw - cw;
+			skin_blit(buf, pitch, w, h, r, 0, 0, r.w, r.h, rx, y + skin.rail_y, rw, r.h, true);
+		}
+		if (!skin.leaf.empty()) {
+			const scr::image& l = skin.leaf;
+			if (pw >= 2 * l.w + 2 * c) {
+				skin_blit(buf, pitch, w, h, l, 0, 0, l.w, l.h, x + c, y, l.w, l.h);
+				skin_blit(buf, pitch, w, h, l, 0, 0, l.w, l.h, x + pw - c - l.w, y, l.w, l.h);
+			} else if (pw >= l.w + 2 * cw) skin_blit(buf, pitch, w, h, l, 0, 0, l.w, l.h, x + (pw - l.w) / 2, y, l.w, l.h);
+		}
+	}
+
+	// The rows (columns) a panel's frame takes at its top, bottom and sides: zero for the
+	// observer strips, whose metal the panels' own padding already allows for.
+	bool skin_framed() const { return skin.framed; }
+	int frame_top() const { return skin.framed ? skin.crown + skin.inset_top : 0; }
+	int frame_bottom() const { return skin.framed ? skin.inset_top : 0; }
+	int frame_side() const { return skin.framed ? skin.inset_side : 0; }
 
 	// Remastered's progress bar (a green segmented pill), its ends kept and the middle
 	// repeated to the width; resampled once per height when not drawn at its own.
@@ -4109,9 +4200,16 @@ struct ui_functions: ui_util_functions {
 	// The observer minimap frame: metal along the top and right edges (the minimap sits in
 	// the bottom-left corner), rivets at the top-right. `w` x `h` is the minimap itself, at
 	// (0, minimap_frame_top()) in a buffer of (w + minimap_frame_right()) x (h + top).
-	int minimap_frame_top() const { return ui_skin ? 8 : 0; }
-	int minimap_frame_right() const { return ui_skin ? 11 : 0; }
+	int minimap_frame_top() const { return !ui_skin ? 0 : skin.framed ? frame_top() : 8; }
+	int minimap_frame_right() const { return !ui_skin ? 0 : skin.framed ? frame_side() : 11; }
 	void skin_minimap_frame(uint32_t* buf, size_t pitch, int w, int h) {
+		if (skin.framed) {
+			// The race frame's top and right edges; its left and bottom fall outside the
+			// buffer, against the window's edges. The screen is open, showing the map.
+			const int W = w + minimap_frame_right(), H = h + minimap_frame_top(), c = skin.lay.corner;
+			draw_race_frame(buf, pitch, W, H, -c, 0, W + c, H + c, skin.frame_open, false);
+			return;
+		}
 		const scr::image& f = skin.minimap;
 		const int top = minimap_frame_top(), right = minimap_frame_right(), fw = f.w - right;
 		const int W = w + right, H = h + top;
@@ -4129,6 +4227,10 @@ struct ui_functions: ui_util_functions {
 	bool skin_dialog_button(uint32_t*, size_t, int, int, const rect&, bool) { return false; }
 	int skin_edge_top() const { return 8; }
 	int skin_edge_bottom() const { return 8; }
+	bool skin_framed() const { return false; }
+	int frame_top() const { return 0; }
+	int frame_bottom() const { return 0; }
+	int frame_side() const { return 0; }
 	int minimap_frame_top() const { return 0; }
 	int minimap_frame_right() const { return 0; }
 	void skin_minimap_frame(uint32_t*, size_t, int, int) {}
@@ -4166,6 +4268,7 @@ struct ui_functions: ui_util_functions {
 
 	void draw_unit_console(const unit_t* u, int scale) {
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = panel_pad(), gap = 4;
+		const int px = std::max(pad, frame_side() + 6), pt = std::max(pad, frame_top() + 3), pb = std::max(pad, frame_bottom() + 3);
 		auto ci = console_info_of(u);
 		const int wire = 64 * scale;
 		const int icon_w = 36 * scale, icon_h = 34 * scale;
@@ -4207,22 +4310,22 @@ struct ui_functions: ui_util_functions {
 			right_h += gap + cargo_cell;
 		}
 
-		int w = pad * 3 + left_w + right_w;
-		int h = pad * 2 + std::max(left_h, right_h);
+		int w = px * 2 + pad + left_w + right_w;
+		int h = pt + pb + std::max(left_h, right_h);
 		prepare_panel_surface(w, h);
 		uint32_t* buf = (uint32_t*)panel_surface->lock();
 		size_t pitch = panel_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(8, 10, 16, 190));
 
-		if (!hd_draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, shown_type(u), wire, vitals_of(u))) {
-			draw_wireframe(buf, pitch, w, h, pad + (left_w - wire) / 2, pad, wireframe_grp, (size_t)shown_type(u)->id, scale, 1, vitals_of(u));
+		if (!hd_draw_wireframe(buf, pitch, w, h, px + (left_w - wire) / 2, pt, shown_type(u), wire, vitals_of(u))) {
+			draw_wireframe(buf, pitch, w, h, px + (left_w - wire) / 2, pt, wireframe_grp, (size_t)shown_type(u)->id, scale, 1, vitals_of(u));
 		}
 		// Clicking the wireframe centres the view on the unit (see selection_panel_click).
-		panel_cells.push_back({rect{{pad + (left_w - wire) / 2, pad}, {pad + (left_w - wire) / 2 + wire, pad + wire}}, get_unit_id(const_cast<unit_t*>(u))});
+		panel_cells.push_back({rect{{px + (left_w - wire) / 2, pt}, {px + (left_w - wire) / 2 + wire, pt + wire}}, get_unit_id(const_cast<unit_t*>(u))});
 		for (size_t i = 0; i != ci.vitals.size(); ++i) {
 			auto& l = ci.vitals[i];
-			int lx = pad + (left_w - vital_w(l)) / 2, ly = pad + wire + (int)i * ch;
+			int lx = px + (left_w - vital_w(l)) / 2, ly = pt + wire + (int)i * ch;
 			if (l.icon >= 0) {
 				if (!ui_skin) fill_rgba(buf, pitch, w, h, lx, ly, vit_icon_w, vit_icon_h, hud_rgba(0, 0, 0, 255));
 				draw_cmd_icon_scaled(buf, pitch, w, h, lx, ly, l.icon, scale, vit_icon_w, vit_icon_h);
@@ -4232,7 +4335,7 @@ struct ui_functions: ui_util_functions {
 			hud_text(buf, pitch, w, h, lx, ly, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
 		}
 
-		int x0 = pad * 2 + left_w, y = pad;
+		int x0 = px + pad + left_w, y = pt;
 		for (auto& l : ci.lines) {
 			hud_text(buf, pitch, w, h, x0, y, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
 			y += ch;
@@ -4397,7 +4500,8 @@ struct ui_functions: ui_util_functions {
 		// Each unit sits in a slot: a sunken plate a little larger than its wireframe, with
 		// its owner's colour along the bottom.
 		const int wire = 32 * scale, slot = wire + 6, cell = slot + 3;
-		const int pad_x = ui_skin ? 22 : 8, pad_y = ui_skin ? 14 : 8;
+		const int pad_x = std::max(ui_skin ? 22 : 8, frame_side() + 6), pad_y = ui_skin ? 14 : 8;
+		const int pad_t = std::max(pad_y, frame_top() + 3 + 2), pad_b = std::max(pad_y, frame_bottom() + 3);  // the title sits 2 rows above pad_y
 		int shown = std::min((int)units.size(), max_shown);
 		int rows = (shown + per_row - 1) / per_row;
 		int cols = std::min(shown, per_row);
@@ -4405,7 +4509,7 @@ struct ui_functions: ui_util_functions {
 		if ((int)units.size() > shown) std::snprintf(title, sizeof(title), "%d units (showing %d)", (int)units.size(), shown);
 		else std::snprintf(title, sizeof(title), "%d units", (int)units.size());
 		int w = std::max(pad_x * 2 + cols * cell - 3, pad_x * 2 + (int)std::strlen(title) * cw);
-		int h = pad_y * 2 + ch + 2 + rows * cell - 3;
+		int h = pad_t + pad_b + ch + 2 + rows * cell - 3;
 		prepare_panel_surface(w, h);
 		uint32_t* buf = (uint32_t*)panel_surface->lock();
 		size_t pitch = panel_surface->pitch / 4;
@@ -4415,10 +4519,10 @@ struct ui_functions: ui_util_functions {
 			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
 			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
 		}
-		hud_text(buf, pitch, w, h, pad_x, pad_y - 2, title, ui_skin ? 214 : 248, ui_skin ? 220 : 240, ui_skin ? 222 : 170);
+		hud_text(buf, pitch, w, h, pad_x, pad_t - 2, title, ui_skin ? 214 : 248, ui_skin ? 220 : 240, ui_skin ? 222 : 170);
 		for (int i = 0; i != shown; ++i) {
 			unit_t* u = units[i];
-			int x = pad_x + (i % per_row) * cell, y = pad_y + ch + 2 + (i / per_row) * cell;
+			int x = pad_x + (i % per_row) * cell, y = pad_t + ch + 2 + (i / per_row) * cell;
 			panel_cells.push_back({rect{{x, y}, {x + slot, y + slot}}, get_unit_id(u)});
 			// Sunken plate: dark face, shadowed top-left, lit bottom-right.
 			blend_rect(buf, pitch, w, h, x, y, slot, slot, hud_rgba(0, 0, 0, 130));
@@ -5124,7 +5228,8 @@ struct ui_functions: ui_util_functions {
 	void draw_graph_panel() {
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h;
 		const bool mini = graph_mini();
-		const int pad = mini ? (ui_skin ? 16 : 10) : (ui_skin ? 20 : 14);
+		const int pad0 = mini ? (ui_skin ? 16 : 10) : (ui_skin ? 20 : 14);
+		const int pad = std::max(pad0, frame_side() + 6), pt = std::max(pad0, frame_top() + 3), pb = std::max(pad0, frame_bottom() + 3);
 		int w, h;
 		if (mini) {
 			w = std::max(300, std::min(viewport_w / 5, 420));
@@ -5142,7 +5247,7 @@ struct ui_functions: ui_util_functions {
 		// Under the skin, a dark underlay inside its metal edge: the console face alone is
 		// too sheer for a plot.
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
-		if (ui_skin) fill_rgba(buf, pitch, w, h, 6, 6, w - 12, h - 12, hud_rgba(4, 6, 8, mini ? 150 : 190));
+		if (ui_skin && !skin_framed()) fill_rgba(buf, pitch, w, h, 6, 6, w - 12, h - 12, hud_rgba(4, 6, 8, mini ? 150 : 190));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
 			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, mini ? 200 : 225));
 			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
@@ -5167,10 +5272,10 @@ struct ui_functions: ui_util_functions {
 			char title_text[96];
 			std::snprintf(title_text, sizeof(title_text), "%s%s%s%s%s", graph_tab_name(graph_tab), graph_derivative ? " /min" : "",
 				difference ? " diff" : "", win_s ? ", " : "", win_s ? range : "");
-			hud_text(buf, pitch, w, h, pad, pad, title_text, title.r, title.g, title.b);
+			hud_text(buf, pitch, w, h, pad, pt, title_text, title.r, title.g, title.b);
 			const char* hint = "g: maximize";
-			if ((int)(std::strlen(title_text) + 2 + std::strlen(hint)) * cw <= w - 2 * pad) hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(hint) * cw, pad, hint, dim.r, dim.g, dim.b);
-			ly = pad;
+			if ((int)(std::strlen(title_text) + 2 + std::strlen(hint)) * cw <= w - 2 * pad) hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(hint) * cw, pt, hint, dim.r, dim.g, dim.b);
+			ly = pt;
 		} else {
 			// Tabs
 			int tx = pad;
@@ -5178,18 +5283,18 @@ struct ui_functions: ui_util_functions {
 				char label[48];
 				std::snprintf(label, sizeof(label), "%d %s", t + 1, graph_tab_name(t));
 				int tw = (int)std::strlen(label) * cw + 16;
-				graph_tab_rects[t] = rect{{tx, pad}, {tx + tw, pad + ch + 8}};
+				graph_tab_rects[t] = rect{{tx, pt}, {tx + tw, pt + ch + 8}};
 				bool active = t == graph_tab;
 				draw_replay_button(buf, pitch, w, h, graph_tab_rects[t], active, false, true);
-				if (active) hud_text(buf, pitch, w, h, tx + 9, pad + 5, label, 0, 0, 0);  // drop shadow
-				hud_text(buf, pitch, w, h, tx + 8, pad + 4, label, active ? title.r : 190, active ? title.g : 196, active ? title.b : 198);
+				if (active) hud_text(buf, pitch, w, h, tx + 9, pt + 5, label, 0, 0, 0);  // drop shadow
+				hud_text(buf, pitch, w, h, tx + 8, pt + 4, label, active ? title.r : 190, active ? title.g : 196, active ? title.b : 198);
 				tx += tw + 6;
 			}
 			const char* keys = graph_minimized ? "[ ] zoom  g minimize  m unpin" : "[ ] zoom  m minimize  esc close";
-			hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(keys) * cw, pad + 4, keys, dim.r, dim.g, dim.b);
+			hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(keys) * cw, pt + 4, keys, dim.r, dim.g, dim.b);
 
 			// Legend, and the display modes on the right
-			ly = pad + ch + 16;
+			ly = pt + ch + 16;
 			int lx = pad;
 			if (difference) {
 				a_string a = rows[0].name, b = rows[1].name;
@@ -5218,7 +5323,7 @@ struct ui_functions: ui_util_functions {
 
 		// Plot area
 		int px0 = pad + 6 * cw, py0 = ly + ch + (mini ? 6 : 10);
-		int px1 = w - pad, py1 = h - pad - ch - 4;
+		int px1 = w - pad, py1 = h - pb - ch - 4;
 		int end_frame = std::max(1, replay_st.end_frame);
 		// Visible frame range: whole game, or the last win_s seconds ending at the current frame.
 		int x_from = 0, x_to = end_frame;
@@ -5785,7 +5890,7 @@ struct ui_functions: ui_util_functions {
 	enum { notch_pitch = 12 };  // level notches: 9 px wide, 3 px apart
 
 	// Panel-relative x of a level row's slider.
-	int settings_pad() const { return ui_skin ? 24 : 16; }
+	int settings_pad() const { return std::max(ui_skin ? 24 : 16, frame_side() + 6); }
 	int notches_x(int panel_w, int levels) const { return panel_w - settings_pad() - levels * notch_pitch + 3; }
 
 	// x of level `level` (1-based) on a slider `track_w` wide starting at x0.
@@ -5841,7 +5946,8 @@ struct ui_functions: ui_util_functions {
 		}
 		for (auto& k : other_keys) other_cols = std::max(other_cols, other_key_cols + 3 + (int)std::strlen(k[1]));
 		// The other keys go in two columns when one would not fit the window's height.
-		int settings_h = pad * 2 + ch + 12 + (int)settings.size() * row_h + 12 + ch + 6;
+		const int pt = std::max(pad, frame_top() + 3), pb = std::max(pad, frame_bottom() + 3);
+		int settings_h = pt + pb + ch + 12 + (int)settings.size() * row_h + 12 + ch + 6;
 		int key_columns = settings_h + n_other * ch > window_height - 16 ? 2 : 1;
 		int key_rows = (n_other + key_columns - 1) / key_columns, key_col_w = (other_cols + 3) * cw;
 		int w = pad * 2 + std::max((4 + label_cols + 3) * cw + key_w, key_columns * key_col_w - 3 * cw);
@@ -5853,17 +5959,17 @@ struct ui_functions: ui_util_functions {
 		uint32_t* buf = (uint32_t*)settings_surface->lock();
 		size_t pitch = settings_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
-		if (ui_skin) fill_rgba(buf, pitch, w, h, 6, 6, w - 12, h - 12, hud_rgba(4, 6, 8, 215));  // the console face alone is too sheer
+		if (ui_skin && !skin_framed()) fill_rgba(buf, pitch, w, h, 6, 6, w - 12, h - 12, hud_rgba(4, 6, 8, 215));  // the console face alone is too sheer
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
 			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 235));
 			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
 			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
 		}
-		hud_text(buf, pitch, w, h, pad, pad, "Settings", 255, 240, 170);
+		hud_text(buf, pitch, w, h, pad, pt, "Settings", 255, 240, 170);
 		const char* close = "? / esc close";
-		hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(close) * cw, pad, close, 120, 130, 150);
+		hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(close) * cw, pt, close, 120, 130, 150);
 		settings_row_rects.clear();
-		int y = pad + ch + 12;
+		int y = pt + ch + 12;
 		for (auto& v : settings) {
 			settings_row_rects.push_back(rect{{pad - 4, y}, {w - pad + 4, y + row_h}});
 			if (v.level_names) {
@@ -6076,11 +6182,11 @@ struct ui_functions: ui_util_functions {
 		std::array<rect, replay_button_count> buttons;
 	};
 	replay_panel_layout replay_panel() const {
-		const int ch = hud_font::cell_h, px = replay_pad_x(), py = replay_pad_y();
+		const int ch = hud_font::cell_h, px = replay_pad_x(), pt = replay_pad_top(), pb = replay_pad_bottom();
 		rect bar = replay_bar_window_rect();
 		replay_panel_layout r;
-		r.panel = rect{{bar.from.x - px - replay_controls_w, bar.from.y - py - ch - 6}, {bar.to.x + px, bar.to.y + py}};
-		int inner_top = r.panel.from.y + py, inner_h = ch + 6 + (bar.to.y - bar.from.y);
+		r.panel = rect{{bar.from.x - px - replay_controls_w, bar.from.y - pt - ch - 6}, {bar.to.x + px, bar.to.y + pb}};
+		int inner_top = r.panel.from.y + pt, inner_h = ch + 6 + (bar.to.y - bar.from.y);
 		int x = r.panel.from.x + px;
 		auto button = [&](int size) {
 			int y = inner_top + (inner_h - size) / 2;
@@ -6264,9 +6370,9 @@ struct ui_functions: ui_util_functions {
 		// Divider between the controls and the timer/seek bar.
 		int dx = layout.buttons[replay_button_faster].to.x - ox + 6;
 		if (ui_skin) {  // an etched groove in the console's grey
-			int dy = replay_pad_y();
-			blend_rect(buf, pitch, w, h, dx, dy, 1, h - 2 * dy, hud_rgba(0, 0, 0, 170));
-			blend_rect(buf, pitch, w, h, dx + 1, dy, 1, h - 2 * dy, hud_rgba(150, 156, 158, 70));
+			int dy = replay_pad_top(), dh = h - dy - replay_pad_bottom();
+			blend_rect(buf, pitch, w, h, dx, dy, 1, dh, hud_rgba(0, 0, 0, 170));
+			blend_rect(buf, pitch, w, h, dx + 1, dy, 1, dh, hud_rgba(150, 156, 158, 70));
 		} else {
 			fill_rgba(buf, pitch, w, h, dx, 6, 1, h - 12, hud_rgba(24, 28, 18, 255));
 			fill_rgba(buf, pitch, w, h, dx + 1, 6, 1, h - 12, hud_rgba(84, 94, 60, 255));
@@ -6470,7 +6576,7 @@ struct ui_functions: ui_util_functions {
 
 	void draw_replay_bar() {
 		if (replay_st.end_frame == 0) return;
-		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = replay_pad_y(), pad_x = replay_pad_x();
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = replay_pad_top(), pad_x = replay_pad_x();
 		rect bar = replay_bar_window_rect();
 		int bw = bar.to.x - bar.from.x, bh = bar.to.y - bar.from.y;
 		auto layout = replay_panel();

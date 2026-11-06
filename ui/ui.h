@@ -1677,7 +1677,8 @@ struct ui_functions: ui_util_functions {
 			for (int y = iy0; y < iy1; ++y) for (int x = ix0; x < ix1; ++x) blend(x, y, c, a);
 		};
 		// Antialiased shapes: a disc filling a box, and a box with rounded corners (radius in px).
-		auto rounded = [&](double x0, double y0, double x1, double y1, double rad, uint32_t c, int a) {
+		// `shade(px, py, c, a)` may change the colour and alpha per pixel (see the buildings).
+		auto rounded_shaded = [&](double x0, double y0, double x1, double y1, double rad, uint32_t c, int a, auto&& shade) {
 			rad = std::max(0.0, std::min(rad, std::min(x1 - x0, y1 - y0) / 2));
 			for (int y = (int)std::floor(y0); y < (int)std::ceil(y1); ++y) for (int x = (int)std::floor(x0); x < (int)std::ceil(x1); ++x) {
 				double px = x + 0.5, py = y + 0.5;
@@ -1685,8 +1686,15 @@ struct ui_functions: ui_util_functions {
 				double edge = std::min({px - x0, x1 - px, py - y0, y1 - py});  // coverage at straight edges
 				double cov = std::min(std::max(0.0, std::min(1.0, rad - std::sqrt(dx * dx + dy * dy) + 0.5)), std::max(0.0, std::min(1.0, edge + 0.5)));
 				if (rad <= 0) cov = std::max(0.0, std::min(1.0, edge + 0.5));
-				if (cov > 0) blend(x, y, c, (int)(a * cov));
+				if (cov <= 0) continue;
+				uint32_t pc = c;
+				int pa = a;
+				shade(px, py, pc, pa);
+				blend(x, y, pc, (int)(pa * cov));
 			}
+		};
+		auto rounded = [&](double x0, double y0, double x1, double y1, double rad, uint32_t c, int a) {
+			rounded_shaded(x0, y0, x1, y1, rad, c, a, [](double, double, uint32_t&, int&) {});
 		};
 		auto disc = [&](double x0, double y0, double x1, double y1, uint32_t c, int a) {
 			rounded(x0, y0, x1, y1, std::min(x1 - x0, y1 - y0) / 2, c, a);
@@ -1717,9 +1725,17 @@ struct ui_functions: ui_util_functions {
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
 				else {
-					// A dark hairline just outside, then the units' colour, a little see-through.
+					// A dark hairline just outside, then the units' colour, a little see-through,
+					// faintly lit from the top left: a soft diagonal gradient, a brighter top edge.
 					rounded(x0 - 1, y0 - 1, x1 + 1, y1 + 1, 2.5, hud_rgba(0, 0, 0, 255), 130);
-					rounded(x0, y0, x1, y1, 1.5, minimap_tint(c, 70), 215);
+					const uint32_t base = minimap_tint(c, 70);
+					const double bw_ = std::max(1.0, x1 - x0), bh_ = std::max(1.0, y1 - y0);
+					rounded_shaded(x0, y0, x1, y1, 1.5, base, 215, [&](double px, double py, uint32_t& pc, int&) {
+						double t = ((px - x0) / bw_ + (py - y0) / bh_) / 2;  // 0 top left .. 1 bottom right
+						int k = (int)std::lround(28 - 56 * t);              // +28 lighter .. -28 darker (of 256)
+						if (py - y0 < 1.0) k += 26;                          // the lit top edge
+						pc = k >= 0 ? minimap_tint(base, k) : minimap_shade(base, 256 + k, 256);
+					});
 				}
 			}
 		}

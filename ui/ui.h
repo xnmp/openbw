@@ -5,6 +5,7 @@
 #include "native_window.h"
 #include "native_window_drawing.h"
 #include "native_sound.h"
+#include "music_player.h"
 #include "hud_font.h"
 #include "order_names.h"
 #include "timeline_markers.h"
@@ -732,6 +733,44 @@ struct ui_functions: ui_util_functions {
 	a_vector<std::chrono::high_resolution_clock::time_point> last_played_sound;
 
 	int global_volume = 50;
+
+	// Music: the race soundtracks of the players in the replay, shuffled (see ui/music.h),
+	// from Remastered's music/*.ogg when an install is found (the classic data files have
+	// none), so without one the viewer stays silent. It plays on while the replay is paused,
+	// as the game's menus do; the master volume (and mute) applies, and the setting turns it
+	// off on its own.
+	::music::player music_player;
+	bool music_enabled = true;
+	bool music_started = false;
+#ifdef OPENBW_REMASTERED
+	scr::casc_storage music_casc;
+#endif
+
+	void update_music() {
+#ifdef OPENBW_REMASTERED
+		if (!music_started && replay_st.end_frame > 0) {
+			music_started = true;
+			a_string dir = remastered_install_dir();
+			std::string error;
+			if (!dir.empty() && music_casc.open(dir.c_str(), error)) {
+				std::vector<::music::race> races;
+				for (int i = 0; i != 8; ++i) {
+					if (!st.players[i].initially_active) continue;
+					int r = (int)st.players[i].race;
+					if (r == 0) races.push_back(::music::race::zerg);
+					else if (r == 1) races.push_back(::music::race::terran);
+					else if (r == 2) races.push_back(::music::race::protoss);
+				}
+				music_player.start(races, [this](const std::string& name, std::vector<uint8_t>& out) {
+					return music_casc.read("music/" + name + ".ogg", out);
+				}, (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count());
+			} else if (!dir.empty()) {
+				ui::log("music: %s: %s\n", dir, error.c_str());
+			}
+		}
+#endif
+		music_player.update(music_enabled, global_volume);
+	}
 
 	struct sound_channel {
 		bool playing = false;
@@ -1585,15 +1624,15 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// ---- Minimap units ----
-	// Layers, bottom to top: resources and other neutrals; buildings (flat, in the player's
-	// colour, part transparent); ground units; air units (with a dark outline, so a flock reads over
+	// Layers, bottom to top: resources and other neutrals; buildings (flat, in the same colour
+	// as the player's units but part transparent); ground units; air units (with a dark outline, so a flock reads over
 	// ground units and terrain). Units are lighter than buildings, so the two read apart even
 	// in one colour. Minor units (mines, Interceptors, Scarabs, larvae, larva eggs) are a
 	// faint dot: a minefield or an Interceptor cloud shows as a haze rather than a wall of
 	// squares, and the Carrier stays the solid one. Workers mining at one of their own bases
 	// are dimmed (see minimap_worker_at_work), so the mineral lines don't compete with armies.
-	// Army clumps get a small badge with the icon of what they mostly are by cost (see
-	// minimap_army_clumps), so a stack of Mutalisks drawn on one spot still reads as Mutalisks.
+	// Concentrations of one unit type get its icon (see minimap_army_clumps), so a stack of
+	// Mutalisks drawn on one spot still reads as Mutalisks.
 	static uint32_t minimap_shade(uint32_t c, int num, int den) {  // scale towards black
 		return hud_rgba((c & 0xff) * num / den, (c >> 8 & 0xff) * num / den, (c >> 16 & 0xff) * num / den, 255);
 	}
@@ -1657,7 +1696,7 @@ struct ui_functions: ui_util_functions {
 				box(u, 2, 4, x0, y0, x1, y1);
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
-				else blend_fill(x0, y0, x1, y1, c, 150);  // the player's colour, over the terrain
+				else blend_fill(x0, y0, x1, y1, minimap_tint(c, 70), 130);  // the units' colour, see-through
 			}
 		}
 		// 2: minor units, faint; 3: ground units; 4: air units, outlined.
@@ -1686,15 +1725,15 @@ struct ui_functions: ui_util_functions {
 				}
 			}
 		}
-		// 5: clump badges, the biggest placed first. A badge that would overlap a bigger
-		// clump's is left out: at the minimap's scale the two read as one army.
-		auto clumps = minimap_army_clumps();
-		const int icon = std::max(12, std::min(20, w / 15));
+		// 5: army icons, the costliest placed first. A row that would overlap a costlier
+		// one is left out: at the minimap's scale the two read as one army.
+		const int icon = std::max(14, std::min(26, w / 11));
+		// Groups of one player closer than about an icon's width share a row.
+		auto clumps = minimap_army_clumps((int)(icon * 32 / std::max(sx, sy) * 0.8));
 		std::vector<minimap_clumps::badge> want;
 		for (auto& cl : clumps) {
-			int s = icon + (cl.c.supply_half >= 48 ? 2 : 0);  // 24 supply and up: a bit bigger
 			int n = (int)cl.c.types.size();
-			want.push_back({(int)(cl.c.x / 32.0 * sx), (int)(cl.c.y / 32.0 * sy), n * (s + 1) + 1, s + 2});
+			want.push_back({(int)(cl.c.x / 32.0 * sx), (int)(cl.c.y / 32.0 * sy), n * (icon + 1) + 1, icon + 2});
 		}
 		auto placed = minimap_clumps::place(want, w, h);
 		for (size_t i = 0; i != clumps.size(); ++i) {
@@ -1702,26 +1741,63 @@ struct ui_functions: ui_util_functions {
 			auto& cl = clumps[i];
 			uint32_t c = palette_rgba(img.player_minimap_colors.at(player_color(cl.owner)));
 			const int x0 = placed[i].x, y0 = placed[i].y, bw = want[i].w, bh = want[i].h, s = bh - 2;
-			// No plate: each unit's silhouette in a light version of the player's colour,
-			// most cost first, with a thin dark halo around its outline so it reads on any
-			// ground and over the units under it.
-			uint32_t dark = minimap_tint(c, 50), light = minimap_tint(c, 180);
+			// No plate: each unit's silhouette, most cost first, with a thin dark halo around
+			// its outline so it reads on any ground and over the units under it. Its shading
+			// runs from a dark shade through the player's colour to near white, so the
+			// unit's form shows rather than a flat patch of the player's colour.
+			uint32_t dark = minimap_shade(c, 1, 3), light = minimap_tint(c, 225);
+			static const int style = [] { const char* e = std::getenv("OPENBW_ICON_STYLE"); return e ? std::atoi(e) : 0; }();
 			for (size_t t = 0; t != cl.c.types.size(); ++t) {
 				const auto& m = minimap_icon_mask(cl.c.types[t], s);
 				const int ix = x0 + 1 + (int)t * (s + 1), iy = y0 + 1;
 				auto alpha_at = [&](int x, int y) { return x < 0 || y < 0 || x >= s || y >= s ? 0 : m[(size_t)y * s + x] >> 8; };
-				for (int y = -1; y <= s; ++y) for (int x = -1; x <= s; ++x) {
-					if (alpha_at(x, y) >= 128) continue;
-					int near = 0;
-					for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) near = std::max(near, alpha_at(x + dx, y + dy));
-					if (near >= 96) blend(ix + x, iy + y, hud_rgba(0, 0, 0, 255), 190);
+				// Distance (in pixels, up to 3) from the silhouette, for outlines.
+				auto ring_at = [&](int x, int y) {
+					if (alpha_at(x, y) >= 128) return 0;
+					for (int r = 1; r <= 3; ++r)
+						for (int dy = -r; dy <= r; ++dy) for (int dx = -r; dx <= r; ++dx)
+							if (std::max(std::abs(dx), std::abs(dy)) == r && alpha_at(x + dx, y + dy) >= 96) return r;
+					return 4;
+				};
+				if (style == 3) {
+					// A disc in the player's colour with a dark rim, the unit white inside it.
+					double cx = ix + s / 2.0 - 0.5, cy = iy + s / 2.0 - 0.5, R = s / 2.0 + 1.5;
+					for (int y = iy - 3; y <= iy + s + 2; ++y) for (int x = ix - 3; x <= ix + s + 2; ++x) {
+						double d = std::hypot(x - cx, y - cy);
+						if (d <= R - 1) blend(x, y, minimap_shade(c, 3, 4), 235);
+						else if (d <= R) blend(x, y, hud_rgba(0, 0, 0, 255), 220);
+					}
+				} else {
+					for (int y = -3; y <= s + 2; ++y) for (int x = -3; x <= s + 2; ++x) {
+						int r = ring_at(x, y);
+						if (style == 0 && r == 1) blend(ix + x, iy + y, hud_rgba(0, 0, 0, 255), 190);
+						if (style == 1) {  // player-colour line, then black
+							if (r == 1) blend(ix + x, iy + y, minimap_tint(c, 40), 255);
+							else if (r == 2) blend(ix + x, iy + y, hud_rgba(0, 0, 0, 255), 200);
+						}
+						if (style == 2) {  // white line, then black
+							if (r == 1) blend(ix + x, iy + y, hud_rgba(255, 255, 255, 255), 240);
+							else if (r == 2) blend(ix + x, iy + y, hud_rgba(0, 0, 0, 255), 200);
+						}
+					}
 				}
 				for (int y = 0; y != s; ++y) for (int x = 0; x != s; ++x) {
 					uint16_t v = m[(size_t)y * s + x];
 					int a = v >> 8, l = v & 0xff;
 					if (!a) continue;
-					auto mix = [&](int sh) { return ((dark >> sh & 0xff) * (255 - l) + (light >> sh & 0xff) * l) / 255 << sh; };
-					blend(ix + x, iy + y, mix(0) | mix(8) | mix(16) | 0xff000000u, std::min(255, a * 4 / 3));
+					uint32_t px;
+					if (style == 1 || style == 3) {  // white / grey silhouette
+						int g = 150 + l * 105 / 255;
+						px = hud_rgba(g, g, g, 255);
+					} else {
+						auto mix = [&](int sh) {
+							uint32_t lo = l < 128 ? dark : c, hi = l < 128 ? c : light;
+							int t2 = l < 128 ? l * 2 : (l - 128) * 2;
+							return ((lo >> sh & 0xff) * (255 - t2) + (hi >> sh & 0xff) * t2) / 255 << sh;
+						};
+						px = mix(0) | mix(8) | mix(16) | 0xff000000u;
+					}
+					blend(ix + x, iy + y, px, std::min(255, a * 4 / 3));
 				}
 			}
 		}
@@ -1815,23 +1891,25 @@ struct ui_functions: ui_util_functions {
 		return minimap_icon_masks.emplace(key, std::move(m)).first->second;
 	}
 
-	// Army clumps per player (see ui/minimap_clumps.h for the grouping): army that counts in
-	// the graphs, without minor units, hallucinations, workers or Overlords. Siege mode
-	// counts as the tank, so a half-sieged line keeps one label.
-	struct minimap_army_clump { int owner; minimap_clumps::clump c; };
-	a_vector<minimap_army_clump> minimap_army_clumps() const {
+	// Army icon rows per player (see ui/minimap_clumps.h): army that counts in the graphs,
+	// without minor units, hallucinations, workers or Overlords. Siege mode counts as the
+	// tank, so a half-sieged line keeps one icon. Costliest first.
+	struct minimap_army_clump { int owner; minimap_clumps::label c; };
+	a_vector<minimap_army_clump> minimap_army_clumps(int merge_distance) const {
 		a_vector<minimap_army_clump> out;
+		minimap_clumps::params params;
+		params.merge_distance = std::max(32, merge_distance);
 		for (int p = 0; p != 8; ++p) {
 			std::vector<minimap_clumps::point> pts;
 			for (const unit_t* u : ptr(st.player_units[p])) {
 				if (!unit_visble_on_minimap(u) || !minimap_clump_unit(u)) continue;
 				int type = (int)u->unit_type->id;
 				if (unit_is(u, UnitTypes::Terran_Siege_Tank_Siege_Mode)) type = (int)UnitTypes::Terran_Siege_Tank_Tank_Mode;
-				pts.push_back({u->sprite->position.x, u->sprite->position.y, type, unit_supply_half(u), unit_value(u)});
+				pts.push_back({u->sprite->position.x, u->sprite->position.y, type, unit_value(u)});
 			}
-			for (auto& c : minimap_clumps::find(pts)) out.push_back({p, c});
+			for (auto& c : minimap_clumps::find(pts, params)) out.push_back({p, c});
 		}
-		std::stable_sort(out.begin(), out.end(), [](const minimap_army_clump& a, const minimap_army_clump& b) { return a.c.supply_half > b.c.supply_half; });
+		std::stable_sort(out.begin(), out.end(), [](const minimap_army_clump& a, const minimap_army_clump& b) { return a.c.cost > b.c.cost; });
 		return out;
 	}
 
@@ -4809,8 +4887,8 @@ struct ui_functions: ui_util_functions {
 		const int pad = mini ? (ui_skin ? 16 : 10) : (ui_skin ? 20 : 14);
 		int w, h;
 		if (mini) {
-			w = std::max(400, std::min(viewport_w / 4, 540));
-			h = w * 2 / 3;
+			w = std::max(300, std::min(viewport_w / 5, 420));
+			h = w * 3 / 5;
 		} else {
 			w = std::max(320, std::min(viewport_w - 80, 1400));
 			h = std::max(240, std::min(window_height * 3 / 5, 700));
@@ -5292,6 +5370,7 @@ struct ui_functions: ui_util_functions {
 		}
 		add("auto_observer", "Auto observer", "o", true, std::make_pair(std::function<bool()>([this] { return auto_observer; }),
 			std::function<void()>([this] { toggle_auto_observer(); })));
+		add("music", "Music", "", true, flag(music_enabled));
 		add("muted", "Mute sound", "m", true, std::make_pair(std::function<bool()>([this] { return global_volume == 0; }),
 			std::function<void()>([this] { toggle_mute(); })));
 		{
@@ -5883,17 +5962,50 @@ struct ui_functions: ui_util_functions {
 		return is_paused ? "Play  (space)" : "Pause  (space)";
 	}
 
-	// ---- End of replay ----
-	// When playback reaches the end, a card in the middle of the view gives each player's
-	// result (see ui/replay_result.h) with "Watch Again" and "Exit Replay", as the game's own
-	// end-of-replay menu does. Esc or a seek back closes it; it shows again at the end.
-	bool end_card_dismissed = false;
-	std::unique_ptr<native_window_drawing::surface> end_card_surface;
-	rect end_card_rect;  // window pixels, while shown
-	enum { end_button_again, end_button_exit, end_button_count };
+	// ---- Modal cards: the end of the replay, and the game menu (F10) ----
+	// A card in the middle of the view with a title, a headline, a few lines (left text in a
+	// colour, right-aligned text in another) and a row of buttons, drawn like the other
+	// panels. Two use it:
+	// - End of replay: when playback reaches the end, each player's result (see
+	//   ui/replay_result.h) with "Watch Again" and "Exit Replay", as the game's own
+	//   end-of-replay menu does. Esc or a seek back closes it; it shows again at the end.
+	// - Game menu (F10): pauses the replay ("Game Paused") with "Return to Game", "Options"
+	//   (the settings menu, returning here when it closes) and "Exit Replay". F10 or Esc
+	//   returns to the game, paused or playing as it was.
+	struct modal_line { a_string left; wire_rgb left_rgb; a_string right; wire_rgb right_rgb; };
+	struct modal_card { a_string title, headline; a_vector<modal_line> lines; a_vector<a_string> buttons; };
+	enum class modal_kind { none, game_menu, end_of_replay };
+	enum { menu_button_return, menu_button_options, menu_button_exit };
+	enum { end_button_again, end_button_exit };
 
-	bool end_card_shown() const {
-		return draw_ui_elements && replay_st.end_frame > 0 && st.current_frame >= replay_st.end_frame && !end_card_dismissed;
+	bool end_card_dismissed = false;
+	bool game_menu_open = false;
+	bool paused_before_menu = false;
+	std::unique_ptr<native_window_drawing::surface> modal_surface;
+	rect modal_rect;  // window pixels, while shown
+
+	modal_kind active_modal() const {
+		if (show_settings_menu) return modal_kind::none;  // Options: the settings menu is on top
+		if (game_menu_open) return modal_kind::game_menu;
+		if (draw_ui_elements && replay_st.end_frame > 0 && st.current_frame >= replay_st.end_frame && !end_card_dismissed) return modal_kind::end_of_replay;
+		return modal_kind::none;
+	}
+	bool end_card_shown() const { return active_modal() == modal_kind::end_of_replay; }
+
+	void open_game_menu() {
+		if (game_menu_open) return;
+		game_menu_open = true;
+		paused_before_menu = is_paused;
+		is_paused = true;
+	}
+	void close_game_menu() {
+		if (!game_menu_open) return;
+		game_menu_open = false;
+		is_paused = paused_before_menu;
+	}
+	void exit_replay() {
+		if (exit_on_close) std::exit(0);
+		window_closed = true;
 	}
 
 	replay_result::result end_result() const {
@@ -5906,67 +6018,96 @@ struct ui_functions: ui_util_functions {
 		return replay_result::decide(in_game, state);
 	}
 
-	// The card's layout in its own pixels: size, and the two buttons.
-	struct end_card_layout { int w, h; rect buttons[end_button_count]; };
-	end_card_layout end_card_layout_of(int player_lines) const {
+	modal_card modal_content(modal_kind k) const {
+		modal_card c;
+		if (k == modal_kind::game_menu) {
+			c.title = "Game Paused";
+			c.headline = format_game_time(std::min(st.current_frame, replay_st.end_frame)) + " / " + format_game_time(replay_st.end_frame);
+			c.buttons = {"Return to Game", "Options", "Exit Replay"};
+		} else if (k == modal_kind::end_of_replay) {
+			auto res = end_result();
+			c.title = "End of Replay";
+			if (res.winners.size() == 1) c.headline = player_label(res.winners[0]) + " is victorious";
+			else if (res.winners.size() > 1) c.headline = "Draw";
+			else c.headline = "No result: the game was still on";
+			c.headline += "  (" + format_game_time(replay_st.end_frame) + ")";
+			for (int i = 0; i != 8; ++i) {
+				auto o = res.players[i];
+				if (o == replay_result::outcome::absent) continue;
+				a_string name = player_label(i);
+				if (name.size() > 20) name = name.substr(0, 20);
+				bool won = o == replay_result::outcome::victorious;
+				c.lines.push_back({name, player_rgb(i), replay_result::label(o), won ? wire_rgb{140, 230, 120} : wire_rgb{200, 200, 200}});
+			}
+			c.buttons = {"Watch Again", "Exit Replay"};
+		}
+		return c;
+	}
+
+	// The card's size and its buttons, in its own pixels.
+	struct modal_layout { int w = 0, h = 0; a_vector<rect> buttons; };
+	modal_layout modal_layout_of(const modal_card& c) const {
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = panel_pad() + 4;
-		const int bw = 13 * cw, bh = ch + 12, gap = 12;
-		end_card_layout l;
-		l.w = std::max(2 * bw + gap, 36 * cw) + 2 * pad;
-		int y = pad + ch * 2 + ch / 2 + player_lines * (ch + 2) + ch + ch / 2;
+		const int bh = ch + 12, gap = 12;
+		int bw = 0;
+		for (auto& b : c.buttons) bw = std::max(bw, ((int)b.size() + 3) * cw);
+		const int n = (int)c.buttons.size(), row = n * bw + std::max(0, n - 1) * gap;
+		int text_w = std::max((int)c.title.size(), (int)c.headline.size()) * cw;
+		for (auto& l : c.lines) text_w = std::max(text_w, (int)(l.left.size() + l.right.size() + 4) * cw);
+		modal_layout l;
+		l.w = std::max({row, text_w, 30 * cw}) + 2 * pad;
+		int y = pad + ch * 2 + ch / 2 + (int)c.lines.size() * (ch + 2) + (c.lines.empty() ? 0 : ch / 2) + ch;
 		l.h = y + bh + pad;
-		int bx = (l.w - (2 * bw + gap)) / 2;
-		l.buttons[end_button_again] = rect{{bx, y}, {bx + bw, y + bh}};
-		l.buttons[end_button_exit] = rect{{bx + bw + gap, y}, {bx + 2 * bw + gap, y + bh}};
+		int bx = (l.w - row) / 2;
+		for (int i = 0; i != n; ++i) l.buttons.push_back(rect{{bx + i * (bw + gap), y}, {bx + i * (bw + gap) + bw, y + bh}});
 		return l;
 	}
 
-	int end_card_players() const {
-		auto r = end_result();
-		int n = 0;
-		for (auto o : r.players) n += o != replay_result::outcome::absent;
-		return n;
-	}
-
-	int end_button_at(int wx, int wy) const {
-		if (!end_card_shown() || end_card_rect.to.x <= end_card_rect.from.x) return -1;
-		auto l = end_card_layout_of(end_card_players());
-		for (int b = 0; b != end_button_count; ++b) {
+	int modal_button_at(int wx, int wy) const {
+		auto k = active_modal();
+		if (k == modal_kind::none || modal_rect.to.x <= modal_rect.from.x) return -1;
+		auto l = modal_layout_of(modal_content(k));
+		for (size_t b = 0; b != l.buttons.size(); ++b) {
 			rect r = l.buttons[b];
-			if (rect_contains(rect{r.from + end_card_rect.from, r.to + end_card_rect.from}, wx, wy)) return b;
+			if (rect_contains(rect{r.from + modal_rect.from, r.to + modal_rect.from}, wx, wy)) return (int)b;
 		}
 		return -1;
 	}
 
-	// Mouse down (window pixels): a click on the card is consumed.
-	bool end_card_click(int wx, int wy) {
-		if (!end_card_shown() || !rect_contains(end_card_rect, wx, wy)) return false;
-		int b = end_button_at(wx, wy);
+	// Mouse down (window pixels): a click on the card is consumed; while the game menu is
+	// open, any click is (the game waits on the menu).
+	bool modal_click(int wx, int wy) {
+		auto k = active_modal();
+		if (k == modal_kind::none) return false;
+		int b = modal_button_at(wx, wy);
+		if (k == modal_kind::game_menu) {
+			if (b == menu_button_return) close_game_menu();
+			else if (b == menu_button_options) show_settings_menu = true;
+			else if (b == menu_button_exit) exit_replay();
+			return true;
+		}
+		if (!rect_contains(modal_rect, wx, wy)) return false;
 		if (b == end_button_again) {
 			replay_frame = 0;
 			is_paused = false;
-		} else if (b == end_button_exit) {
-			if (exit_on_close) std::exit(0);
-			window_closed = true;
-		}
+		} else if (b == end_button_exit) exit_replay();
 		return true;
 	}
 
-	void draw_end_card() {
+	void draw_modal() {
 		if (st.current_frame < replay_st.end_frame) end_card_dismissed = false;  // seeked back
-		end_card_rect = rect{};
-		if (!end_card_shown()) return;
+		modal_rect = rect{};
+		auto k = active_modal();
+		if (k == modal_kind::none) return;
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = panel_pad() + 4;
-		auto res = end_result();
-		int lines = 0;
-		for (auto o : res.players) lines += o != replay_result::outcome::absent;
-		auto l = end_card_layout_of(lines);
-		if (!end_card_surface || end_card_surface->w != l.w || end_card_surface->h != l.h) {
-			end_card_surface = native_window_drawing::create_rgba_surface(l.w, l.h);
-			end_card_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		auto c = modal_content(k);
+		auto l = modal_layout_of(c);
+		if (!modal_surface || modal_surface->w != l.w || modal_surface->h != l.h) {
+			modal_surface = native_window_drawing::create_rgba_surface(l.w, l.h);
+			modal_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
 		}
-		uint32_t* buf = (uint32_t*)end_card_surface->lock();
-		size_t pitch = end_card_surface->pitch / 4;
+		uint32_t* buf = (uint32_t*)modal_surface->lock();
+		size_t pitch = modal_surface->pitch / 4;
 		const int w = l.w, h = l.h;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
@@ -5978,44 +6119,32 @@ struct ui_functions: ui_util_functions {
 			hud_text(buf, pitch, w, h, (w - (int)text.size() * cw) / 2, y, text.c_str(), r, g, b);
 		};
 		int y = pad;
-		centred(y, "End of Replay", 248, 240, 170);
+		centred(y, c.title, 248, 240, 170);
 		y += ch + ch / 2;
-		a_string headline;
-		if (res.winners.size() == 1) headline = player_label(res.winners[0]) + " is victorious";
-		else if (res.winners.size() > 1) headline = "Draw";
-		else headline = "No result: the game was still on";
-		centred(y, headline + "  (" + format_game_time(replay_st.end_frame) + ")", 236, 236, 236);
+		centred(y, c.headline, 236, 236, 236);
 		y += ch * 2;
-		// One line per player: name in their colour, result on the right.
 		const int lx = pad + cw, rx = w - pad - cw;
-		for (int i = 0; i != 8; ++i) {
-			auto o = res.players[i];
-			if (o == replay_result::outcome::absent) continue;
-			auto c = player_rgb(i);
-			a_string name = player_label(i);
-			if (name.size() > 20) name = name.substr(0, 20);
-			hud_text(buf, pitch, w, h, lx, y, name.c_str(), c.r, c.g, c.b);
-			a_string what = replay_result::label(o);
-			bool won = o == replay_result::outcome::victorious;
-			hud_text(buf, pitch, w, h, rx - (int)what.size() * cw, y, what.c_str(), won ? 140 : 200, won ? 230 : 200, won ? 120 : 200);
+		for (auto& line : c.lines) {
+			hud_text(buf, pitch, w, h, lx, y, line.left.c_str(), line.left_rgb.r, line.left_rgb.g, line.left_rgb.b);
+			hud_text(buf, pitch, w, h, rx - (int)line.right.size() * cw, y, line.right.c_str(), line.right_rgb.r, line.right_rgb.g, line.right_rgb.b);
 			y += ch + 2;
 		}
-		int mx = -1, my = -1;
-		if (wnd.has_mouse_focus()) wnd.get_cursor_pos(&mx, &my);
 		// Window position: centred in the view, a little above the middle.
 		int ox = viewport_x + (viewport_w - w) / 2, oy = std::max(0, (window_surface->h - h) * 2 / 5);
-		end_card_rect = rect{{ox, oy}, {ox + w, oy + h}};
-		int hovered = end_button_at(mx, my);
-		static const char* labels[end_button_count] = {"Watch Again", "Exit Replay"};
-		for (int b = 0; b != end_button_count; ++b) {
+		modal_rect = rect{{ox, oy}, {ox + w, oy + h}};
+		int mx = -1, my = -1;
+		if (wnd.has_mouse_focus()) wnd.get_cursor_pos(&mx, &my);
+		int hovered = modal_button_at(mx, my);
+		for (size_t b = 0; b != l.buttons.size(); ++b) {
 			const rect& r = l.buttons[b];
-			draw_replay_button(buf, pitch, w, h, r, hovered == b, false, true);
-			a_string t = labels[b];
+			bool hov = hovered == (int)b;
+			draw_replay_button(buf, pitch, w, h, r, hov, false, true);
+			const a_string& t = c.buttons[b];
 			int tx = r.from.x + (r.to.x - r.from.x - (int)t.size() * cw) / 2, ty = r.from.y + (r.to.y - r.from.y - ch) / 2;
-			hud_text(buf, pitch, w, h, tx, ty, t.c_str(), hovered == b ? 255 : 236, hovered == b ? 250 : 220, hovered == b ? 200 : 150);
+			hud_text(buf, pitch, w, h, tx, ty, t.c_str(), hov ? 255 : 236, hov ? 250 : 220, hov ? 200 : 150);
 		}
-		end_card_surface->unlock();
-		end_card_surface->blit(&*window_surface, ox, oy);
+		modal_surface->unlock();
+		modal_surface->blit(&*window_surface, ox, oy);
 	}
 
 	void draw_replay_bar() {
@@ -6317,6 +6446,7 @@ struct ui_functions: ui_util_functions {
 	void update() {
 		auto now = clock.now();
 		update_cursor(now);
+		update_music();
 
 		if (now - last_fps >= std::chrono::seconds(1)) {
 			//ui::log("draw fps: %g\n", fps_counter / std::chrono::duration_cast<std::chrono::duration<double, std::ratio<1, 1>>>(now - last_fps).count());
@@ -6437,7 +6567,7 @@ struct ui_functions: ui_util_functions {
 					continue;
 				}
 				if (e.type == native_window::event_t::type_mouse_button_down && settings_menu_click(e.mouse_x, e.mouse_y)) continue;
-				if (e.type == native_window::event_t::type_mouse_button_down && e.button == 1 && end_card_click(e.mouse_x, e.mouse_y)) continue;
+				if (e.type == native_window::event_t::type_mouse_button_down && modal_click(e.mouse_x, e.mouse_y)) continue;
 				if (e.type == native_window::event_t::type_mouse_button_down && e.button == 1 && replay_controls_click(e.mouse_x, e.mouse_y)) continue;
 				if (e.type == native_window::event_t::type_mouse_button_up && e.button == 1 && replay_button_held >= 0) {
 					replay_button_held = -1;
@@ -6543,7 +6673,12 @@ struct ui_functions: ui_util_functions {
 						else show_graphs = !show_graphs;
 					}
 					if (e.sym == 27 && show_settings_menu) show_settings_menu = false;  // Esc: menu first
+					else if (e.sym == 27 && game_menu_open) close_game_menu();
 					else if (e.sym == 27 && end_card_shown()) end_card_dismissed = true;
+					if (e.sym == 0x40000043) {  // F10: the game menu
+						if (game_menu_open) close_game_menu();
+						else open_game_menu();
+					}
 					else if (e.sym == 27 && graph_minimized && graph_expanded) graph_expanded = false;
 					else if (e.sym == 27 && show_graphs && !graph_minimized) show_graphs = false;
 					if (e.sym == '/' && (wnd.get_key_state(225) || wnd.get_key_state(229))) show_settings_menu = !show_settings_menu;  // '?'
@@ -6785,7 +6920,7 @@ struct ui_functions: ui_util_functions {
 				panel_surface->blit(&*window_surface, px, py);
 				draw_panel_tip();
 			}
-			draw_end_card();
+			draw_modal();
 			if (show_settings_menu) draw_settings_menu();
 			save_settings_if_changed();
 			wnd.update_surface();

@@ -2,7 +2,9 @@
 // Build and run: cmake --build build --target openbw-minimap-clumps-test && ./build/openbw-minimap-clumps-test
 #include "minimap_clumps.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 using minimap_clumps::point;
 using minimap_clumps::badge;
@@ -13,123 +15,183 @@ static int failures = 0;
 enum { zergling = 37, mutalisk = 43, hydralisk = 38, marine = 0, medic = 34, tank = 5 };
 
 // `n` units of a type in a row from (x, y), `step` pixels apart.
-static void add(std::vector<point>& v, int n, int type, int supply_half, int value, int x, int y, int step = 8) {
-	for (int i = 0; i != n; ++i) v.push_back({x + i * step, y, type, supply_half, value});
+static void add(std::vector<point>& v, int n, int type, int value, int x, int y, int step = 8) {
+	for (int i = 0; i != n; ++i) v.push_back({x + i * step, y, type, value});
+}
+// `n` units of a type evenly on a circle of radius r (pixels) around (x, y).
+static void ring(std::vector<point>& v, int n, int type, int value, int x, int y, double r) {
+	for (int i = 0; i != n; ++i) {
+		double t = 6.283185307 * i / n;
+		v.push_back({x + (int)std::lround(r * std::cos(t)), y + (int)std::lround(r * std::sin(t)), type, value});
+	}
 }
 
+// The scenarios below are written for a 500 minerals + gas threshold; the default's own
+// value is checked first.
+static const minimap_clumps::params P = [] { minimap_clumps::params p; p.min_cost = 500; return p; }();
+
 int main() {
-	{  // nothing, or too little army: no clumps
-		CHECK(minimap_clumps::find({}).empty());
-		std::vector<point> v;
-		add(v, 3, mutalisk, 4, 200, 1000, 1000);  // 6 supply
-		CHECK(minimap_clumps::find(v).empty());
+	{  // the default threshold: 20 Zerglings (500) are too few for an icon, 40 bunched are enough
+		std::vector<point> few, enough;
+		add(few, 20, zergling, 25, 1000, 1000, 4);
+		add(enough, 40, zergling, 25, 1000, 1000, 4);
+		CHECK(minimap_clumps::find(few).empty());
+		CHECK(minimap_clumps::find(enough).size() == 1);
 	}
-	{  // a stack of Mutalisks on one spot is a Mutalisk clump
+
+	{  // nothing, or too little of a type: no icons
+		CHECK(minimap_clumps::find({}, P).empty());
 		std::vector<point> v;
-		add(v, 11, mutalisk, 4, 200, 1000, 1000, 0);
-		auto c = minimap_clumps::find(v);
-		CHECK(c.size() == 1);
-		if (c.size() == 1) {
-			CHECK(c[0].types == std::vector<int>{mutalisk});
-			CHECK(c[0].units == 11);
-			CHECK(c[0].x == 1000 && c[0].y == 1000);
-			CHECK(c[0].radius == 0);
+		add(v, 2, mutalisk, 200, 1000, 1000);  // 400
+		add(v, 12, zergling, 25, 1000, 1010);  // 300
+		CHECK(minimap_clumps::find(v, P).empty());
+	}
+	{  // a stack of Mutalisks on one spot is a Mutalisk icon at the stack
+		std::vector<point> v;
+		add(v, 11, mutalisk, 200, 1000, 1000, 0);
+		auto g = minimap_clumps::find_groups(v, P);
+		CHECK(g.size() == 1);
+		if (g.size() == 1) CHECK(g[0].type == mutalisk && g[0].cost == 2200 && g[0].units == 11 && g[0].radius == 0);
+		auto l = minimap_clumps::find(v, P);
+		CHECK(l.size() == 1);
+		if (l.size() == 1) CHECK(l[0].types == std::vector<int>{mutalisk} && l[0].x == 1000 && l[0].y == 1000);
+	}
+	{  // types are judged on their own cost, not the mix: 8 Mutalisks with 12 Zerglings
+	   // show the Mutalisk only, though there are more Zerglings
+		std::vector<point> v;
+		add(v, 12, zergling, 25, 1000, 1000);
+		add(v, 8, mutalisk, 200, 1000, 1010);
+		auto l = minimap_clumps::find(v, P);
+		CHECK(l.size() == 1);
+		if (l.size() == 1) CHECK(l[0].types == std::vector<int>{mutalisk});
+	}
+	{  // 20 Zerglings under 8 Mutalisks: both earn icons, sharing one row, Mutalisk first
+		std::vector<point> v;
+		add(v, 20, zergling, 25, 1000, 1000);
+		add(v, 8, mutalisk, 200, 1000, 1010);
+		auto l = minimap_clumps::find(v, P);
+		CHECK(l.size() == 1);
+		if (l.size() == 1) CHECK((l[0].types == std::vector<int>{mutalisk, zergling}));
+	}
+	{  // the same forces far apart are two rows, the costlier first
+		std::vector<point> v;
+		add(v, 20, zergling, 25, 3000, 3000);
+		add(v, 8, mutalisk, 200, 500, 500);
+		auto l = minimap_clumps::find(v, P);
+		CHECK(l.size() == 2);
+		if (l.size() == 2) {
+			CHECK(l[0].types == std::vector<int>{mutalisk} && l[0].x < 1000);
+			CHECK(l[1].types == std::vector<int>{zergling} && l[1].x > 2500);
 		}
 	}
-	{  // the order goes by cost, not head count: 6 Zerglings beside 4 Mutalisks and 3
-	   // Hydralisks lead with the Mutalisk; the Zerglings (3 supply, 150 of 1325) aren't named
-		std::vector<point> v;
-		add(v, 6, zergling, 1, 25, 1000, 1000);
-		add(v, 4, mutalisk, 4, 200, 1000, 1010);
-		add(v, 3, hydralisk, 2, 125, 1000, 1020);
-		auto c = minimap_clumps::find(v);
-		CHECK(c.size() == 1);
-		if (c.size() == 1) CHECK((c[0].types == std::vector<int>{mutalisk, hydralisk}));
+	{  // enough cost but thinly scattered: no icon. The same units bunched: an icon.
+		std::vector<point> thin, bunched;
+		ring(thin, 24, zergling, 25, 2000, 2000, 5.5 * 32);  // 600 over ~95 square tiles
+		ring(bunched, 24, zergling, 25, 2000, 2000, 2 * 32);
+		CHECK(minimap_clumps::find(thin, P).empty());
+		CHECK(minimap_clumps::find(bunched, P).size() == 1);
 	}
-	{  // 20 Zerglings with 8 Mutalisks show both, though the Zerglings are only 500 of 2100:
-	   // 10 supply is an army of its own
+	{  // density uses a minimum spread, so a tiny force stacked on one pixel isn't "infinitely
+	   // dense": it still needs the cost
 		std::vector<point> v;
-		add(v, 20, zergling, 1, 25, 1000, 1000);
-		add(v, 8, mutalisk, 4, 200, 1000, 1010);
-		auto c = minimap_clumps::find(v);
-		CHECK(c.size() == 1);
-		if (c.size() == 1) CHECK((c[0].types == std::vector<int>{mutalisk, zergling}));
+		add(v, 2, mutalisk, 200, 1000, 1000, 0);
+		CHECK(minimap_clumps::find(v, P).empty());
+		minimap_clumps::params p = P;
+		p.min_cost = 300;
+		auto g = minimap_clumps::find_groups(v, p);
+		CHECK(g.size() == 1);
+		if (g.size() == 1) CHECK(std::abs(g[0].density - 400 / (3.14159265 * 4)) < 0.01);
 	}
-	{  // a token extra type isn't named; at most max_types are
+	{  // at most max_types icons in one row; the rest start their own row
 		std::vector<point> v;
-		add(v, 12, marine, 2, 50, 1000, 1000);
-		add(v, 1, medic, 2, 75, 1000, 1010);
-		auto c = minimap_clumps::find(v);
-		CHECK(c.size() == 1);
-		if (c.size() == 1) CHECK(c[0].types == std::vector<int>{marine});
-		std::vector<point> w;
-		for (int t = 0; t != 5; ++t) add(w, 8, 100 + t, 2, 100, 1000, 1000 + 10 * t);
-		c = minimap_clumps::find(w);
-		CHECK(c.size() == 1);
-		if (c.size() == 1) CHECK((c[0].types == std::vector<int>{100, 101, 102}));  // equal: lower types first
+		for (int t = 0; t != 5; ++t) add(v, 10, 100 + t, 100 - t, 1000, 1000 + 4 * t);
+		auto l = minimap_clumps::find(v, P);
+		CHECK(l.size() == 2);
+		if (l.size() == 2) {
+			CHECK((l[0].types == std::vector<int>{100, 101, 102}));
+			CHECK((l[1].types == std::vector<int>{103, 104}));
+		}
 	}
-	{  // ties are broken the same way whatever the input order
+	{  // equal costs are ordered by type, whatever the input order
 		std::vector<point> a, b;
-		add(a, 8, hydralisk, 2, 125, 1000, 1000);
-		add(a, 10, zergling, 1, 100, 1000, 1010);  // equal value 1000 v 1000, hydras have more supply
-		add(b, 10, zergling, 1, 100, 1000, 1010);
-		add(b, 8, hydralisk, 2, 125, 1000, 1000);
-		auto ca = minimap_clumps::find(a), cb = minimap_clumps::find(b);
-		CHECK(ca.size() == 1 && cb.size() == 1);
-		if (ca.size() == 1 && cb.size() == 1) {
-			CHECK((ca[0].types == std::vector<int>{hydralisk, zergling}));
-			CHECK(ca[0].types == cb[0].types);
+		add(a, 8, hydralisk, 125, 1000, 1000);
+		add(a, 40, zergling, 25, 1000, 1010, 2);
+		add(b, 40, zergling, 25, 1000, 1010, 2);
+		add(b, 8, hydralisk, 125, 1000, 1000);
+		auto la = minimap_clumps::find(a, P), lb = minimap_clumps::find(b, P);
+		CHECK(la.size() == 1 && lb.size() == 1);
+		if (la.size() == 1 && lb.size() == 1) {
+			CHECK((la[0].types == std::vector<int>{zergling, hydralisk}));  // 37 < 38
+			CHECK(la[0].types == lb[0].types);
 		}
 	}
-	{  // two armies far apart are two clumps, the bigger first
+	{  // a long column is split: icons sit on its two dense ends, not in the empty middle,
+	   // and the thin line between them earns none
 		std::vector<point> v;
-		add(v, 10, marine, 2, 50, 500, 500);
-		add(v, 20, zergling, 1, 25, 3000, 3000);
-		auto c = minimap_clumps::find(v);
-		CHECK(c.size() == 2);
-		if (c.size() == 2) {
-			CHECK(c[0].types.front() == marine);  // 20 supply_half v 20: stable, input order
-			CHECK(c[1].types.front() == zergling);
+		add(v, 12, marine, 50, 0, 2000, 0);
+		add(v, 20, marine, 50, 100, 2000, 150);
+		add(v, 12, marine, 50, 3000, 2000, 0);
+		auto l = minimap_clumps::find(v, P);
+		bool left = false, right = false, middle = false;
+		for (auto& k : l) {
+			if (k.x < 800) left = true;
+			else if (k.x > 2200) right = true;
+			else middle = true;
 		}
-		add(v, 2, marine, 2, 50, 500, 520);
-		c = minimap_clumps::find(v);
-		CHECK(c.size() == 2 && c[0].types.front() == marine && c[0].supply_half == 24);
+		CHECK(left && right && !middle);
 	}
-	{  // a long column (linked unit to unit) is split, so labels sit on its two ends, not
-	   // in the empty middle
+	{  // a compact ball is one icon, however many units
 		std::vector<point> v;
-		add(v, 12, marine, 2, 50, 0, 2000, 0);       // 12 Marines at x = 0
-		add(v, 20, marine, 2, 50, 100, 2000, 150);   // a thin line of stragglers to x = 2950
-		add(v, 12, marine, 2, 50, 3000, 2000, 0);    // 12 Marines at x = 3000
-		auto c = minimap_clumps::find(v);
-		CHECK(c.size() >= 2);
-		bool near_left = false, near_right = false;
-		for (auto& k : c) {
-			CHECK(k.radius <= minimap_clumps::params{}.max_radius);
-			if (k.x < 800) near_left = true;
-			if (k.x > 2200) near_right = true;
-		}
-		CHECK(near_left && near_right);
+		for (int i = 0; i != 100; ++i) v.push_back({1000 + (i % 10) * 12, 1000 + (i / 10) * 12, zergling, 25});
+		CHECK(minimap_clumps::find(v, P).size() == 1);
+		std::vector<point> w;
+		add(w, 2000, zergling, 25, 64, 64, 0);
+		auto g = minimap_clumps::find_groups(w, P);
+		CHECK(g.size() == 1 && g[0].units == 2000 && g[0].cost == 50000);
 	}
-	{  // a compact ball is not split, however many units
+	{  // a big blob split into parts by the diameter rule is still one icon
 		std::vector<point> v;
-		for (int i = 0; i != 100; ++i) v.push_back({1000 + (i % 10) * 12, 1000 + (i / 10) * 12, zergling, 1, 25});
-		CHECK(minimap_clumps::find(v).size() == 1);
+		for (int i = 0; i != 60; ++i) v.push_back({2000 + (i % 8) * 40, 2000 + (i / 8) * 40, zergling, 25});  // 9 x 9 tiles
+		minimap_clumps::params p = P;
+		p.merge_distance = 10 * 32;  // the viewer uses about an icon's width
+		auto l = minimap_clumps::find(v, p);
+		CHECK(l.size() == 1);
+		if (l.size() == 1) CHECK(l[0].types == std::vector<int>{zergling} && l[0].cost == 1500);
 	}
-	{  // malformed input: negative supply/value count as zero, doesn't crash
+	{  // groups never exceed the maximum diameter: a wide force is cut into parts that fit,
+	   // each earning its own icon if it qualifies
 		std::vector<point> v;
-		add(v, 10, marine, -4, -50, 0, 0);
-		CHECK(minimap_clumps::find(v).empty());
-		add(v, 8, marine, 2, -50, 0, 0);
-		auto c = minimap_clumps::find(v);
-		CHECK(c.size() == 1);
-		if (c.size() == 1) CHECK(c[0].types.front() == marine);
+		for (int i = 0; i != 200; ++i) v.push_back({1000 + (i % 25) * 40, 1000 + (i / 25) * 40, marine, 50});  // 31 x 10 tiles
+		auto g = minimap_clumps::find_groups(v, P);
+		CHECK(g.size() >= 4);
+		for (auto& k : g) CHECK(k.diameter <= minimap_clumps::params{}.max_diameter);
+		std::vector<point> fits;
+		ring(fits, 24, zergling, 25, 2000, 2000, 4.5 * 32);  // 9 tiles across: one group
+		minimap_clumps::params p = P;
+		p.min_density = 0;
+		auto f = minimap_clumps::find_groups(fits, p);
+		CHECK(f.size() == 1);
+		if (f.size() == 1) CHECK(f[0].cost == 600 && f[0].diameter <= 9 * 32 + 1);
 	}
-	{  // many units in one spot (all splits degenerate) still make one clump
+	{  // a force whose parts are each too small after the cut shows nothing: the cap wins
 		std::vector<point> v;
-		add(v, 2000, zergling, 1, 25, 64, 64, 0);
-		auto c = minimap_clumps::find(v);
-		CHECK(c.size() == 1 && c[0].units == 2000);
+		add(v, 12, marine, 50, 0, 0, 0);
+		add(v, 12, marine, 50, 15 * 32, 0, 0);  // 15 tiles apart, linked by nothing: two groups
+		CHECK(minimap_clumps::find(v, P).size() == 2);
+		std::vector<point> w;
+		add(w, 6, marine, 50, 0, 0, 0);
+		add(w, 6, marine, 50, 11 * 32, 0, 0);
+		add(w, 1, marine, 50, 5 * 32, 0, 0);  // links the two (within 6 tiles) but spans 11
+		CHECK(minimap_clumps::find(w, P).empty());
+	}
+	{  // malformed values count as zero; huge ones don't overflow
+		std::vector<point> v;
+		add(v, 10, marine, -500, 0, 0);
+		CHECK(minimap_clumps::find(v, P).empty());
+		std::vector<point> w;
+		add(w, 1000, marine, 1 << 30, 0, 0, 0);
+		auto l = minimap_clumps::find(w, P);
+		CHECK(l.size() == 1 && l[0].cost == 1000LL * (1 << 30));
 	}
 
 	// --- badge placement ---

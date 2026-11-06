@@ -65,12 +65,12 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   remastered tiles with those graphics on). Buildings are flat and part transparent in the
   player's colour, units solid and lighter on top, air army outlined in black. Spider
   Mines, Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
-  12 tiles of one of their own bases are dimmed, so armies stand out. Each army clump gets
-  small icons of what it is made of by cost: up to three types, each with a quarter of the
-  clump's minerals + gas or 6 supply of its own (20 Zerglings with 8 Mutalisks show both).
-  Clumps are one player's army units linked within 6 tiles of each other (DBSCAN-style),
-  split by 2-means when spread wider than 6 tiles, shown from 8 supply; where two clumps'
-  icons would overlap, only the bigger one's are drawn. The grouping is in
+  12 tiles of one of their own bases are dimmed, so armies stand out. A concentration of one
+  unit type gets that type's icon: each type's units are grouped (linked within 6 tiles,
+  DBSCAN-style, and cut by 2-means until no group is wider than 10 tiles), and a group shows
+  when its cost reaches 1000 minerals + gas and its density 12 per square tile. Icons of one
+  player at about the same spot share a row (20 Zerglings under 8 Mutalisks: both, the
+  costlier first); where rows would overlap, only the costlier is drawn. The grouping is in
   `ui/minimap_clumps.h`.
 - **Order lines** (`l`: off, selected units, all units): a dotted line from each unit to its
   order's target and on through queued orders, coloured by kind (move green, attack red,
@@ -86,6 +86,11 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   losses in the battle; click it to jump to 5 s before. They are found by playing the whole
   replay once in the background at startup (a few seconds), so they appear shortly after
   the window opens.
+- **Game menu** (`F10`): pauses the replay with **Return to Game**, **Options** (the
+  settings menu) and **Exit Replay**; `F10` or `Esc` returns, playing or paused as before.
+- **Music**: the race soundtracks of the players in the replay, shuffled, from Remastered's
+  `music/*.ogg` when an install is found (the classic data files have none). The master
+  volume and mute apply; **Music** in the settings menu turns it off on its own.
 - **End of replay**: when playback reaches the end, a card gives each player's result
   (victorious, defeated, dropped; a player left standing after the others left is the
   winner) with **Watch Again** and **Exit Replay**. `Esc` closes it; it shows again at the
@@ -154,6 +159,7 @@ cmake --build build -j
 | --- | --- |
 | `?` | settings menu: a checkbox for every toggle below, plus a key summary |
 | `space` / `p` | pause |
+| `F10` | game menu (pauses; Options opens the settings menu) |
 | `=` / `-` (also `a` / `z`) | faster / slower: ×2 per press from 1/4× to 128×, with 1.5× between 1× and 2× |
 | `ctrl =` / `ctrl -` / `ctrl 0` | zoom in / out / reset to 1× (starts at 1.5×; the last zoom is remembered) |
 | mouse wheel | zoom around the cursor |

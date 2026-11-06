@@ -1,6 +1,7 @@
 #include "native_window.h"
 #include "native_window_drawing.h"
 #include "native_sound.h"
+#include "native_music.h"
 
 #include "common.h"
 #include "SDL.h"
@@ -628,3 +629,64 @@ std::unique_ptr<sound> load_wav(const void* data, size_t size) {
 #endif
 
 }
+
+namespace native_music {
+
+#ifndef OPENBW_NO_SDL_MIXER
+
+namespace {
+// SDL_mixer streams from the buffer, so it has to outlive the Mix_Music.
+std::vector<uint8_t> current_data;
+Mix_Music* current = nullptr;
+int current_volume = MIX_MAX_VOLUME;
+}
+
+bool available() { return true; }
+
+void stop() {
+	if (!current) return;
+	Mix_HaltMusic();
+	Mix_FreeMusic(current);
+	current = nullptr;
+	current_data.clear();
+}
+
+bool play(std::vector<uint8_t> data) {
+	if (!native_sound::initialized) native_sound::init();
+	stop();
+	current_data = std::move(data);
+	current = Mix_LoadMUS_RW(SDL_RWFromConstMem(current_data.data(), (int)current_data.size()), 1);
+	if (!current || Mix_PlayMusic(current, 1) != 0) {
+		if (current) Mix_FreeMusic(current);
+		current = nullptr;
+		current_data.clear();
+		return false;
+	}
+	Mix_VolumeMusic(current_volume);
+	return true;
+}
+
+bool is_playing() { return current && Mix_PlayingMusic() != 0; }
+
+void set_volume(int volume) {
+	current_volume = volume;
+	Mix_VolumeMusic(volume);
+}
+
+void set_paused(bool paused) {
+	if (paused) Mix_PauseMusic(); else Mix_ResumeMusic();
+}
+
+#else
+
+bool available() { return false; }
+bool play(std::vector<uint8_t>) { return false; }
+bool is_playing() { return false; }
+void stop() {}
+void set_volume(int) {}
+void set_paused(bool) {}
+
+#endif
+
+}
+

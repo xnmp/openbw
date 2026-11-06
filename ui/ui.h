@@ -1722,7 +1722,7 @@ struct ui_functions: ui_util_functions {
 			return palette_rgba(img.player_minimap_colors.at(player_color(u->owner)));
 		};
 		double x0, y0, x1, y1;
-		// 1: neutrals, and everything in the building style: buildings and workers at work.
+		// 1: neutrals, and everything in the building style: buildings, workers at work, Overlords.
 		const auto depots = minimap_depots();
 		std::array<a_vector<std::array<double, 4>>, 8> building_rects;
 		for (size_t i = 12; i != 0;) {
@@ -1730,7 +1730,7 @@ struct ui_functions: ui_util_functions {
 			for (unit_t* u : ptr(st.player_units[i])) {
 				if (!shown(u)) continue;
 				if (u->owner < 8 && !ut_building(u)) {
-					if (minimap_worker_at_work(u, depots)) {
+					if (minimap_building_style(u, depots)) {
 						box(u, 2, 3, x0, y0, x1, y1, minimap_worker_tile_scale);
 						building_rects[u->owner].push_back({x0, y0, x1, y1});
 					}
@@ -1765,7 +1765,7 @@ struct ui_functions: ui_util_functions {
 						else blend((int)cx, (int)cy, c, 110);
 						continue;
 					}
-					if (minimap_worker_at_work(u, depots)) continue;  // drawn with the buildings
+					if (minimap_building_style(u, depots)) continue;  // drawn with the buildings
 					box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale);
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
@@ -1883,6 +1883,11 @@ struct ui_functions: ui_util_functions {
 	// 12 tiles of one of its own depots, or one building or sent to build anywhere: ordinary
 	// economy, drawn like a small building. A worker that is fighting, scouting or long-distance
 	// mining (no depot of its own nearby) is not.
+	// Units drawn in the building style: workers at work, and Overlords (supply, like the
+	// Pylons and Supply Depots they stand in for).
+	bool minimap_building_style(const unit_t* u, const a_vector<std::pair<int, xy>>& depots) const {
+		return unit_is(u, UnitTypes::Zerg_Overlord) || minimap_worker_at_work(u, depots);
+	}
 	bool minimap_worker_at_work(const unit_t* u, const a_vector<std::pair<int, xy>>& depots) const {
 		if (!ut_worker(u)) return false;
 		switch (u->order_type->id) {

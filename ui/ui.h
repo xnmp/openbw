@@ -5700,7 +5700,7 @@ struct ui_functions: ui_util_functions {
 		static const char* const other_keys[][2] = {
 			{"space, p", "pause / play"},
 			{"= / -", "faster / slower"},
-			{"pgup / pgdn", "forward / back 10 s"},
+			{"pgdn / pgup", "forward / back 10 s"},
 			{"backspace", "back 5 s"},
 			{"ctrl = / - / 0", "zoom in / out / reset"},
 			{"wheel", "zoom at the cursor"},
@@ -6919,7 +6919,8 @@ struct ui_functions: ui_util_functions {
 					}
 					if (e.sym == 0x4000004B || e.sym == 0x4000004E) {  // SDLK_PAGEUP / SDLK_PAGEDOWN
 						int t = 10 * 1000 / 42;  // 10 game seconds
-						if (e.sym == 0x4000004B) replay_frame = std::min(replay_st.end_frame, replay_frame + t);
+						// Page Down goes forward and Page Up back, as a document scrolls.
+						if (e.sym == 0x4000004E) replay_frame = std::min(replay_st.end_frame, replay_frame + t);
 						else replay_frame = std::max(0, replay_frame - t);
 					}
 #endif

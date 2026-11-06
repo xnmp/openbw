@@ -183,7 +183,7 @@ cmake --build build -j
 | mouse wheel | zoom around the cursor |
 | arrows, or the mouse at the game view's edge | scroll (with the full graph panel open, `←` / `→` switch its tabs) |
 | `backspace` | rewind about 5 s |
-| `page up` / `page down` | skip forward / back 10 s |
+| `page down` / `page up` | skip forward / back 10 s |
 | click or drag the replay bar | seek |
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |

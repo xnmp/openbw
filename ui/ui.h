@@ -1731,7 +1731,7 @@ struct ui_functions: ui_util_functions {
 				if (!shown(u)) continue;
 				if (u->owner < 8 && !ut_building(u)) {
 					if (minimap_worker_at_work(u, depots)) {
-						box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale);
+						box(u, 2, 3, x0, y0, x1, y1, minimap_worker_tile_scale);
 						building_rects[u->owner].push_back({x0, y0, x1, y1});
 					}
 					continue;
@@ -1820,7 +1820,8 @@ struct ui_functions: ui_util_functions {
 	// Buildings (and workers mining at their base) are see-through so units read over them.
 	static constexpr int minimap_building_alpha = 150;
 	static constexpr double minimap_owned_scale = 1.2;  // players' buildings, over their footprint
-	static constexpr double minimap_unit_scale = 1.35;  // players' units (dots), over their footprint
+	static constexpr double minimap_unit_scale = 1.6;  // players' units (dots), over their footprint
+	static constexpr double minimap_worker_tile_scale = 1.35;  // workers drawn as tiles, smaller so bases don't bloat
 
 	// Coverage (0..1) of the pixel centred at (px, py) by a box with corners rounded to `rad`
 	// pixels, antialiased across its edge.

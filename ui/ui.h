@@ -1874,7 +1874,9 @@ struct ui_functions: ui_util_functions {
 		a_vector<std::pair<int, xy>> out;
 		for (int p = 0; p != 8; ++p) {
 			for (const unit_t* u : ptr(st.player_units[p])) {
-				if (ut_resource_depot(u) && u_completed(u)) out.push_back({p, u->sprite->position});
+				// A Hatchery morphing into a Lair (or a Lair into a Hive) is not 'completed' while
+				// it morphs, yet still takes the drones' minerals.
+				if (ut_resource_depot(u) && (u_completed(u) || unit_is_morphing_building(u))) out.push_back({p, u->sprite->position});
 			}
 		}
 		return out;

@@ -68,8 +68,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   Players' units and buildings are drawn 1.2x their footprint. Spider
   Mines, Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
   12 tiles of one of their own bases are drawn as small bevelled tiles like the buildings,
-  so armies stand out. Mineral fields and geysers more than 12 tiles from any base on the
-  minimap are slightly faint, so untaken bases recede. A concentration of one
+  so armies stand out. A concentration of one
   unit type gets a round badge with that type's icon (a pill for several types): each type's units are grouped (linked within 6 tiles,
   DBSCAN-style, and cut by 2-means until no group is wider than 10 tiles), and a group shows
   when its cost reaches 800 minerals + gas and its density 12 per square tile. Icons of one

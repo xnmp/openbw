@@ -1727,20 +1727,6 @@ struct ui_functions: ui_util_functions {
 			return palette_rgba(img.player_minimap_colors.at(player_color(u->owner)));
 		};
 		double x0, y0, x1, y1;
-		// Bases on the map as shown (a Nexus, Command Center or Hatchery, finished or not, that
-		// the minimap itself shows, so fog hides an expansion here too). Mineral fields away from
-		// all of them, and their geysers, are dimmed: untaken bases recede and taken ones stand out.
-		a_vector<xy> bases;
-		for (int p = 0; p != 8; ++p) {
-			for (unit_t* u : ptr(st.player_units[p])) if (ut_resource_depot(u) && shown(u)) bases.push_back(u->sprite->position);
-		}
-		auto near_base = [&](const unit_t* u) {
-			const int r = 12 * 32;
-			return std::any_of(bases.begin(), bases.end(), [&](xy b) {
-				xy v = b - u->sprite->position;
-				return v.x * v.x + v.y * v.y <= r * r;
-			});
-		};
 		// 1: neutrals and buildings.
 		for (size_t i = 12; i != 0;) {
 			--i;
@@ -1748,10 +1734,9 @@ struct ui_functions: ui_util_functions {
 				if (!shown(u) || !(ut_building(u) || u->owner >= 8)) continue;
 				box(u, 2, 4, x0, y0, x1, y1, u->owner >= 8 ? 1.0 : minimap_owned_scale);
 				uint32_t c = colour(u);
-				if (u->owner >= 8 && (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) && !near_base(u)) blend_fill(x0, y0, x1, y1, c, 185);  // slightly faint
-				else if (u->owner >= 8) fill(x0, y0, x1, y1, c);
+				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
 				else {
-					draw_minimap_bevel(x0, y0, x1, y1, minimap_tint(c, 70), blend);
+					draw_minimap_bevel(x0, y0, x1, y1, c, blend);
 				}
 			}
 		}
@@ -1772,12 +1757,12 @@ struct ui_functions: ui_util_functions {
 					}
 					box(u, 2, 3, x0, y0, x1, y1, minimap_owned_scale);
 					if (minimap_worker_at_work(u, depots)) {
-						draw_minimap_bevel(x0, y0, x1, y1, minimap_tint(c, 70), blend);  // as the buildings: part of the base
+						draw_minimap_bevel(x0, y0, x1, y1, c, blend);  // as the buildings: part of the base
 						continue;
 					}
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
-					disc(x0, y0, x1, y1, minimap_tint(c, 70), 255);
+					disc(x0, y0, x1, y1, c, 255);
 				}
 			}
 		}
@@ -1838,7 +1823,7 @@ struct ui_functions: ui_util_functions {
 		using minimap_bevel::part;
 		const double w = x1 - x0, h = y1 - y0, bw = minimap_bevel::width(w, h);
 		if (!(bw > 0)) return;
-		const uint32_t face_c = base, lit_c = minimap_tint(base, 120), shadow_c = minimap_shade(base, 110, 256);
+		const uint32_t face_c = base, lit_c = minimap_tint(base, 60), shadow_c = minimap_shade(base, 150, 256);  // the bevel keeps the hue
 		const uint32_t black = hud_rgba(0, 0, 0, 255);
 		const int face_a = minimap_building_alpha, edge_a = std::min(255, minimap_building_alpha + 70);
 		auto part_at = [&](double u, double v) { return minimap_bevel::at(u, v, w, h, bw); };

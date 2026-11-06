@@ -3109,11 +3109,25 @@ struct ui_functions: ui_util_functions {
 			hud_text(buf, pitch, w, h, x0, y, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
 			y += ch;
 		}
-		auto draw_number = [&](int x, int y, int n) {
+		// An upgrade level or count, as the game shows it: a bold white number with a black
+		// outline in the bottom-right corner of the icon art (inside its border), on a small
+		// dark plate so it reads over any icon.
+		auto draw_number = [&](int x, int y, int frame, int n) {
 			a_string s = std::to_string(n).c_str();
-			int tx = x + icon_w - text_w(s) - 1, ty = y + icon_h - ch + 1;
-			hud_text(buf, pitch, w, h, tx + 1, ty + 1, s.c_str(), 0, 0, 0);
+			int right = x + icon_w, bottom = y + icon_h;
+			if (frame >= 0 && (size_t)frame < cmdicons_grp.frames.size()) {
+				auto& f = cmdicons_grp.frames[frame];
+				right = x + (int)(f.offset.x + f.size.x) * scale;
+				bottom = y + (int)(f.offset.y + f.size.y) * scale;
+			}
+			int tw = text_w(s) + 1, tx = right - tw - 3 * scale, ty = bottom - ch - scale;
+			fill_rgba(buf, pitch, w, h, tx - 2, ty + 2, tw + 4, ch - 2, hud_rgba(0, 0, 0, 200));
+			for (int oy = -1; oy <= 1; ++oy) for (int ox = -1; ox <= 2; ++ox) {
+				if (ox == 0 || ox == 1) if (oy == 0) continue;
+				hud_text(buf, pitch, w, h, tx + ox, ty + oy, s.c_str(), 0, 0, 0);
+			}
 			hud_text(buf, pitch, w, h, tx, ty, s.c_str(), 255, 255, 255);
+			hud_text(buf, pitch, w, h, tx + 1, ty, s.c_str(), 255, 255, 255);  // bold
 		};
 		if (!ci.icons.empty()) {
 			y += gap;
@@ -3121,7 +3135,7 @@ struct ui_functions: ui_util_functions {
 				int x = x0 + (int)i * (icon_w + gap);
 				fill_rgba(buf, pitch, w, h, x, y, icon_w, icon_h, hud_rgba(0, 0, 0, 255));
 				draw_cmd_icon(buf, pitch, w, h, x, y, ci.icons[i].frame, scale);
-				if (ci.icons[i].number >= 0) draw_number(x, y, ci.icons[i].number);
+				if (ci.icons[i].number >= 0) draw_number(x, y, ci.icons[i].frame, ci.icons[i].number);
 			}
 			y += icon_h;
 		}
@@ -4152,6 +4166,210 @@ struct ui_functions: ui_util_functions {
 		return true;
 	}
 
+	// ---- Order lines ('l'): off, selected units, all units ----
+	// A dotted line from each unit to what its current order targets, then on through its
+	// queued (shift) orders, coloured by kind: move green, attack red, spells violet, build
+	// and repair cyan, gathering amber (selected units only: every worker would be noise).
+	// Builders also outline the footprint they are about to place. Buildings show a dotted
+	// line to their rally point, and an icon with a progress bar for what they are making.
+	// Drawn in window pixels over the game view.
+	enum { order_lines_off = 1, order_lines_selected = 2, order_lines_all = 3 };
+	int order_lines_mode = order_lines_off;
+	std::unique_ptr<native_window_drawing::surface> order_surface;
+
+	void cycle_order_lines() { order_lines_mode = order_lines_mode % 3 + 1; }
+
+	enum class order_kind { none, move, attack, spell, build, repair, gather };
+
+	static order_kind kind_of_order(const order_type_t* o) {
+		if (!o) return order_kind::none;
+		switch ((Orders)o->id) {
+		case Orders::Move: case Orders::Follow: case Orders::HealMove: case Orders::MoveUnload: case Orders::ReaverCarrierMove:
+		case Orders::EnterTransport: case Orders::PickupTransport: case Orders::PickupBunker: case Orders::EnterNydusCanal:
+		case Orders::RallyPointUnit: case Orders::RallyPointTile:
+			return order_kind::move;
+		case Orders::AttackDefault: case Orders::MoveToAttack: case Orders::AttackUnit: case Orders::AttackFixedRange:
+		case Orders::AttackTile: case Orders::AttackMove: case Orders::TowerAttack: case Orders::TurretAttack:
+		case Orders::CarrierAttack: case Orders::CarrierMoveToAttack: case Orders::CarrierFight: case Orders::ReaverAttack:
+		case Orders::ReaverMoveToAttack: case Orders::ReaverFight: case Orders::Patrol: case Orders::SuicideUnit:
+		case Orders::SuicideLocation: case Orders::AtkMoveEP: case Orders::HarassMove:
+			return order_kind::attack;
+		case Orders::FireYamatoGun: case Orders::MoveToFireYamatoGun: case Orders::CastLockdown: case Orders::CastDarkSwarm:
+		case Orders::CastParasite: case Orders::CastSpawnBroodlings: case Orders::CastEMPShockwave: case Orders::NukePaint:
+		case Orders::NukeUnit: case Orders::CastNuclearStrike: case Orders::PlaceMine: case Orders::CastRecall:
+		case Orders::CastScannerSweep: case Orders::CastDefensiveMatrix: case Orders::CastPsionicStorm: case Orders::CastIrradiate:
+		case Orders::CastPlague: case Orders::CastConsume: case Orders::CastEnsnare: case Orders::CastStasisField:
+		case Orders::CastHallucination: case Orders::CastRestoration: case Orders::CastDisruptionWeb: case Orders::CastMindControl:
+		case Orders::CastFeedback: case Orders::CastOpticalFlare: case Orders::CastMaelstrom: case Orders::CastInfestation:
+		case Orders::MoveToInfest:
+			return order_kind::spell;
+		case Orders::PlaceBuilding: case Orders::PlaceProtossBuilding: case Orders::DroneStartBuild: case Orders::DroneBuild:
+		case Orders::PlaceAddon: case Orders::BuildNydusExit: case Orders::ConstructingBuilding:
+			return order_kind::build;
+		case Orders::Repair: case Orders::MoveToRepair: case Orders::MedicHeal: case Orders::RechargeShieldsUnit:
+			return order_kind::repair;
+		case Orders::Harvest1: case Orders::Harvest2: case Orders::MoveToGas: case Orders::WaitForGas: case Orders::HarvestGas:
+		case Orders::ReturnGas: case Orders::MoveToMinerals: case Orders::WaitForMinerals: case Orders::MiningMinerals:
+		case Orders::ReturnMinerals:
+			return order_kind::gather;
+		default:
+			return order_kind::none;
+		}
+	}
+
+	static uint32_t order_kind_rgba(order_kind k) {
+		switch (k) {
+		case order_kind::move: return hud_rgba(90, 235, 90, 235);
+		case order_kind::attack: return hud_rgba(250, 70, 60, 235);
+		case order_kind::spell: return hud_rgba(205, 120, 255, 235);
+		case order_kind::build: return hud_rgba(70, 210, 250, 235);
+		case order_kind::repair: return hud_rgba(130, 245, 210, 235);
+		case order_kind::gather: return hud_rgba(235, 180, 60, 220);
+		default: return hud_rgba(220, 220, 220, 220);
+		}
+	}
+
+	// A 1-pixel dotted line (4 on, 3 off) with a dark shadow below-right, clipped to the
+	// surface. The dash phase runs from the line's start, so dashes stay put when clipped.
+	static void dotted_line(uint32_t* buf, size_t pitch, int w, int h, double x0, double y0, double x1, double y1, uint32_t c) {
+		double dx = x1 - x0, dy = y1 - y0, t0 = 0, t1 = 1;
+		auto clip = [&](double p, double q) {
+			if (p == 0) return q >= 0;
+			double r = q / p;
+			if (p < 0) {
+				if (r > t1) return false;
+				t0 = std::max(t0, r);
+			} else {
+				if (r < t0) return false;
+				t1 = std::min(t1, r);
+			}
+			return true;
+		};
+		if (!clip(-dx, x0) || !clip(dx, w - 2 - x0) || !clip(-dy, y0) || !clip(dy, h - 2 - y0)) return;
+		double len = std::hypot(dx, dy);
+		if (len < 1) return;
+		const uint32_t shadow = hud_rgba(0, 0, 0, 160);
+		for (double d = std::ceil(t0 * len); d <= t1 * len; d += 1) {
+			if (std::fmod(d, 7.0) >= 4) continue;
+			int x = (int)(x0 + dx * d / len), y = (int)(y0 + dy * d / len);
+			if (x < 0 || y < 0 || x >= w - 1 || y >= h - 1) continue;
+			uint32_t& sh = buf[(size_t)(y + 1) * pitch + x + 1];
+			if (!(sh >> 24)) sh = shadow;
+			buf[(size_t)y * pitch + x] = c;
+		}
+	}
+
+	static void order_marker(uint32_t* buf, size_t pitch, int w, int h, int x, int y, uint32_t c) {
+		const uint32_t shadow = hud_rgba(0, 0, 0, 160);
+		for (int pass = 0; pass != 2; ++pass) {
+			int o = pass == 0 ? 1 : 0;
+			for (int i = -2; i <= 2; ++i) {
+				int px[2] = {x + i + o, x + o}, py[2] = {y + o, y + i + o};
+				for (int k = 0; k != 2; ++k) {
+					if (px[k] >= 0 && py[k] >= 0 && px[k] < w && py[k] < h) buf[(size_t)py[k] * pitch + px[k]] = pass == 0 ? shadow : c;
+				}
+			}
+		}
+	}
+
+	// Where a target is on the map, or false if it has none (no unit and a zero position).
+	static bool order_target_pos(const target_t& t, xy& out) {
+		if (t.unit && t.unit->sprite) out = t.unit->sprite->position;
+		else if (t.pos != xy()) out = t.pos;
+		else return false;
+		return true;
+	}
+
+	void draw_order_lines() {
+		if (order_lines_mode == order_lines_off) return;
+		const int w = viewport_w, h = window_height;
+		if (w <= 0 || h <= 0) return;
+		if (!order_surface || order_surface->w != w || order_surface->h != h) {
+			order_surface = native_window_drawing::create_rgba_surface(w, h);
+			order_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)order_surface->lock();
+		const size_t pitch = order_surface->pitch / 4;
+		for (int y = 0; y != h; ++y) std::memset(buf + (size_t)y * pitch, 0, (size_t)w * 4);
+		auto wx = [&](int x) { return (x - screen_pos.x) * zoom; };
+		auto wy = [&](int y) { return (y - screen_pos.y) * zoom; };
+		const bool all = order_lines_mode == order_lines_all;
+
+		a_vector<unit_t*> units;
+		if (all) {
+			for (int i = 0; i != 8; ++i) for (unit_t* u : ptr(st.player_units[i])) units.push_back(u);
+		} else units = selected_units();
+
+		struct production { int x, y, icon; double frac; };
+		a_vector<production> produced;
+		for (unit_t* u : units) {
+			if (!u->sprite || ut_turret(u) || unit_is(u, UnitTypes::Protoss_Interceptor) || unit_is(u, UnitTypes::Protoss_Scarab)) continue;
+			xy from = u->sprite->position;
+			if (ut_building(u)) {
+				xy to;
+				if (order_target_pos(u->building.rally, to) && to != from) {
+					uint32_t c = hud_rgba(250, 245, 170, 225);
+					dotted_line(buf, pitch, w, h, wx(from.x), wy(from.y), wx(to.x), wy(to.y), c);
+					if (!u->building.rally.unit) order_marker(buf, pitch, w, h, (int)wx(to.x), (int)wy(to.y), c);
+				}
+				if (u_completed(u)) {
+					auto ci = console_info_of(u);
+					for (auto& p : ci.progress) {
+						if (p.frames.empty()) continue;
+						produced.push_back({(int)wx(from.x), (int)wy(from.y), p.frames.front(), p.frac});
+						break;
+					}
+				}
+				continue;
+			}
+			// A turret (tank, Goliath) attacks for its unit, which may just be guarding.
+			const order_type_t* order = u->order_type;
+			target_t target = u->order_target;
+			if (kind_of_order(order) == order_kind::none && u->subunit && kind_of_order(u->subunit->order_type) == order_kind::attack) {
+				order = u->subunit->order_type;
+				target = u->subunit->order_target;
+			}
+			xy prev = from;
+			auto leg = [&](const order_type_t* o, const target_t& t, const unit_type_t* building) {
+				order_kind k = kind_of_order(o);
+				if (k == order_kind::none || (k == order_kind::gather && all)) return;
+				xy to;
+				if (!order_target_pos(t, to)) return;
+				uint32_t c = order_kind_rgba(k);
+				if ((to - prev).x || (to - prev).y) dotted_line(buf, pitch, w, h, wx(prev.x), wy(prev.y), wx(to.x), wy(to.y), c);
+				if (k == order_kind::build && building) {
+					// The footprint about to be placed.
+					xy size = building->placement_size;
+					double x0 = wx(to.x - size.x / 2), y0 = wy(to.y - size.y / 2), x1 = wx(to.x + size.x / 2), y1 = wy(to.y + size.y / 2);
+					dotted_line(buf, pitch, w, h, x0, y0, x1, y0, c);
+					dotted_line(buf, pitch, w, h, x1, y0, x1, y1, c);
+					dotted_line(buf, pitch, w, h, x1, y1, x0, y1, c);
+					dotted_line(buf, pitch, w, h, x0, y1, x0, y0, c);
+				} else if (!t.unit) order_marker(buf, pitch, w, h, (int)wx(to.x), (int)wy(to.y), c);
+				prev = to;
+			};
+			const unit_type_t* building = kind_of_order(order) == order_kind::build && u->order_type != (const order_type_t*)nullptr && (Orders)u->order_type->id != Orders::ConstructingBuilding ? u->order_unit_type : nullptr;
+			leg(order, target, building);
+			for (auto& q : u->order_queue) {
+				target_t t;
+				t.pos = q.target.position;
+				t.unit = q.target.unit;
+				leg(q.order_type, t, nullptr);
+			}
+		}
+		// Production icons last, over the lines: half-size like a small command button.
+		for (auto& p : produced) {
+			const int iw = 36, ih = 34, bh = 5;
+			int x = p.x - iw / 2, y = p.y - (ih + bh + 2) / 2;
+			if (x + iw < 0 || y + ih + bh + 2 < 0 || x >= w || y >= h) continue;
+			fill_rgba(buf, pitch, w, h, x - 1, y - 1, iw + 2, ih + bh + 4, hud_rgba(0, 0, 0, 200));
+			draw_cmd_icon(buf, pitch, w, h, x, y, p.icon, 1);
+			draw_bw_bar(buf, pitch, w, h, x, y + ih + 1, iw, bh + 1, p.frac, 2);
+		}
+		order_surface->unlock();
+		order_surface->blit(&*window_surface, viewport_x, 0);
+	}
+
 	// ---- Settings menu ('?'): a checkbox for every toggle, saved between sessions ----
 	// Click a row, or press its key as usual. A level setting (scroll speed) is a row of
 	// notches instead: click a notch to set it, or the row's label to step up (wrapping). Choices are saved to
@@ -4172,6 +4390,8 @@ struct ui_functions: ui_util_functions {
 		int levels = 0;  // > 0: a level 1..levels shown as notches, instead of a checkbox
 		std::function<int()> level = {};
 		std::function<void(int)> set_level = {};
+		const char* const* level_names = nullptr;  // if set: a named choice, cycled by a click
+
 	};
 
 	void toggle_mute() {
@@ -4195,6 +4415,15 @@ struct ui_functions: ui_util_functions {
 		add("remastered", "Remastered graphics", "F2", true, flag(use_remastered));
 #endif
 		add("two_colour", "Two-colour mode (red / teal)", "shift tab", true, flag(two_colour_mode));
+		{
+			static const char* const names[] = {"off", "selected units", "all units"};
+			viewer_setting v{"order_lines", "Order lines", "l", true, [] { return false; }, [this] { cycle_order_lines(); }};
+			v.levels = 3;
+			v.level = [this] { return order_lines_mode; };
+			v.set_level = [this](int l) { order_lines_mode = std::max(1, std::min(3, l)); };
+			v.level_names = names;
+			r.push_back(std::move(v));
+		}
 		add("auto_observer", "Auto observer", "o", true, std::make_pair(std::function<bool()>([this] { return auto_observer; }),
 			std::function<void()>([this] { toggle_auto_observer(); })));
 		add("muted", "Mute sound", "m", true, std::make_pair(std::function<bool()>([this] { return global_volume == 0; }),
@@ -4325,8 +4554,10 @@ struct ui_functions: ui_util_functions {
 		};
 		int label_cols = 0, key_w = 0, other_cols = 0;
 		for (auto& v : settings) {
-			label_cols = std::max(label_cols, (int)std::strlen(v.label));
-			key_w = std::max(key_w, v.levels ? v.levels * notch_pitch : (int)std::strlen(v.key) * cw);
+			int label_len = (int)std::strlen(v.label);
+			if (v.level_names) for (int i = 0; i != v.levels; ++i) label_len = std::max(label_len, (int)std::strlen(v.label) + 2 + (int)std::strlen(v.level_names[i]));
+			label_cols = std::max(label_cols, label_len);
+			key_w = std::max(key_w, v.levels && !v.level_names ? v.levels * notch_pitch : (int)std::strlen(v.key) * cw);
 		}
 		for (auto* s : other_keys) other_cols = std::max(other_cols, (int)std::strlen(s));
 		int w = pad * 2 + std::max((4 + label_cols + 3) * cw + key_w, other_cols * cw);
@@ -4346,6 +4577,18 @@ struct ui_functions: ui_util_functions {
 		int y = pad + ch + 12;
 		for (auto& v : settings) {
 			settings_row_rects.push_back(rect{{pad - 4, y}, {w - pad + 4, y + row_h}});
+			if (v.level_names) {
+				// "Label: choice", the choice lit unless it is the first (off).
+				int lv = std::max(1, std::min(v.levels, v.level()));
+				bool on = lv > 1;
+				a_string head = a_string(v.label) + ": ";
+				hud_text(buf, pitch, w, h, pad + 3, y + 4, on ? "*" : "-", on ? 110 : 120, on ? 230 : 130, on ? 90 : 150);
+				hud_text(buf, pitch, w, h, pad + 4 * cw, y + 4, head.c_str(), on ? 240 : 160, on ? 240 : 165, on ? 240 : 180);
+				hud_text(buf, pitch, w, h, pad + (4 + (int)head.size()) * cw, y + 4, v.level_names[lv - 1], on ? 110 : 160, on ? 230 : 165, on ? 90 : 180);
+				hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(v.key) * cw, y + 4, v.key, 120, 130, 150);
+				y += row_h;
+				continue;
+			}
 			if (v.levels) {
 				// The level as a number where the checkbox goes, then the notches up to it lit.
 				int lv = v.level();
@@ -4397,7 +4640,7 @@ struct ui_functions: ui_util_functions {
 			auto& v = settings[i];
 			int nx = notches_x(a.to.x - a.from.x, v.levels);
 			// A click on (or between) the notches sets the level; elsewhere on the row steps it.
-			if (v.levels && x >= nx - 3) v.set_level((x - (nx - 3)) / notch_pitch + 1);
+			if (v.levels && !v.level_names && x >= nx - 3) v.set_level((x - (nx - 3)) / notch_pitch + 1);
 			else v.toggle();
 		}
 		return true;
@@ -5020,6 +5263,7 @@ struct ui_functions: ui_util_functions {
 					if (graph_full() && e.sym == ']') step_graph_window(+1);
 					if (graph_full() && e.sym == 'r') graph_value_mode = !graph_value_mode;
 					if (e.sym == 'o') toggle_auto_observer();
+					if (e.sym == 'l') cycle_order_lines();
 					if (graph_full() && e.sym == '[') step_graph_window(-1);
 					if (e.sym == '\t') {
 						bool shift = wnd.get_key_state(225) || wnd.get_key_state(229);
@@ -5222,6 +5466,7 @@ struct ui_functions: ui_util_functions {
 			} else {
 				rgba_surface->blit_scaled(&*window_surface, viewport_x, 0, viewport_w, window_surface->h);
 			}
+			draw_order_lines();
 			if (show_hud) {
 				draw_hud();
 				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + 8, 8);

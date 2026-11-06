@@ -8,7 +8,9 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Selection panel** laid out like the in-game console. Click a unit to see its wireframe,
   with shields, HP and energy below it. Beside the wireframe are its name, owner and kills,
   and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Carriers, Reavers and
-  Vultures also show interceptor, scarab or mine counts. Buildings show the training queue
+  Vultures also show interceptor, scarab or mine counts. A second row shows completed research
+  that affects the unit (e.g. Metabolic Boost and Adrenal Glands on a Zergling, Stim Packs on a
+  Marine); hover an icon for its name. Buildings show the training queue
   and research, upgrade, add-on or construction progress bars. A morphing Lair, Hive,
   Greater Spire or Sunken/Spore Colony shows as the building it is becoming. Mineral fields and geysers
   show resources left, supply buildings show supply totals, and transports show their cargo.
@@ -49,7 +51,14 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   (keyboard and edge scrolling; default twice the original speed). Choices, whether made
   there or with the keys, are saved to `$XDG_CONFIG_HOME/openbw-viewer/settings`
   (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
-- **Minimap** flush in the bottom-left corner; click or drag on it to move the camera.
+- **Minimap** flush in the bottom-left corner; click or drag on it to move the camera. It is
+  drawn at the window's resolution, each tile its terrain art averaged over a 4x4 grid (the
+  remastered tiles with those graphics on).
+- **Order lines** (`l`: off, selected units, all units): a dotted line from each unit to its
+  order's target and on through queued orders, coloured by kind (move green, attack red,
+  spell violet, build and repair cyan, gathering amber for selected units only). Builders
+  outline the footprint they are placing; buildings show their rally line and an icon with a
+  progress bar for what they are producing.
 - **Brood War's cursor**: the animated green arrow, from Remastered with its graphics on.
 - **Replay bar** in the bottom-right corner: slower / pause-play / faster buttons, game timer,
   speed or pause state, and a seek bar. Hover the seek bar to see the game time under the cursor.
@@ -128,6 +137,7 @@ cmake --build build -j
 | `d` | graphs: level or rate of change (with the graphs closed, `d` slows playback) |
 | `f` | graphs: players' difference or a line each (with the graphs closed, fog of war) |
 | `o` | auto observer on / off |
+| `l` | order lines: off, selected units, all units |
 | `[` / `]`, or the wheel over the graphs | zoom the graphs' time axis out / in |
 | `shift tab` | two-colour mode: the two players in red and teal (again to restore) |
 | `m` | full graph panel: pin minimized in the corner / unpin (otherwise mute) |

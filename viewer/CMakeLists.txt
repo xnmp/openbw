@@ -50,6 +50,10 @@ else()
   message(STATUS "openbw-player: zlib not found, building without remastered graphics")
 endif()
 
+# Behaviour tests for the seek-bar markers (pure, no game data needed).
+add_executable(openbw-timeline-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/timeline_test.cpp")
+target_include_directories(openbw-timeline-test PRIVATE "${OPENBW_DIR}/ui")
+
 # Sound is optional: uses SDL2_mixer when installed, otherwise builds silent.
 find_package(SDL2_mixer CONFIG QUIET)
 if(SDL2_mixer_FOUND)

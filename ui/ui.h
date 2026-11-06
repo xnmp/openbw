@@ -7,11 +7,14 @@
 #include "native_sound.h"
 #include "hud_font.h"
 #include "order_names.h"
+#include "timeline_markers.h"
 #ifdef OPENBW_REMASTERED
 #include "scr_render.h"
 #endif
 
+#include <atomic>
 #include <climits>
+#include <thread>
 #include <functional>
 #ifdef _WIN32
 #include <direct.h>
@@ -448,9 +451,134 @@ struct apm_t {
 	}
 };
 
-struct ui_util_functions: replay_functions {
+// What a unit is worth, and whether its death counts as a loss: shared by the value graphs
+// (ui_functions) and the seek-bar markers' background pass (timeline_prepass).
+struct unit_loss_functions: replay_functions {
+	explicit unit_loss_functions(state& st, action_state& action_st, replay_state& replay_st) : replay_functions(st, action_st, replay_st) {}
 
-	explicit ui_util_functions(state& st, action_state& action_st, replay_state& replay_st) : replay_functions(st, action_st, replay_st) {}
+	// Resource value of a unit: mineral + gas cost, with the units.dat quirks corrected:
+	// Zerglings and Scourge come two per egg, morphed units include their base unit, and
+	// Archons are listed at 0/0.
+	int unit_type_value(const unit_type_t* ut) const {
+		auto cost = [&](UnitTypes id) {
+			auto* t = get_unit_type(id);
+			return t->mineral_cost + t->gas_cost;
+		};
+		int v = ut->mineral_cost + ut->gas_cost;
+		switch (ut->id) {
+		case UnitTypes::Zerg_Zergling:
+		case UnitTypes::Zerg_Scourge: return v / 2;
+		case UnitTypes::Zerg_Lurker: return v + cost(UnitTypes::Zerg_Hydralisk);
+		case UnitTypes::Zerg_Guardian:
+		case UnitTypes::Zerg_Devourer: return v + cost(UnitTypes::Zerg_Mutalisk);
+		case UnitTypes::Protoss_Archon: return 2 * cost(UnitTypes::Protoss_High_Templar);
+		case UnitTypes::Protoss_Dark_Archon: return 2 * cost(UnitTypes::Protoss_Dark_Templar);
+		case UnitTypes::Zerg_Broodling: return 0;
+		default: return v;
+		}
+	}
+
+	// Eggs and cocoons are valued as what they will hatch into (both Zerglings of a pair).
+	const unit_type_t* egg_target(const unit_t* u) const {
+		if (unit_is_egg(u) && !u->build_queue.empty()) return u->build_queue.front();
+		return nullptr;
+	}
+
+	int unit_value(const unit_t* u) const {
+		if (auto* t = egg_target(u)) return unit_type_value(t) * (ut_two_units_in_one_egg(t) ? 2 : 1);
+		return unit_type_value(u->unit_type);
+	}
+	int unit_supply_half(const unit_t* u) const {
+		if (auto* t = egg_target(u)) return (int)t->supply_required.raw_value * (ut_two_units_in_one_egg(t) ? 2 : 1);
+		return (int)u->unit_type->supply_required.raw_value;
+	}
+
+	// A loss is a completed non-building unit dying. Refunded cancels never get here
+	// complete, hallucinations cost nothing, and units consumed by their own action
+	// (drone into extractor, launched nuke, scarab, mine, scanner) are not losses.
+	bool counts_as_loss(const unit_t* u) const {
+		if (u->owner < 0 || u->owner >= 8) return false;
+		if (ut_building(u) || u_hallucination(u)) return false;
+		if (!u_completed(u) && !unit_is_egg(u)) return false;
+		if (u->user_action_flags & 4) return false;
+		switch (u->unit_type->id) {
+		case UnitTypes::Protoss_Scarab:
+		case UnitTypes::Terran_Vulture_Spider_Mine:
+		case UnitTypes::Terran_Nuclear_Missile:
+		case UnitTypes::Spell_Scanner_Sweep:
+		case UnitTypes::Spell_Disruption_Web:
+		case UnitTypes::Spell_Dark_Swarm:
+			return false;
+		default: break;
+		}
+		return unit_value(u) > 0 || unit_supply_half(u) > 0;
+	}
+};
+
+#ifndef EMSCRIPTEN
+// Plays the whole replay once on a background thread, with a game state of its own (sharing
+// only the read-only global data), to find the seek-bar markers before playback gets there.
+class timeline_prepass {
+public:
+	timeline_prepass(const global_state& global, a_string replay_path) {
+		worker = std::thread([this, &global, path = std::move(replay_path)] { run(global, path); });
+	}
+	~timeline_prepass() {
+		stop = true;
+		if (worker.joinable()) worker.join();
+	}
+	timeline_prepass(const timeline_prepass&) = delete;
+	timeline_prepass& operator=(const timeline_prepass&) = delete;
+
+	// The markers once the pass has finished, else nullptr.
+	const timeline::markers* result() const {
+		return ready.load(std::memory_order_acquire) ? &markers : nullptr;
+	}
+
+private:
+	struct recorder: unit_loss_functions {
+		std::vector<timeline::loss>& out;
+		recorder(state& st, action_state& action_st, replay_state& replay_st, std::vector<timeline::loss>& out)
+			: unit_loss_functions(st, action_st, replay_st), out(out) {}
+		void on_kill_unit(unit_t* u) override {
+			if (counts_as_loss(u)) out.push_back({st.current_frame, u->owner, unit_value(u), (int)u->unit_type->id});
+		}
+	};
+
+	void run(const global_state& global, const a_string& path) {
+		auto t0 = std::chrono::steady_clock::now();
+		try {
+			auto game = std::make_unique<game_state>();
+			auto st = std::make_unique<state>();
+			st->global = &global;
+			st->game = game.get();
+			action_state action_st;
+			replay_state replay_st;
+			std::vector<timeline::loss> losses;
+			recorder r(*st, action_st, replay_st, losses);
+			r.load_replay_file(path);
+			while (!r.is_done()) {
+				if (stop) return;
+				r.next_frame();
+			}
+			markers = timeline::find_markers(std::move(losses), replay_st.end_frame);
+			ui::log("seek-bar markers: first loss at frame %d, %d battles, in %dms\n", markers.has_first_loss ? markers.first_loss.frame : -1,
+				(int)markers.battles.size(), (int)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+			ready.store(true, std::memory_order_release);
+		} catch (const std::exception& e) {
+			ui::log("seek-bar markers unavailable: %s\n", e.what());
+		}
+	}
+
+	std::atomic<bool> stop{false}, ready{false};
+	timeline::markers markers;
+	std::thread worker;  // last, so it starts after the members it uses exist
+};
+#endif
+
+struct ui_util_functions: unit_loss_functions {
+
+	explicit ui_util_functions(state& st, action_state& action_st, replay_state& replay_st) : unit_loss_functions(st, action_st, replay_st) {}
 
 	rect sprite_clickable_bounds(const sprite_t* sprite) const {
 		rect r{{(int)game_st.map_width - 1, (int)game_st.map_height - 1}, {0, 0}};
@@ -3584,34 +3712,6 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// ---- Unit value and losses (graphs) ----
-	// Resource value of a unit: mineral + gas cost, with the units.dat quirks corrected:
-	// Zerglings and Scourge come two per egg, morphed units include their base unit, and
-	// Archons are listed at 0/0.
-	int unit_type_value(const unit_type_t* ut) const {
-		auto cost = [&](UnitTypes id) {
-			auto* t = get_unit_type(id);
-			return t->mineral_cost + t->gas_cost;
-		};
-		int v = ut->mineral_cost + ut->gas_cost;
-		switch (ut->id) {
-		case UnitTypes::Zerg_Zergling:
-		case UnitTypes::Zerg_Scourge: return v / 2;
-		case UnitTypes::Zerg_Lurker: return v + cost(UnitTypes::Zerg_Hydralisk);
-		case UnitTypes::Zerg_Guardian:
-		case UnitTypes::Zerg_Devourer: return v + cost(UnitTypes::Zerg_Mutalisk);
-		case UnitTypes::Protoss_Archon: return 2 * cost(UnitTypes::Protoss_High_Templar);
-		case UnitTypes::Protoss_Dark_Archon: return 2 * cost(UnitTypes::Protoss_Dark_Templar);
-		case UnitTypes::Zerg_Broodling: return 0;
-		default: return v;
-		}
-	}
-
-	// Eggs and cocoons are valued as what they will hatch into (both Zerglings of a pair).
-	const unit_type_t* egg_target(const unit_t* u) const {
-		if (unit_is_egg(u) && !u->build_queue.empty()) return u->build_queue.front();
-		return nullptr;
-	}
-
 	// What a unit counts as in the value graphs: an egg is classed by what it will hatch into.
 	const unit_type_t* valued_type(const unit_t* u) const {
 		const unit_type_t* t = egg_target(u);
@@ -3627,42 +3727,15 @@ struct ui_functions: ui_util_functions {
 		const unit_type_t* t = valued_type(u);
 		return unit_counts_as_unit(u) && !ut_worker(t) && t->id != UnitTypes::Zerg_Larva;
 	}
-	int unit_value(const unit_t* u) const {
-		if (auto* t = egg_target(u)) return unit_type_value(t) * (ut_two_units_in_one_egg(t) ? 2 : 1);
-		return unit_type_value(u->unit_type);
-	}
-	int unit_supply_half(const unit_t* u) const {
-		if (auto* t = egg_target(u)) return (int)t->supply_required.raw_value * (ut_two_units_in_one_egg(t) ? 2 : 1);
-		return (int)u->unit_type->supply_required.raw_value;
-	}
-
 	struct death_event {
 		int owner, supply_half, value;
 	};
 	// Keyed by (frame, unit id) so re-simulating after a rewind records each death once.
 	a_map<std::pair<int, uint32_t>, death_event> unit_deaths;
 
-	// A loss is a completed non-building unit dying. Refunded cancels never get here
-	// complete, hallucinations cost nothing, and units consumed by their own action
-	// (drone into extractor, launched nuke, scarab, mine, scanner) are not losses.
 	void record_unit_loss(const unit_t* u) {
-		if (u->owner < 0 || u->owner >= 8) return;
-		if (ut_building(u) || u_hallucination(u)) return;
-		if (!u_completed(u) && !unit_is_egg(u)) return;
-		if (u->user_action_flags & 4) return;
-		switch (u->unit_type->id) {
-		case UnitTypes::Protoss_Scarab:
-		case UnitTypes::Terran_Vulture_Spider_Mine:
-		case UnitTypes::Terran_Nuclear_Missile:
-		case UnitTypes::Spell_Scanner_Sweep:
-		case UnitTypes::Spell_Disruption_Web:
-		case UnitTypes::Spell_Dark_Swarm:
-			return;
-		default: break;
-		}
-		int value = unit_value(u), supply = unit_supply_half(u);
-		if (value <= 0 && supply <= 0) return;
-		unit_deaths[{st.current_frame, (uint32_t)get_unit_id(u).raw_value}] = {u->owner, supply, value};
+		if (!counts_as_loss(u)) return;
+		unit_deaths[{st.current_frame, (uint32_t)get_unit_id(u).raw_value}] = {u->owner, unit_supply_half(u), unit_value(u)};
 	}
 
 	void on_kill_unit(unit_t* u) override {
@@ -5030,6 +5103,74 @@ struct ui_functions: ui_util_functions {
 		return (int)((int64_t)x * replay_st.end_frame / bw);
 	}
 
+	// ---- Seek-bar markers ----
+	// A line where the first unit died and a red band over each big battle (see
+	// timeline_markers.h), from a background pass over the whole replay. Hovering one shows
+	// what happened there; clicking it seeks to a few seconds before it.
+#ifndef EMSCRIPTEN
+	std::unique_ptr<timeline_prepass> timeline_pass;  // after `player`, so it stops first
+	void start_timeline_markers(a_string replay_path) {
+		timeline_pass = std::make_unique<timeline_prepass>(*st.global, std::move(replay_path));
+	}
+	const timeline::markers* timeline_markers() const { return timeline_pass ? timeline_pass->result() : nullptr; }
+#else
+	const timeline::markers* timeline_markers() const { return nullptr; }
+#endif
+
+	struct timeline_hit {
+		a_string tip;
+		int seek_frame = -1;  // -1: no marker there
+	};
+	// The marker within `px` pixels of `frame` on a seek bar `bar_w` pixels wide, with its tip.
+	timeline_hit timeline_marker_at(int frame, int px, int bar_w) const {
+		timeline_hit hit;
+		const timeline::markers* m = timeline_markers();
+		if (!m) return hit;
+		int tolerance = (int)((int64_t)px * replay_st.end_frame / std::max(1, bar_w));
+		auto h = timeline::marker_at(*m, frame, tolerance, 5 * 24);
+		hit.seek_frame = h.seek_frame;
+		if (h.kind == timeline::hit::first_loss) {
+			const auto& l = m->first_loss;
+			hit.tip = "First unit lost " + format_game_time(l.frame) + ": " + player_label(l.owner);
+			a_string name = l.unit_type >= 0 ? stat_text(l.unit_type + 1) : a_string();
+			if (!name.empty()) hit.tip += "'s " + name;
+		} else if (h.kind == timeline::hit::battle) {
+			const auto& b = m->battles[h.battle_index];
+			hit.tip = "Battle " + format_game_time(b.start) + "-" + format_game_time(b.end);
+			const char* sep = ": ";
+			for (int p = 0; p != 8; ++p) {
+				if (!b.lost[p]) continue;
+				hit.tip += sep + player_label(p) + " lost " + a_string(std::to_string(b.lost[p]).c_str());
+				sep = ", ";
+			}
+		}
+		return hit;
+	}
+
+	// Draws the markers on the seek bar's track; frame_x maps a frame to a panel x.
+	template<typename frame_x_F>
+	void draw_timeline_markers(uint32_t* buf, size_t pitch, int w, int h, int ty, int bh, frame_x_F&& frame_x) {
+		const timeline::markers* m = timeline_markers();
+		if (!m) return;
+		long long biggest = 1;
+		for (const auto& b : m->battles) biggest = std::max(biggest, b.total);
+		for (const auto& b : m->battles) {
+			int x0 = frame_x(b.start), x1 = std::max(x0 + 2, frame_x(b.end) + 1);
+			int a = 150 + (int)(100 * b.total / biggest);  // bigger battles are more solid
+			blend_rect(buf, pitch, w, h, x0, ty + 1, x1 - x0, bh - 2, hud_rgba(255, 36, 24, a));
+			// tick at the start, standing proud of the track
+			fill_rgba(buf, pitch, w, h, x0 - 1, ty - 4, 3, 4, hud_rgba(20, 6, 4, 255));
+			fill_rgba(buf, pitch, w, h, x0, ty - 3, 1, 3, hud_rgba(255, 70, 50, 255));
+			fill_rgba(buf, pitch, w, h, x0 - 1, ty + bh, 3, 4, hud_rgba(20, 6, 4, 255));
+			fill_rgba(buf, pitch, w, h, x0, ty + bh, 1, 3, hud_rgba(255, 70, 50, 255));
+		}
+		if (m->has_first_loss) {
+			int x = frame_x(m->first_loss.frame);
+			fill_rgba(buf, pitch, w, h, x - 1, ty - 5, 4, bh + 10, hud_rgba(10, 10, 10, 255));
+			fill_rgba(buf, pitch, w, h, x, ty - 4, 2, bh + 8, hud_rgba(90, 210, 255, 255));  // cyan, unlike the thumb
+		}
+	}
+
 	// 1x is OpenBW's normal replay rate (42 ms per frame, Brood War's "Fastest").
 	a_string speed_label() const {
 		char buf[48];
@@ -5297,8 +5438,13 @@ struct ui_functions: ui_util_functions {
 			int sx = frame_x(replay_frame);
 			fill_rgba(buf, pitch, w, h, sx, ty - 2, 1, bh + 4, hud_rgba(248, 240, 170, 255));
 		}
+		draw_timeline_markers(buf, pitch, w, h, ty, bh, frame_x);
 		int hover = replay_bar_hover_frame(bar);
-		if (hover >= 0) fill_rgba(buf, pitch, w, h, frame_x(hover), ty, 1, bh, hud_rgba(248, 240, 170, 200));
+		timeline_hit hover_marker;
+		if (hover >= 0) {
+			fill_rgba(buf, pitch, w, h, frame_x(hover), ty, 1, bh, hud_rgba(248, 240, 170, 200));
+			hover_marker = timeline_marker_at(hover, 4, bw);
+		}
 		// Thumb
 		fill_rgba(buf, pitch, w, h, fx - 2, ty - 3, 5, bh + 6, hud_rgba(20, 24, 16, 255));
 		fill_rgba(buf, pitch, w, h, fx - 1, ty - 2, 3, bh + 4, hud_rgba(236, 244, 214, 255));
@@ -5306,7 +5452,7 @@ struct ui_functions: ui_util_functions {
 
 		replay_bar_surface->unlock();
 		replay_bar_surface->blit(&*window_surface, ox, oy);
-		if (hover >= 0) draw_replay_tip(format_game_time(hover), ox + frame_x(hover), oy);
+		if (hover >= 0) draw_replay_tip(hover_marker.seek_frame >= 0 ? hover_marker.tip : format_game_time(hover), ox + frame_x(hover), oy);
 		else if (wnd.has_mouse_focus()) {
 			int mx = -1, my = -1;
 			wnd.get_cursor_pos(&mx, &my);
@@ -5635,6 +5781,17 @@ struct ui_functions: ui_util_functions {
 					if (e.button == 1) {
 						check_move_minimap(e);
 						check_move_replay_slider(e);
+						if (is_moving_replay_slider) {
+							// A press on a seek-bar marker jumps to just before it instead of
+							// starting a drag. The slider area is in window pixels / zoom.
+							int ow = std::max(1, replay_slider_area.to.x - replay_slider_area.from.x);
+							auto marker = timeline_marker_at(replay_frame, 4, (int)(ow * zoom));
+							if (marker.seek_frame >= 0) {
+								replay_frame = marker.seek_frame;
+								is_moving_replay_slider = false;
+								break;
+							}
+						}
 						if (!is_moving_minimap && !is_moving_replay_slider) {
 							is_drag_selecting = true;
 							drag_select_from_x = e.mouse_x;

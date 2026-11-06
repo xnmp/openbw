@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <mutex>
 #include <thread>
 
 using namespace bwgame;
@@ -23,6 +24,8 @@ namespace bwgame {
 namespace ui {
 
 void log_str(a_string str) {
+	static std::mutex m;  // the seek-bar markers' background pass logs too
+	std::lock_guard<std::mutex> lock(m);
 	fwrite(str.data(), str.size(), 1, stdout);
 	fflush(stdout);
 	if (!log_file) log_file = fopen("log.txt", "wb");
@@ -654,6 +657,7 @@ int main(int argc, char** argv) {
 
 #ifndef EMSCRIPTEN
 	ui.load_replay_file(argc > 1 ? argv[1] : "maps/p49.rep");
+	ui.start_timeline_markers(argc > 1 ? argv[1] : "maps/p49.rep");  // seek-bar markers, in the background
 	ui.show_hud = true;  // stats overlay on by default in the interactive player ('?' menu toggles)
 	ui.zoom = 1.5;  // interactive default, closer to Brood War's view; the saved zoom overrides it
 	ui.load_settings();  // saved choices from the '?' menu / toggle keys override the defaults

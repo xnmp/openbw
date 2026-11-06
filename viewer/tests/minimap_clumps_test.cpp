@@ -31,10 +31,10 @@ static void ring(std::vector<point>& v, int n, int type, int value, int x, int y
 static const minimap_clumps::params P = [] { minimap_clumps::params p; p.min_cost = 500; return p; }();
 
 int main() {
-	{  // the default threshold: 20 Zerglings (500) are too few for an icon, 40 bunched are enough
+	{  // the default threshold (750): 29 Zerglings are too few for an icon, 30 bunched are enough
 		std::vector<point> few, enough;
-		add(few, 20, zergling, 25, 1000, 1000, 4);
-		add(enough, 40, zergling, 25, 1000, 1000, 4);
+		add(few, 29, zergling, 25, 1000, 1000, 4);
+		add(enough, 30, zergling, 25, 1000, 1000, 4);
 		CHECK(minimap_clumps::find(few).empty());
 		CHECK(minimap_clumps::find(enough).size() == 1);
 	}

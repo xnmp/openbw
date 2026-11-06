@@ -68,7 +68,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   12 tiles of one of their own bases are dimmed, so armies stand out. A concentration of one
   unit type gets that type's icon: each type's units are grouped (linked within 6 tiles,
   DBSCAN-style, and cut by 2-means until no group is wider than 10 tiles), and a group shows
-  when its cost reaches 1000 minerals + gas and its density 12 per square tile. Icons of one
+  when its cost reaches 750 minerals + gas and its density 12 per square tile. Icons of one
   player at about the same spot share a row (20 Zerglings under 8 Mutalisks: both, the
   costlier first); where rows would overlap, only the costlier is drawn. The grouping is in
   `ui/minimap_clumps.h`.

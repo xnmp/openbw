@@ -56,7 +56,7 @@ struct label {
 struct params {
 	int link = 6 * 32;            // units this close share a group
 	int max_diameter = 10 * 32;   // no two units of a group farther apart than this
-	int64_t min_cost = 1000;      // 40 Zerglings, 5 Mutalisks, 20 Marines, 6 Dragoons
+	int64_t min_cost = 750;       // 30 Zerglings, 4 Mutalisks, 15 Marines, 5 Dragoons
 	double min_density = 12;      // cost per square tile
 	int min_radius = 2 * 32;      // a stack counts as spread over at least this radius
 	int merge_distance = 4 * 32;  // groups' centres this close share a row

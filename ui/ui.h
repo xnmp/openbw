@@ -3459,6 +3459,7 @@ struct ui_functions: ui_util_functions {
 		a_vector<int> frames;  // first is the item in progress; the rest are queued
 		double frac = 0;
 		a_string label;        // used when there is no icon (construction)
+		bool bar = true;       // false: nothing is under way yet (a worker sent to build)
 	};
 	struct console_info {
 		a_vector<panel_line> vitals, lines;
@@ -3781,6 +3782,12 @@ struct ui_functions: ui_util_functions {
 			// Eggs and cocoons count down themselves; producers via the unit being built.
 			const unit_t* timer = unit_is_egg(u) ? u : u->current_build_unit;
 			p.frac = timer ? progress_frac(q->build_time - timer->remaining_build_time, q->build_time) : 0;
+			// A worker keeps the building it is on its way to place in its queue; until it
+			// starts there is nothing to count down.
+			if (!timer && !ut_building(u)) {
+				p.label = "Sent to build";
+				p.bar = false;
+			}
 			ci.progress.push_back(p);
 		}
 		if (ut_building(u) && u->building.researching_type) {
@@ -4306,7 +4313,7 @@ struct ui_functions: ui_util_functions {
 			int row_w = std::max(bar_w_min, (int)p.frames.size() * (icon_w + gap) - gap);
 			if (!p.label.empty()) row_w = std::max(row_w, text_w(p.label) + (p.frames.empty() ? 0 : icon_w + gap));
 			right_w = std::max(right_w, row_w);
-			right_h += gap + (p.frames.empty() ? ch : icon_h) + 2 + bar_h;
+			right_h += gap + (p.frames.empty() ? ch : icon_h) + (p.bar ? 2 + bar_h : 0);
 		}
 		if (!ci.cargo.empty()) {
 			right_w = std::max(right_w, (int)ci.cargo.size() * cargo_cell);
@@ -4399,6 +4406,7 @@ struct ui_functions: ui_util_functions {
 				if (!p.label.empty()) hud_text(buf, pitch, w, h, x0 + icon_w + gap, y + (icon_h - ch) / 2, p.label.c_str(), 230, 230, 230);
 				y += icon_h;
 			}
+			if (!p.bar) continue;
 			y += 2;
 			draw_bw_bar(buf, pitch, w, h, x0, y, row_w, bar_h, p.frac, 2 * scale + 1);
 			y += bar_h;

@@ -1761,12 +1761,12 @@ struct ui_functions: ui_util_functions {
 						double cx = u->sprite->position.x / 32.0 * sx, cy = u->sprite->position.y / 32.0 * sy;
 						// Spider Mines are worth seeing (a minefield is a position): a tiny solid
 						// dot. The rest (Interceptors, Scarabs, larvae, eggs) stay faint pixels.
-						if (unit_is(u, UnitTypes::Terran_Vulture_Spider_Mine)) disc(cx - 1.1, cy - 1.1, cx + 1.1, cy + 1.1, c, 235);
+						if (unit_is(u, UnitTypes::Terran_Vulture_Spider_Mine)) disc(cx - 1.4, cy - 1.4, cx + 1.4, cy + 1.4, c, 235);
 						else blend((int)cx, (int)cy, c, 110);
 						continue;
 					}
 					if (minimap_building_style(u, depots)) continue;  // drawn with the buildings
-					box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale);
+					box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale * minimap_cost_scale(unit_type_value(u->unit_type)));
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
 					disc(x0, y0, x1, y1, c, 255);
@@ -1821,6 +1821,9 @@ struct ui_functions: ui_util_functions {
 	static constexpr int minimap_building_alpha = 150;
 	static constexpr double minimap_owned_scale = 1.2;  // players' buildings, over their footprint
 	static constexpr double minimap_unit_scale = 1.6;  // players' units (dots), over their footprint
+	// Dots of costly units (250+ minerals and gas: Tanks, Reavers, Carriers, Ultralisks) are a
+	// little larger, cheap ones (under 100: Zerglings, Marines, Zealots...) a little smaller.
+	static double minimap_cost_scale(int value) { return value >= 250 ? 1.15 : value < 100 ? 0.85 : 1.0; }
 	static constexpr double minimap_worker_tile_scale = 1.35;  // workers drawn as tiles, smaller so bases don't bloat
 
 	// Coverage (0..1) of the pixel centred at (px, py) by a box with corners rounded to `rad`

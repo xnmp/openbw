@@ -69,6 +69,10 @@ add_executable(openbw-supply-state-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_D
 target_include_directories(openbw-supply-state-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-minimap-block-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/minimap_block_test.cpp")
 target_include_directories(openbw-minimap-block-test PRIVATE "${OPENBW_DIR}/ui")
+add_executable(openbw-modal-layout-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/modal_layout_test.cpp")
+target_include_directories(openbw-modal-layout-test PRIVATE "${OPENBW_DIR}/ui")
+add_executable(openbw-skin-strip-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/skin_strip_test.cpp")
+target_include_directories(openbw-skin-strip-test PRIVATE "${OPENBW_DIR}/ui")
 
 # Sound is optional: uses SDL2_mixer when installed, otherwise builds silent.
 find_package(SDL2_mixer CONFIG QUIET)

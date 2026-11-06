@@ -1751,7 +1751,10 @@ struct ui_functions: ui_util_functions {
 					uint32_t c = colour(u);
 					if (minor) {
 						double cx = u->sprite->position.x / 32.0 * sx, cy = u->sprite->position.y / 32.0 * sy;
-						blend((int)cx, (int)cy, c, 110);
+						// Spider Mines are worth seeing (a minefield is a position): a tiny solid
+						// dot. The rest (Interceptors, Scarabs, larvae, eggs) stay faint pixels.
+						if (unit_is(u, UnitTypes::Terran_Vulture_Spider_Mine)) disc(cx - 1.1, cy - 1.1, cx + 1.1, cy + 1.1, c, 235);
+						else blend((int)cx, (int)cy, c, 110);
 						continue;
 					}
 					box(u, 2, 3, x0, y0, x1, y1, minimap_owned_scale);

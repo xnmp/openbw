@@ -42,6 +42,7 @@ struct sprite_frame {
 struct wireframe_layers {
 	int size = 0;
 	std::array<image, 7> cells;  // premultiplied, size x size
+	uint32_t line_mean = 128;    // mean grey of the line art (cell 6) where it is solid
 };
 
 // Where an image's frames can reach, in game pixels relative to its map position, over every
@@ -291,6 +292,13 @@ struct graphics {
 				premultiply(strip);
 				r->size = size;
 				for (int k = 0; k != 7; ++k) r->cells[k] = resample(strip, k * cell, 0, cell, cell, size, size, false);
+				uint64_t sum = 0, n = 0;
+				for (uint32_t p : r->cells[6].px) {
+					if (ch_a(p) <= 128) continue;
+					sum += ch_r(p) * 255 / ch_a(p);
+					++n;
+				}
+				if (n && sum) r->line_mean = (uint32_t)std::max<uint64_t>(1, sum / n);
 			}
 		}
 		return r->size ? r.get() : nullptr;
@@ -304,6 +312,20 @@ struct graphics {
 	}
 
 	int tile_pixels() const { return (int)std::lround(32 * zoom); }
+
+	// A .dds.grp from the store (e.g. "HD2/unit/cmdicons/cmdicons.dds.grp"), frames decoded on use.
+	bool read_ui_grp(const std::string& path, dds_grp& out) const {
+		bytes b;
+		return casc.read(path, b) && parse_dds_grp(std::move(b), out);
+	}
+
+	// A standalone .dds from the store (UI art such as "HD2/game/observer/..."), premultiplied.
+	bool read_ui_image(const std::string& path, image& out) const {
+		bytes b;
+		if (!casc.read(path, b) || !decode_dds(b.data(), b.size(), out)) return false;
+		premultiply(out);
+		return true;
+	}
 
 	// Megatile `index` of the current tileset averaged over a k x k grid (opaque, row-major),
 	// for the minimap. False if the tileset lacks it or it does not decode.
@@ -627,13 +649,18 @@ inline uint32_t mul255(uint32_t a, uint32_t b) {
 // where sections overlap), then the outer and inner shield outlines are laid over it in
 // theirs. Colours are RGB; the result is premultiplied RGBA.
 //
+// Every race's line art is shaded relative to its own mean grey (see heat_shade).
 // Zerg (`heat`): the four cells are nested heat masks, from the core (cell 0) out to the
 // whole body (cell 3), so a pixel takes the innermost one covering it. Their line art is
-// shaded mid-grey rather than white, and multiplying by it would leave the colours a dull
-// brown, so it is overlay-blended instead (mid-grey keeps the colour, light and dark
-// shade it), which keeps the classic wireframe's saturated reds, oranges and greens.
-inline uint32_t overlay_channel(uint32_t base, uint32_t shade) {
-	return shade < 128 ? mul255(2 * base, shade) : 255 - mul255(2 * (255 - base), 255 - shade);
+// shaded grey rather than white: multiplying by it as is would leave the colours a dull
+// brown, so its shade is taken relative to the wireframe's mean (up to 1.3x), which keeps
+// the classic wireframe's flat, saturated reds, oranges and greens. (An overlay blend
+// instead washes bright art, like the Spawning Pool's pool, out to white.)
+inline uint32_t heat_shade(uint32_t base, uint32_t shade, uint32_t mean) {
+	// Lift the darkest strokes and allow highlights up to 1.5x: the classic wireframes
+	// are flat, bright colour, so shading here only adds texture.
+	uint32_t k = std::max<uint32_t>(205, std::min<uint32_t>(384, shade * 256 / mean));  // x256
+	return std::min<uint32_t>(255, base * k >> 8);
 }
 
 inline image composite_wireframe(const wireframe_layers& w, const std::array<uint32_t, 4>& sections, uint32_t outer, uint32_t inner, bool heat = false) {
@@ -652,22 +679,53 @@ inline image composite_wireframe(const wireframe_layers& w, const std::array<uin
 			g += m * ch_g(sections[k]);
 			b += m * ch_b(sections[k]);
 		}
+		if (heat && total) {
+			// The masks are soft, so a weighted mix muddies the reds, oranges, yellows and
+			// greens into brown; take the innermost mask that is solid here instead, giving
+			// the classic wireframe's distinct bands.
+			int pick = -1, best = -1;
+			uint32_t best_a = 0;
+			for (int k = 0; k != 4; ++k) {
+				uint32_t a = ch_a(w.cells[k].px[i]);
+				if (a >= 128 && pick < 0) pick = k;
+				if (a > best_a) best_a = a, best = k;
+			}
+			if (pick < 0) pick = best;
+			r = total * ch_r(sections[pick]);  // r / total is the colour; total keeps the coverage
+			g = total * ch_g(sections[pick]);
+			b = total * ch_b(sections[pick]);
+		}
 		uint32_t cr = 0, cg = 0, cb = 0, ca = 0;
+		if (heat && total) {
+			// Zerg heat masks cover the whole body: fill it, as the classic wireframes are
+			// flat colour, and let the line art add texture over that rather than leave the
+			// dark gaps between its strokes showing.
+			uint32_t fa = std::min(255u, total);
+			cr = mul255(r / total, fa);
+			cg = mul255(g / total, fa);
+			cb = mul255(b / total, fa);
+			ca = fa;
+		}
 		uint32_t line = w.cells[6].px[i];
 		if (total && ch_a(line)) {
-			uint32_t cover = std::min(255u, total);  // how much of the line lies in some section
+			// How much of the line lies in some section. Terran and Protoss sections are
+			// themselves thin, faint strokes tracing the line art (alpha under ~190, and
+			// offset by antialiasing), so their coverage is lifted to make lines solid.
+			uint32_t cover = std::min(255u, heat ? total : total * 4);
 			uint32_t la = ch_a(line);
-			if (heat) {
-				uint32_t shade = std::min(255u, ch_r(line) * 255 / la);  // un-premultiplied grey
-				cr = mul255(overlay_channel(r / total, shade), mul255(la, cover));
-				cg = mul255(overlay_channel(g / total, shade), mul255(la, cover));
-				cb = mul255(overlay_channel(b / total, shade), mul255(la, cover));
-			} else {
-				cr = mul255(mul255(ch_r(line), r / total), cover);
-				cg = mul255(mul255(ch_g(line), g / total), cover);
-				cb = mul255(mul255(ch_b(line), b / total), cover);
-			}
-			ca = mul255(la, cover);
+			uint32_t shade = std::min(255u, ch_r(line) * 255 / la);  // un-premultiplied grey
+			// Thin lines resampled small keep little coverage; ease it up so small
+			// wireframes (the selection grid) stay as bright as large ones.
+			// Line art: thin strokes resampled small keep little alpha, so lift it steeply
+			// (Terran and Protoss wireframes are all line, with no solid hull to carry them).
+			uint32_t a = mul255(heat ? 255 - mul255(255 - la, 255 - la) : std::min(255u, la * 3), cover);
+			if (!heat) shade = std::max(shade, w.line_mean * 4 / 5);  // floor the darkest strokes
+			uint32_t keep = 255 - a;
+			if (heat) shade = (w.line_mean * 3 + shade * 2) / 5;  // texture only: the fill carries the colour
+			cr = mul255(heat_shade(r / total, shade, w.line_mean), a) + mul255(cr, keep);
+			cg = mul255(heat_shade(g / total, shade, w.line_mean), a) + mul255(cg, keep);
+			cb = mul255(heat_shade(b / total, shade, w.line_mean), a) + mul255(cb, keep);
+			ca = a + mul255(ca, keep);
 		}
 		for (int k : {4, 5}) {
 			uint32_t p = w.cells[k].px[i], tint = k == 4 ? outer : inner;

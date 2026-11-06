@@ -3,8 +3,10 @@
 A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openbw)'s
 `ui/gfxtest.cpp`, with additions for watching games:
 
-- **Stats overlay**: minerals, gas, supply, army supply and worker supply for each player
-  (on by default; turn it off in the `?` menu).
+- **Stats overlay**, top left: a line per player in the style of Brood War's resource bar,
+  with its mineral, gas and supply icons for the player's race, then army supply and worker
+  count beside the race's Marine / Zergling / Zealot and SCV / Drone / Probe icons. Supply
+  turns red when blocked. On by default; turn it off in the `?` menu.
 - **Selection panel** laid out like the in-game console. Click a unit to see its wireframe,
   with shields, HP and energy below it. Beside the wireframe are its name, owner and kills,
   and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Carriers, Reavers and
@@ -13,7 +15,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   Marine); hover an icon for its name. Buildings show the training queue
   and research, upgrade, add-on or construction progress bars. A morphing Lair, Hive,
   Greater Spire or Sunken/Spore Colony shows as the building it is becoming. Mineral fields and geysers
-  show resources left, supply buildings show supply totals, and transports show their cargo.
+  show resources left, and transports show their cargo.
   Drag-select to get a grid of health-coloured wireframes, grouped by unit type. As in Brood War, a box that
   catches units leaves buildings out. Click a wireframe in the grid to select just that unit,
   `shift`-click to drop it, `ctrl`-click to keep only units of its type.
@@ -62,6 +64,11 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Brood War's cursor**: the animated green arrow, from Remastered with its graphics on.
 - **Replay bar** in the bottom-right corner: slower / pause-play / faster buttons, game timer,
   speed or pause state, and a seek bar. Hover the seek bar to see the game time under the cursor.
+- **Observer console skin**: with the remastered graphics on, the stats overlay, selection
+  panel, graphs, replay bar and minimap frame are drawn on Remastered's own observer-mode UI
+  art (metal edge, corner rivets, red inner line), with its green progress bars and its HD
+  command icons, tinted gold as in the game. With the classic graphics they keep a bevelled
+  olive style.
 - **Zoom** from the keyboard or mouse wheel, and **speed** controls.
 - **Sound** through SDL2_mixer, when it is installed.
 - **Edge panning**, and a game view capped at **16:9**, with black bars on ultrawide windows.
@@ -126,6 +133,7 @@ cmake --build build -j
 | mouse wheel | zoom around the cursor |
 | arrows, or the mouse at the game view's edge | scroll (with the full graph panel open, `←` / `→` switch its tabs) |
 | `backspace` | rewind about 5 s |
+| `page up` / `page down` | skip forward / back 10 s |
 | click or drag the replay bar | seek |
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |

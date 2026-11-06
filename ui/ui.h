@@ -4203,7 +4203,8 @@ struct ui_functions: ui_util_functions {
 	// ---- The Pluto bot's win estimate (graph tab 6) ----
 	// Read from the bots' stats files, pluto_bandit_<opponent>.txt, which hold each game's
 	// win-estimate trajectory (see pluto_win.h). They are looked for beside the replay and in
-	// the self-play layout <game>/{host,join}/game.rep with <game>/{host,join}/bot-write/.
+	// the self-play layout <game>/{host,join}/game.rep with <game>/{host,join}/bot-write/
+	// (following a symbolic link to the replay).
 	// A file named after one player is the other player's; the game is matched by length.
 	std::array<pluto_win::record, 8> win_estimate;
 	std::array<bool, 8> has_win_estimate{};
@@ -4211,6 +4212,13 @@ struct ui_functions: ui_util_functions {
 
 	void load_pluto_win_estimates(const a_string& replay_path) {
 		std::string path(replay_path.c_str());
+#ifndef _WIN32
+		// A link (e.g. a folder of links to the self-play games) is looked up from its target.
+		if (char* real = realpath(path.c_str(), nullptr)) {
+			path = real;
+			free(real);
+		}
+#endif
 		size_t slash = path.find_last_of("/\\");
 		std::string dir = slash == std::string::npos ? "." : path.substr(0, slash);
 		std::vector<std::string> dirs;

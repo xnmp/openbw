@@ -25,7 +25,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   bots, a sixth tab plots each bot's own win estimate (its network's value output, shown as
   0-100%), read from the stats files it writes, `pluto_bandit_<opponent>.txt`. They are
   looked for beside the replay, in its `bot-write/` or `write/`, and in the self-play layout
-  `<game>/{host,join}/bot-write/`. Each game logs 64 points, so the line is coarse (about one
+  `<game>/{host,join}/bot-write/` (also through a symbolic link to the replay). Each game logs 64 points, so the line is coarse (about one
   point every 15-25 s).
   `d` switches to the first derivative (change per minute). `f` plots the first player
   minus the second, coloured by whoever is ahead. `m` pins the graphs minimized in the

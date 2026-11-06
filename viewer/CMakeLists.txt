@@ -65,6 +65,8 @@ add_executable(openbw-music-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tes
 target_include_directories(openbw-music-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-replay-result-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/replay_result_test.cpp")
 target_include_directories(openbw-replay-result-test PRIVATE "${OPENBW_DIR}/ui")
+add_executable(openbw-supply-state-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/supply_state_test.cpp")
+target_include_directories(openbw-supply-state-test PRIVATE "${OPENBW_DIR}/ui")
 
 # Sound is optional: uses SDL2_mixer when installed, otherwise builds silent.
 find_package(SDL2_mixer CONFIG QUIET)

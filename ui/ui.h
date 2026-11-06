@@ -12,6 +12,7 @@
 #include "pluto_win.h"
 #include "minimap_clumps.h"
 #include "replay_result.h"
+#include "supply_state.h"
 #include "ui_theme.h"
 #include "health_bar.h"
 #ifdef OPENBW_REMASTERED
@@ -1814,16 +1815,18 @@ struct ui_functions: ui_util_functions {
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
 				else {
-					// A dark hairline just outside, then the units' colour, a little see-through,
-					// faintly lit from the top left: a soft diagonal gradient, a brighter top edge.
-					rounded(x0 - 1, y0 - 1, x1 + 1, y1 + 1, 2.5, hud_rgba(0, 0, 0, 255), 130);
+					// A dark hairline just outside, then a bevelled block in the units' colour, a
+					// little see-through, lit from the top left like a raised tile: bright top and
+					// left edges, dark bottom and right edges, and a flat face between them.
+					rounded(x0 - 1, y0 - 1, x1 + 1, y1 + 1, 1.5, hud_rgba(0, 0, 0, 255), 110);
 					const uint32_t base = minimap_tint(c, 70);
-					const double bw_ = std::max(1.0, x1 - x0), bh_ = std::max(1.0, y1 - y0);
-					rounded_shaded(x0, y0, x1, y1, 1.5, base, 215, [&](double px, double py, uint32_t& pc, int&) {
-						double t = ((px - x0) / bw_ + (py - y0) / bh_) / 2;  // 0 top left .. 1 bottom right
-						int k = (int)std::lround(28 - 56 * t);              // +28 lighter .. -28 darker (of 256)
-						if (py - y0 < 1.0) k += 26;                          // the lit top edge
+					rounded_shaded(x0, y0, x1, y1, 0.8, base, minimap_building_alpha, [&](double px, double py, uint32_t& pc, int& pa) {
+						bool top = py - y0 < 1.0, left = px - x0 < 1.0, bottom = y1 - py < 1.0, right = x1 - px < 1.0;
+						int k = 0;
+						if (top || left) k = (bottom || right) ? 0 : 110;  // a corner shared by a lit and a dark edge stays neutral
+						else if (bottom || right) k = -120;
 						pc = k >= 0 ? minimap_tint(base, k) : minimap_shade(base, 256 + k, 256);
+						if (k != 0) pa = std::min(255, pa + 60);  // the edges are more solid than the face
 					});
 				}
 			}
@@ -1845,12 +1848,16 @@ struct ui_functions: ui_util_functions {
 					}
 					box(u, 2, 3, x0, y0, x1, y1);
 					if (minimap_worker_at_work(u, depots)) {
-						disc(x0, y0, x1, y1, minimap_tint(c, 70), 215);  // as the buildings: part of the base
+						disc(x0, y0, x1, y1, minimap_tint(c, 70), minimap_building_alpha);  // as the buildings: part of the base
 						continue;
 					}
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
 					disc(x0, y0, x1, y1, minimap_tint(c, 70), 255);
+					{  // a bright centre, a little up and left: units read as lit, solid dots
+						double cx = (x0 + x1) / 2 - 0.3, cy = (y0 + y1) / 2 - 0.3, r = std::max(0.8, (x1 - x0) * 0.24);
+						disc(cx - r, cy - r, cx + r, cy + r, minimap_tint(c, 190), 230);
+					}
 				}
 			}
 		}
@@ -1896,6 +1903,9 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 	}
+
+	// Buildings (and workers mining at their base) are see-through so units read over them.
+	static constexpr int minimap_building_alpha = 150;
 
 	// Each player's completed resource depots (Nexus, Command Center, Hatchery, Lair, Hive).
 	a_vector<std::pair<int, xy>> minimap_depots() const {
@@ -2999,6 +3009,7 @@ struct ui_functions: ui_util_functions {
 		int player = 0;
 		int race = 0;
 		int minerals = 0, gas = 0, supply = 0, supply_max = 0, army = 0, workers = 0;
+		supply_state::pressure supply_pressure = supply_state::pressure::free;
 		int r = 255, g = 255, b = 255;
 	};
 
@@ -3019,6 +3030,7 @@ struct ui_functions: ui_util_functions {
 			int avail = std::min((int)st.supply_available[i][race].raw_value, 400);
 			row.supply = (used + 1) / 2;
 			row.supply_max = avail / 2;
+			row.supply_pressure = supply_state::of(used, (int)st.supply_available[i][race].raw_value);
 			for (unit_t* u : ptr(st.player_units[i])) {
 				if (ut_worker(u->unit_type)) ++row.workers;
 			}
@@ -3103,8 +3115,12 @@ struct ui_functions: ui_util_functions {
 			x += res_w + gap;
 			draw_res_icon(buf, pitch, w, h, x, iy, 4 + row.race);
 			std::snprintf(text, sizeof(text), "%d/%d", row.supply, row.supply_max);
-			bool capped = row.supply >= row.supply_max && row.supply_max < 200;  // supply blocked
-			value_text(x + icon + 4, ty, text, capped ? 255 : 236, capped ? 120 : 236, capped ? 90 : 236);
+			// Supply blocked in red; one supply from it (only a one-supply unit fits) in a fainter red.
+			switch (row.supply_pressure) {
+			case supply_state::pressure::blocked: value_text(x + icon + 4, ty, text, 255, 120, 90); break;
+			case supply_state::pressure::nearly_blocked: value_text(x + icon + 4, ty, text, 250, 178, 160); break;
+			default: value_text(x + icon + 4, ty, text, 236, 236, 236);
+			}
 			x += sup_w + gap;
 			draw_cmd_icon_scaled(buf, pitch, w, h, x, y + (row_h - unit_icon) / 2, army_icon[row.race], 1, unit_icon, unit_icon * 34 / 36);
 			std::snprintf(text, sizeof(text), "%d", row.army);

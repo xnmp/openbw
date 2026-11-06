@@ -1686,13 +1686,9 @@ struct ui_functions: ui_util_functions {
 		// Antialiased shapes: a disc filling a box, and a box with rounded corners (radius in px).
 		// `shade(px, py, c, a)` may change the colour and alpha per pixel (see the buildings).
 		auto rounded_shaded = [&](double x0, double y0, double x1, double y1, double rad, uint32_t c, int a, auto&& shade) {
-			rad = std::max(0.0, std::min(rad, std::min(x1 - x0, y1 - y0) / 2));
 			for (int y = (int)std::floor(y0); y < (int)std::ceil(y1); ++y) for (int x = (int)std::floor(x0); x < (int)std::ceil(x1); ++x) {
 				double px = x + 0.5, py = y + 0.5;
-				double dx = std::max({x0 + rad - px, 0.0, px - (x1 - rad)}), dy = std::max({y0 + rad - py, 0.0, py - (y1 - rad)});
-				double edge = std::min({px - x0, x1 - px, py - y0, y1 - py});  // coverage at straight edges
-				double cov = std::min(std::max(0.0, std::min(1.0, rad - std::sqrt(dx * dx + dy * dy) + 0.5)), std::max(0.0, std::min(1.0, edge + 0.5)));
-				if (rad <= 0) cov = std::max(0.0, std::min(1.0, edge + 0.5));
+				double cov = rounded_coverage(px, py, x0, y0, x1, y1, rad);
 				if (cov <= 0) continue;
 				uint32_t pc = c;
 				int pa = a;
@@ -1727,6 +1723,7 @@ struct ui_functions: ui_util_functions {
 		};
 		double x0, y0, x1, y1;
 		// 1: neutrals and buildings.
+		std::array<a_vector<std::array<double, 4>>, 8> building_rects;
 		for (size_t i = 12; i != 0;) {
 			--i;
 			for (unit_t* u : ptr(st.player_units[i])) {
@@ -1734,10 +1731,14 @@ struct ui_functions: ui_util_functions {
 				box(u, 2, 4, x0, y0, x1, y1, u->owner >= 8 ? 1.0 : minimap_owned_scale);
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
-				else {
-					draw_minimap_tile(x0, y0, x1, y1, c, rounded_shaded);
-				}
+				else building_rects[u->owner].push_back({x0, y0, x1, y1});
 			}
+		}
+		// A player's buildings are drawn together, so where they overlap they make one shape
+		// with one outer border.
+		for (int p = 0; p != 8; ++p) {
+			if (building_rects[p].empty()) continue;
+			draw_minimap_blob(building_rects[p], palette_rgba(img.player_minimap_colors.at(player_color(p))), w, h, blend);
 		}
 		// 2: minor units, faint; 3: ground units; 4: air units, outlined.
 		const auto depots = minimap_depots();
@@ -1757,9 +1758,9 @@ struct ui_functions: ui_util_functions {
 						else blend((int)cx, (int)cy, c, 110);
 						continue;
 					}
-					box(u, 2, 3, x0, y0, x1, y1, minimap_owned_scale);
+					box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale);
 					if (minimap_worker_at_work(u, depots)) {
-						draw_minimap_tile(x0, y0, x1, y1, c, rounded_shaded);  // as the buildings: part of the base
+						draw_minimap_blob({{x0, y0, x1, y1}}, c, w, h, blend);  // as the buildings: part of the base
 						continue;
 					}
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
@@ -1814,21 +1815,53 @@ struct ui_functions: ui_util_functions {
 
 	// Buildings (and workers mining at their base) are see-through so units read over them.
 	static constexpr int minimap_building_alpha = 150;
-	static constexpr double minimap_owned_scale = 1.2;  // players' units and buildings, over their footprint
+	static constexpr double minimap_owned_scale = 1.2;  // players' buildings, over their footprint
+	static constexpr double minimap_unit_scale = 1.35;  // players' units (dots), over their footprint
 
-	// A building (or a worker mining at its base) as a flat tile in the units' colour, a
-	// little see-through, inside a dark border 1.5 px thick. The border is a ring outside the
-	// tile, so it outlines without darkening the face. `rounded_shaded` is draw_minimap_units'
-	// antialiased box (see there).
-	template<typename R>
-	void draw_minimap_tile(double x0, double y0, double x1, double y1, uint32_t c, R&& rounded_shaded) const {
-		const double t = 1.5;
-		rounded_shaded(x0 - t, y0 - t, x1 + t, y1 + t, 1.0 + t, hud_rgba(0, 0, 0, 255), 175, [&](double px, double py, uint32_t&, int& pa) {
-			// Inside the tile: no border (the coverage of the tile's own edge pixels is kept).
-			double inside = std::min({px - x0, x1 - px, py - y0, y1 - py});
-			if (inside > 0) pa = (int)(pa * std::max(0.0, 1.0 - inside * 2));
-		});
-		rounded_shaded(x0, y0, x1, y1, 1.0, c, minimap_building_alpha, [](double, double, uint32_t&, int&) {});
+	// Coverage (0..1) of the pixel centred at (px, py) by a box with corners rounded to `rad`
+	// pixels, antialiased across its edge.
+	static double rounded_coverage(double px, double py, double x0, double y0, double x1, double y1, double rad) {
+		rad = std::max(0.0, std::min(rad, std::min(x1 - x0, y1 - y0) / 2));
+		double edge = std::min({px - x0, x1 - px, py - y0, y1 - py});  // coverage at straight edges
+		double straight = std::max(0.0, std::min(1.0, edge + 0.5));
+		if (rad <= 0) return straight;
+		double dx = std::max({x0 + rad - px, 0.0, px - (x1 - rad)}), dy = std::max({y0 + rad - py, 0.0, py - (y1 - rad)});
+		return std::min(std::max(0.0, std::min(1.0, rad - std::sqrt(dx * dx + dy * dy) + 0.5)), straight);
+	}
+
+	// Buildings (or one worker at work) as flat, part see-through tiles in the units' colour
+	// inside a dark border 1.5 px thick. The tiles are merged first: the face is drawn once
+	// where any tile covers a pixel, and the border only where the tiles widened by the
+	// border's width cover it and the tiles themselves do not, so overlapping buildings make
+	// one shape whose inner borders are absorbed. `rects` are {x0, y0, x1, y1} in minimap
+	// pixels (w x h); `blend(x, y, colour, alpha)` writes one pixel.
+	template<typename B>
+	void draw_minimap_blob(const a_vector<std::array<double, 4>>& rects, uint32_t c, int w, int h, B&& blend) const {
+		const double t = 1.5, rad = 1.0;
+		double bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9;
+		for (auto& r : rects) bx0 = std::min(bx0, r[0] - t), by0 = std::min(by0, r[1] - t), bx1 = std::max(bx1, r[2] + t), by1 = std::max(by1, r[3] + t);
+		const int ix0 = std::max(0, (int)std::floor(bx0)), iy0 = std::max(0, (int)std::floor(by0));
+		const int ix1 = std::min(w, (int)std::ceil(bx1)), iy1 = std::min(h, (int)std::ceil(by1));
+		if (ix1 <= ix0 || iy1 <= iy0) return;
+		const int bw = ix1 - ix0, bh = iy1 - iy0;
+		a_vector<float> face((size_t)bw * bh, 0.0f), outer((size_t)bw * bh, 0.0f);
+		for (auto& r : rects) {
+			const int rx0 = std::max(ix0, (int)std::floor(r[0] - t)), ry0 = std::max(iy0, (int)std::floor(r[1] - t));
+			const int rx1 = std::min(ix1, (int)std::ceil(r[2] + t)), ry1 = std::min(iy1, (int)std::ceil(r[3] + t));
+			for (int y = ry0; y < ry1; ++y) for (int x = rx0; x < rx1; ++x) {
+				double px = x + 0.5, py = y + 0.5;
+				size_t i = (size_t)(y - iy0) * bw + (x - ix0);
+				face[i] = std::max(face[i], (float)rounded_coverage(px, py, r[0], r[1], r[2], r[3], rad));
+				outer[i] = std::max(outer[i], (float)rounded_coverage(px, py, r[0] - t, r[1] - t, r[2] + t, r[3] + t, rad + t));
+			}
+		}
+		const uint32_t black = hud_rgba(0, 0, 0, 255);
+		for (int y = iy0; y < iy1; ++y) for (int x = ix0; x < ix1; ++x) {
+			size_t i = (size_t)(y - iy0) * bw + (x - ix0);
+			float f = face[i], border = std::max(0.0f, outer[i] - f);
+			if (border > 0) blend(x, y, black, (int)(175 * border));
+			if (f > 0) blend(x, y, c, (int)(minimap_building_alpha * f));
+		}
 	}
 
 	// Each player's completed resource depots (Nexus, Command Center, Hatchery, Lair, Hive).
@@ -1841,14 +1874,21 @@ struct ui_functions: ui_util_functions {
 		}
 		return out;
 	}
-	// A worker gathering (on its way to, at, or returning from minerals or gas) within 12
-	// tiles of one of its own depots, or an SCV constructing a building: ordinary economy,
-	// drawn like a small building. A worker that is fighting, scouting or long-distance
+	// A worker gathering (on its way to, at, or returning from minerals or gas) or idle within
+	// 12 tiles of one of its own depots, or one building or sent to build anywhere: ordinary
+	// economy, drawn like a small building. A worker that is fighting, scouting or long-distance
 	// mining (no depot of its own nearby) is not.
 	bool minimap_worker_at_work(const unit_t* u, const a_vector<std::pair<int, xy>>& depots) const {
 		if (!ut_worker(u)) return false;
-		if (u->order_type->id == Orders::ConstructingBuilding) return true;
 		switch (u->order_type->id) {
+		case Orders::ConstructingBuilding:  // an SCV building
+		case Orders::PlaceBuilding: case Orders::PlaceProtossBuilding: case Orders::DroneStartBuild:  // sent to build
+			return true;
+		default:
+			break;
+		}
+		switch (u->order_type->id) {
+		case Orders::PlayerGuard: case Orders::Guard: case Orders::Nothing: case Orders::Stop:  // idle
 		case Orders::Harvest1: case Orders::Harvest2: case Orders::ResetHarvestCollision:
 		case Orders::MoveToMinerals: case Orders::WaitForMinerals: case Orders::MiningMinerals: case Orders::ReturnMinerals:
 		case Orders::MoveToGas: case Orders::WaitForGas: case Orders::HarvestGas: case Orders::ReturnGas:

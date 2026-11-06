@@ -12,6 +12,7 @@
 #include "pluto_win.h"
 #include "minimap_clumps.h"
 #include "replay_result.h"
+#include "ui_theme.h"
 #ifdef OPENBW_REMASTERED
 #include "scr_render.h"
 #endif
@@ -734,7 +735,7 @@ struct ui_functions: ui_util_functions {
 
 	int global_volume = 50;
 
-	// Music: the race soundtracks of the players in the replay, shuffled (see ui/music.h),
+	// Music: the soundtrack of the UI theme's race, shuffled (see ui/music.h),
 	// from Remastered's music/*.ogg when an install is found (the classic data files have
 	// none), so without one the viewer stays silent. It plays on while the replay is paused,
 	// as the game's menus do; the master volume (and mute) applies, and the setting turns it
@@ -746,26 +747,29 @@ struct ui_functions: ui_util_functions {
 	scr::casc_storage music_casc;
 #endif
 
+	// The soundtrack follows the UI theme's race (the chosen one, or Auto's first player);
+	// the playlist restarts when that race changes, not every frame.
+	int music_theme = -1;
+	bool music_casc_open = false;
+
 	void update_music() {
 #ifdef OPENBW_REMASTERED
-		if (!music_started && replay_st.end_frame > 0) {
-			music_started = true;
-			a_string dir = remastered_install_dir();
-			std::string error;
-			if (!dir.empty() && music_casc.open(dir.c_str(), error)) {
-				std::vector<::music::race> races;
-				for (int i = 0; i != 8; ++i) {
-					if (!st.players[i].initially_active) continue;
-					int r = (int)st.players[i].race;
-					if (r == 0) races.push_back(::music::race::zerg);
-					else if (r == 1) races.push_back(::music::race::terran);
-					else if (r == 2) races.push_back(::music::race::protoss);
-				}
-				music_player.start(races, [this](const std::string& name, std::vector<uint8_t>& out) {
+		if (replay_st.end_frame > 0) {
+			if (!music_started) {
+				music_started = true;
+				a_string dir = remastered_install_dir();
+				std::string error;
+				if (!dir.empty() && music_casc.open(dir.c_str(), error)) music_casc_open = true;
+				else if (!dir.empty()) ui::log("music: %s: %s\n", dir, error.c_str());
+			}
+			auto theme_race = resolve_theme();
+			if (music_casc_open && music_theme != (int)theme_race) {
+				music_theme = (int)theme_race;
+				::music::race r = theme_race == ui_theme::race::zerg ? ::music::race::zerg
+					: theme_race == ui_theme::race::protoss ? ::music::race::protoss : ::music::race::terran;
+				music_player.start({r}, [this](const std::string& name, std::vector<uint8_t>& out) {
 					return music_casc.read("music/" + name + ".ogg", out);
 				}, (uint64_t)std::chrono::steady_clock::now().time_since_epoch().count());
-			} else if (!dir.empty()) {
-				ui::log("music: %s: %s\n", dir, error.c_str());
 			}
 		}
 #endif
@@ -1716,7 +1720,7 @@ struct ui_functions: ui_util_functions {
 					}
 					box(u, 2, 3, x0, y0, x1, y1);
 					if (minimap_worker_at_work(u, depots)) {
-						fill(x0, y0, x1, y1, minimap_shade(c, 1, 2));
+						blend_fill(x0, y0, x1, y1, minimap_tint(c, 70), 215);  // as the buildings: part of the base
 						continue;
 					}
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
@@ -1741,63 +1745,39 @@ struct ui_functions: ui_util_functions {
 			auto& cl = clumps[i];
 			uint32_t c = palette_rgba(img.player_minimap_colors.at(player_color(cl.owner)));
 			const int x0 = placed[i].x, y0 = placed[i].y, bw = want[i].w, bh = want[i].h, s = bh - 2;
-			// No plate: each unit's silhouette, most cost first, with a thin dark halo around
-			// its outline so it reads on any ground and over the units under it. Its shading
-			// runs from a dark shade through the player's colour to near white, so the
-			// unit's form shows rather than a flat patch of the player's colour.
-			uint32_t dark = minimap_shade(c, 1, 3), light = minimap_tint(c, 225);
-			static const int style = [] { const char* e = std::getenv("OPENBW_ICON_STYLE"); return e ? std::atoi(e) : 0; }();
+			// A badge: a rounded plate in the player's colour, a white border and a thin dark
+			// edge outside it, so it stands out on any ground and over the unit dots under it;
+			// inside, each type's silhouette in white, most cost first, its shading kept as
+			// darker tones of the plate's colour.
+			const int r = 3;  // corner radius
+			auto inside = [&](int x, int y, int inset) {  // in the rounded rect shrunk by inset
+				int w2 = bw - 2 * inset, h2 = bh - 2 * inset;
+				x -= inset, y -= inset;
+				if (x < 0 || y < 0 || x >= w2 || y >= h2) return false;
+				int rr = std::max(0, r - inset);
+				int cx = x < rr ? rr - 1 - x : x >= w2 - rr ? x - (w2 - rr) : -1;
+				int cy = y < rr ? rr - 1 - y : y >= h2 - rr ? y - (h2 - rr) : -1;
+				return cx < 0 || cy < 0 || cx * cx + cy * cy < rr * rr;
+			};
+			uint32_t plate = minimap_shade(c, 3, 4), white = hud_rgba(255, 255, 255, 255), black = hud_rgba(0, 0, 0, 255);
+			for (int y = -1; y <= bh; ++y) for (int x = -1; x <= bw; ++x) {
+				if (inside(x, y, 1)) blend(x0 + x, y0 + y, plate, 245);
+				else if (inside(x, y, 0)) blend(x0 + x, y0 + y, white, 235);
+				else if (inside(x + 1, y + 1, 0) || inside(x - 1, y - 1, 0) || inside(x + 1, y - 1, 0) || inside(x - 1, y + 1, 0)) blend(x0 + x, y0 + y, black, 150);
+			}
+			const int is = s - 2;  // icons sit inside the border with a pixel to spare
+			uint32_t shadow = minimap_shade(c, 1, 3);
 			for (size_t t = 0; t != cl.c.types.size(); ++t) {
-				const auto& m = minimap_icon_mask(cl.c.types[t], s);
-				const int ix = x0 + 1 + (int)t * (s + 1), iy = y0 + 1;
-				auto alpha_at = [&](int x, int y) { return x < 0 || y < 0 || x >= s || y >= s ? 0 : m[(size_t)y * s + x] >> 8; };
-				// Distance (in pixels, up to 3) from the silhouette, for outlines.
-				auto ring_at = [&](int x, int y) {
-					if (alpha_at(x, y) >= 128) return 0;
-					for (int r = 1; r <= 3; ++r)
-						for (int dy = -r; dy <= r; ++dy) for (int dx = -r; dx <= r; ++dx)
-							if (std::max(std::abs(dx), std::abs(dy)) == r && alpha_at(x + dx, y + dy) >= 96) return r;
-					return 4;
-				};
-				if (style == 3) {
-					// A disc in the player's colour with a dark rim, the unit white inside it.
-					double cx = ix + s / 2.0 - 0.5, cy = iy + s / 2.0 - 0.5, R = s / 2.0 + 1.5;
-					for (int y = iy - 3; y <= iy + s + 2; ++y) for (int x = ix - 3; x <= ix + s + 2; ++x) {
-						double d = std::hypot(x - cx, y - cy);
-						if (d <= R - 1) blend(x, y, minimap_shade(c, 3, 4), 235);
-						else if (d <= R) blend(x, y, hud_rgba(0, 0, 0, 255), 220);
-					}
-				} else {
-					for (int y = -3; y <= s + 2; ++y) for (int x = -3; x <= s + 2; ++x) {
-						int r = ring_at(x, y);
-						if (style == 0 && r == 1) blend(ix + x, iy + y, hud_rgba(0, 0, 0, 255), 190);
-						if (style == 1) {  // player-colour line, then black
-							if (r == 1) blend(ix + x, iy + y, minimap_tint(c, 40), 255);
-							else if (r == 2) blend(ix + x, iy + y, hud_rgba(0, 0, 0, 255), 200);
-						}
-						if (style == 2) {  // white line, then black
-							if (r == 1) blend(ix + x, iy + y, hud_rgba(255, 255, 255, 255), 240);
-							else if (r == 2) blend(ix + x, iy + y, hud_rgba(0, 0, 0, 255), 200);
-						}
-					}
-				}
-				for (int y = 0; y != s; ++y) for (int x = 0; x != s; ++x) {
-					uint16_t v = m[(size_t)y * s + x];
+				const auto& m = minimap_icon_mask(cl.c.types[t], is);
+				const int ix = x0 + 2 + (int)t * (s + 1), iy = y0 + 2;
+				for (int y = 0; y != is; ++y) for (int x = 0; x != is; ++x) {
+					uint16_t v = m[(size_t)y * is + x];
 					int a = v >> 8, l = v & 0xff;
 					if (!a) continue;
-					uint32_t px;
-					if (style == 1 || style == 3) {  // white / grey silhouette
-						int g = 150 + l * 105 / 255;
-						px = hud_rgba(g, g, g, 255);
-					} else {
-						auto mix = [&](int sh) {
-							uint32_t lo = l < 128 ? dark : c, hi = l < 128 ? c : light;
-							int t2 = l < 128 ? l * 2 : (l - 128) * 2;
-							return ((lo >> sh & 0xff) * (255 - t2) + (hi >> sh & 0xff) * t2) / 255 << sh;
-						};
-						px = mix(0) | mix(8) | mix(16) | 0xff000000u;
-					}
-					blend(ix + x, iy + y, px, std::min(255, a * 4 / 3));
+					// Dark tones take the plate's shadow colour, light ones go to white.
+					int t2 = std::min(255, l * 3 / 2);
+					auto mix = [&](int sh) { return ((shadow >> sh & 0xff) * (255 - t2) + (255u) * t2) / 255 << sh; };
+					blend(ix + x, iy + y, mix(0) | mix(8) | mix(16) | 0xff000000u, std::min(255, a * 4 / 3));
 				}
 			}
 		}
@@ -3735,13 +3715,12 @@ struct ui_functions: ui_util_functions {
 			if (hd_cmdicon_cache.size() > 256) hd_cmdicon_cache.clear();
 			scr::image src;
 			if (!hd_cmdicons.decode((size_t)frame, src) || src.w <= 0 || src.h <= 0) return false;
-			// Grey to gold: black, through the console's gold at mid grey, to pale yellow.
+			// Grey to the theme's colour: black, through its mid tone at mid grey, to its pale
+			// highlight (Terran: the console's gold to pale yellow).
 			for (auto& p : src.px) {
 				uint32_t a = scr::ch_a(p), g = (scr::ch_r(p) + scr::ch_g(p) + scr::ch_b(p)) / 3;
-				uint32_t r, gg, b;
-				if (g < 128) r = 236 * g / 128, gg = 196 * g / 128, b = 36 * g / 128;
-				else r = 236 + 19 * (g - 128) / 127, gg = 196 + 59 * (g - 128) / 127, b = 36 + 154 * (g - 128) / 127;
-				p = scr::rgba(r, gg, b, a);
+				auto c = ui_theme::icon_color((int)g, theme());
+				p = scr::rgba(c.r, c.g, c.b, a);
 			}
 			scr::premultiply(src);
 			i = hd_cmdicon_cache.emplace(key, scr::resample(src, 0, 0, src.w, src.h, dw, dh, true)).first;
@@ -3806,12 +3785,27 @@ struct ui_functions: ui_util_functions {
 	// graphics, the hand-drawn olive style is used. Layout padding follows (panel_pad()).
 	bool ui_skin = false;  // the frame being drawn uses the skin
 
+	// UI theme (ui/ui_theme.h): the setting's level (1 = Auto, the first player's race) and
+	// the race it resolves to this frame.
+	int ui_theme_level = ui_theme::level_auto;
+	ui_theme::race active_theme = ui_theme::race::terran;
+	const ui_theme::palette& theme() const { return ui_theme::palette_of(active_theme); }
+	ui_theme::race resolve_theme() const {
+		std::array<int, 8> races;
+		size_t n = 0;
+		for (int i = 0; i != 8; ++i)
+			if (st.players[i].initially_active) races[n++] = (int)st.players[i].race;
+		return ui_theme::resolve(ui_theme_level, races.begin(), races.begin() + n);
+	}
+
 	int panel_pad() const { return ui_skin ? 16 : 8; }
 
 #ifdef OPENBW_REMASTERED
 	struct observer_skin {
 		bool tried = false, ok = false;
 		scr::image left, right, center, minimap, bar_empty, bar_full;
+		scr::image base_left, base_right, base_center, base_minimap;  // the art as shipped, to recolour from
+		int themed = -1;  // the ui_theme::race the images above are made for
 		int bar_height = 0;  // bar_empty/bar_full resampled to this height (0: native)
 		scr::image bar_empty_h, bar_full_h;
 	};
@@ -3821,18 +3815,49 @@ struct ui_functions: ui_util_functions {
 		if (!hd) return false;
 		if (!skin.tried) {
 			skin.tried = true;
-			skin.ok = hd->read_ui_image("HD2/game/observer/uiObserverConsoleLeft.dds", skin.left) &&
-			          hd->read_ui_image("HD2/game/observer/uiObserverConsoleRight.dds", skin.right) &&
-			          hd->read_ui_image("HD2/game/observer/uiObserverConsoleCenter.dds", skin.center) &&
-			          hd->read_ui_image("HD2/game/observer/uiObserverSquareFullFrame.dds", skin.minimap) &&
+			skin.ok = hd->read_ui_image("HD2/game/observer/uiObserverConsoleLeft.dds", skin.base_left) &&
+			          hd->read_ui_image("HD2/game/observer/uiObserverConsoleRight.dds", skin.base_right) &&
+			          hd->read_ui_image("HD2/game/observer/uiObserverConsoleCenter.dds", skin.base_center) &&
+			          hd->read_ui_image("HD2/game/observer/uiObserverSquareFullFrame.dds", skin.base_minimap) &&
 			          hd->read_ui_image("HD2/game/consoles/terran/pbrempt.dds", skin.bar_empty) &&
 			          hd->read_ui_image("HD2/game/consoles/terran/pbrfull.dds", skin.bar_full) &&
-			          skin.left.h == skin.center.h && skin.right.h == skin.center.h && skin.center.h >= 100 &&
-			          skin.minimap.w >= 100 && skin.minimap.h >= 100 && skin.bar_empty.w == skin.bar_full.w &&
+			          skin.base_left.h == skin.base_center.h && skin.base_right.h == skin.base_center.h && skin.base_center.h >= 100 &&
+			          skin.base_minimap.w >= 100 && skin.base_minimap.h >= 100 && skin.bar_empty.w == skin.bar_full.w &&
 			          skin.bar_empty.h == skin.bar_full.h && skin.bar_empty.w > 12;
-			if (!skin.ok) ui::log("remastered graphics: observer UI art missing; using the classic panels\n");
+			if (skin.ok) {
+				skin.left = skin.base_left; skin.right = skin.base_right; skin.center = skin.base_center; skin.minimap = skin.base_minimap;
+				skin.themed = (int)ui_theme::race::terran;
+			} else ui::log("remastered graphics: observer UI art missing; using the classic panels\n");
 		}
+		if (skin.ok && skin.themed != (int)active_theme) skin_apply_theme();
 		return skin.ok;
+	}
+
+	// Recolours the observer art toward the active race and swaps in that race's own
+	// progress bars (Terran's if the install lacks them). Runs only when the theme changes.
+	void skin_apply_theme() {
+		const auto& pal = theme();
+		auto tint = [&](const scr::image& from, scr::image& to) {
+			to = from;
+			if (!pal.recolour) return;
+			for (auto& px : to.px) {
+				auto c = ui_theme::tint_rgb((int)scr::ch_r(px), (int)scr::ch_g(px), (int)scr::ch_b(px), (int)scr::ch_a(px), pal);
+				px = scr::rgba(c.r, c.g, c.b, scr::ch_a(px));
+			}
+		};
+		tint(skin.base_left, skin.left);
+		tint(skin.base_right, skin.right);
+		tint(skin.base_center, skin.center);
+		tint(skin.base_minimap, skin.minimap);
+		std::string dir = std::string("HD2/game/consoles/") + pal.console_dir + "/";
+		scr::image e, f;
+		if (!(hd->read_ui_image(dir + "pbrempt.dds", e) && hd->read_ui_image(dir + "pbrfull.dds", f) && e.w == f.w && e.h == f.h && e.w > 12) &&
+		    !(hd->read_ui_image("HD2/game/consoles/terran/pbrempt.dds", e) && hd->read_ui_image("HD2/game/consoles/terran/pbrfull.dds", f))) return;
+		skin.bar_empty = std::move(e);
+		skin.bar_full = std::move(f);
+		skin.bar_height = 0;  // the resampled copies are of the old bars
+		hd_cmdicon_cache.clear();
+		skin.themed = (int)active_theme;
 	}
 
 	// Copies a region of skin art (premultiplied) over a straight-alpha RGBA buffer, nearest
@@ -5379,6 +5404,16 @@ struct ui_functions: ui_util_functions {
 			v.level_names = names;
 			r.push_back(std::move(v));
 		}
+		{
+			static const char* const names[] = {"auto", "Terran", "Protoss", "Zerg"};
+			viewer_setting v{"ui_theme", "UI theme", "", true, [] { return false; },
+				[this] { ui_theme_level = ui_theme_level % ui_theme::level_count + 1; }};
+			v.levels = ui_theme::level_count;
+			v.level = [this] { return ui_theme_level; };
+			v.set_level = [this](int l) { ui_theme_level = ui_theme::clamp_level(l); };
+			v.level_names = names;
+			r.push_back(std::move(v));
+		}
 		add("auto_observer", "Auto observer", "o", true, std::make_pair(std::function<bool()>([this] { return auto_observer; }),
 			std::function<void()>([this] { toggle_auto_observer(); })));
 		add("music", "Music", "", true, flag(music_enabled));
@@ -5885,7 +5920,7 @@ struct ui_functions: ui_util_functions {
 		// Soft outer glow while hovered.
 		if (hover) {
 			for (int k = 2; k >= 1; --k) {
-				uint32_t g = hud_rgba(240, 170, 60, k == 1 ? 90 : 40);
+				uint32_t g = hud_rgba(theme().glow.r, theme().glow.g, theme().glow.b, k == 1 ? 90 : 40);
 				blend_rect(buf, pitch, w, h, x - k + 1, y - k, bw + 2 * k - 2, 1, g);
 				blend_rect(buf, pitch, w, h, x - k + 1, y + bh + k - 1, bw + 2 * k - 2, 1, g);
 				blend_rect(buf, pitch, w, h, x - k, y - k + 1, 1, bh + 2 * k - 2, g);
@@ -5896,8 +5931,12 @@ struct ui_functions: ui_util_functions {
 		fill_rgba(buf, pitch, w, h, x + 1, y, bw - 2, bh, hud_rgba(0, 0, 0, 255));
 		fill_rgba(buf, pitch, w, h, x, y + 1, bw, bh - 2, hud_rgba(0, 0, 0, 255));
 		// Graded face.
-		int top[3] = {62, 68, 70}, bot[3] = {18, 21, 23};
-		if (hover) { top[0] = 84; top[1] = 82; top[2] = 74; bot[0] = 28; bot[1] = 26; bot[2] = 22; }
+		const auto& th = theme();
+		int top[3] = {th.button_top.r, th.button_top.g, th.button_top.b}, bot[3] = {th.button_bottom.r, th.button_bottom.g, th.button_bottom.b};
+		if (hover) {
+			top[0] = th.button_hover_top.r; top[1] = th.button_hover_top.g; top[2] = th.button_hover_top.b;
+			bot[0] = th.button_hover_bottom.r; bot[1] = th.button_hover_bottom.g; bot[2] = th.button_hover_bottom.b;
+		}
 		if (pressed) { top[0] = 10; top[1] = 12; top[2] = 13; bot[0] = 34; bot[1] = 38; bot[2] = 40; }
 		int fx = x + 1, fy = y + 1, fw = bw - 2, fh = bh - 2;
 		for (int r = 0; r != fh; ++r) {
@@ -5911,7 +5950,7 @@ struct ui_functions: ui_util_functions {
 			int gh = fh * 9 / 20;
 			for (int r = 1; r < gh; ++r) blend_rect(buf, pitch, w, h, fx + 1, fy + r, fw - 2, 1, hud_rgba(255, 255, 255, 22 * (gh - r) / gh));
 			// Lit top edge, softer sides, dark lower lip.
-			blend_rect(buf, pitch, w, h, fx + 1, fy, fw - 2, 1, hover ? hud_rgba(255, 214, 140, 200) : hud_rgba(196, 202, 204, 170));
+			blend_rect(buf, pitch, w, h, fx + 1, fy, fw - 2, 1, hover ? hud_rgba((th.glow.r + 255) / 2, (th.glow.g + 255) / 2, (th.glow.b + 255) / 2, 200) : hud_rgba(196, 202, 204, 170));
 			blend_rect(buf, pitch, w, h, fx, fy + 1, 1, fh - 2, hud_rgba(150, 156, 158, 70));
 			blend_rect(buf, pitch, w, h, fx + fw - 1, fy + 1, 1, fh - 2, hud_rgba(0, 0, 0, 90));
 			blend_rect(buf, pitch, w, h, fx + 1, fy + fh - 1, fw - 2, 1, hud_rgba(0, 0, 0, 150));
@@ -5921,7 +5960,7 @@ struct ui_functions: ui_util_functions {
 		}
 		if (hover) {
 			// Amber rim just inside the outline.
-			uint32_t rim = hud_rgba(230, 150, 50, 150);
+			uint32_t rim = hud_rgba(th.glow.r, th.glow.g, th.glow.b, 150);
 			blend_rect(buf, pitch, w, h, fx, fy + 1, 1, fh - 2, rim);
 			blend_rect(buf, pitch, w, h, fx + fw - 1, fy + 1, 1, fh - 2, rim);
 			blend_rect(buf, pitch, w, h, fx + 1, fy + fh - 1, fw - 2, 1, rim);
@@ -6847,6 +6886,7 @@ struct ui_functions: ui_util_functions {
 
 		const bool hd_frame = hd_ready();
 		minimap_hd = hd_frame;
+		active_theme = resolve_theme();
 		ui_skin = hd_frame && skin_ready();
 		auto drag_rect = [&] {
 			auto r = rect{{drag_select_from_x, drag_select_from_y}, {drag_select_to_x, drag_select_to_y}};

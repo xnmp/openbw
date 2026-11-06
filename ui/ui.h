@@ -1557,11 +1557,11 @@ struct ui_functions: ui_util_functions {
 	int minimap_cells_tileset = -1;
 	bool minimap_hd = false;  // the frame being drawn uses the remastered art
 
-	// Window pixels: the longer side about a quarter of the window height.
+	// Window pixels: the longer side about 30% of the window height.
 	rect minimap_window_rect() const {
 		int tw = (int)game_st.map_tile_width, th = (int)game_st.map_tile_height;
 		if (tw <= 0 || th <= 0 || window_height <= 0 || viewport_w <= 0) return {};
-		int side = std::max(128, std::min(384, (int)(window_height * 0.26)));
+		int side = std::max(144, std::min(448, (int)(window_height * 0.30)));
 		side = std::min(side, std::min(viewport_w, window_height) / 2);
 		int w = std::max(1, side * tw / std::max(tw, th)), h = std::max(1, side * th / std::max(tw, th));
 		return rect{{viewport_x, window_height - h}, {viewport_x + w, window_height}};
@@ -3656,7 +3656,7 @@ struct ui_functions: ui_util_functions {
 			};
 			if (unit_is_carrier(u)) ci.icons.push_back(launched_icon(UnitTypes::Protoss_Interceptor, (int)unit_interceptor_count(u), "Interceptors"));
 			if (unit_is_reaver(u)) ci.icons.push_back(launched_icon(UnitTypes::Protoss_Scarab, (int)unit_scarab_count(u), "Scarabs"));
-			if (unit_is_vulture(u) && player_has_researched(u->owner, TechTypes::Spider_Mines)) {
+			if (unit_is_vulture(u) && player_has_researched(u->owner, TechTypes::Spider_Mines) && unit_spider_mine_count(u) > 0) {
 				ci.icons.push_back(count_icon(get_tech_type(TechTypes::Spider_Mines)->icon, (int)unit_spider_mine_count(u), "Spider Mines"));
 			}
 			ci.icons.erase(std::remove_if(ci.icons.begin(), ci.icons.end(), [](const console_icon& i) { return i.frame < 0; }), ci.icons.end());

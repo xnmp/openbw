@@ -103,6 +103,42 @@ inline double chance_at(const record& r, int frame) {
 	return (v + 1) / 2;
 }
 
+// When the game was decided, by the bots' own estimates: the earliest frame from which the
+// eventual winner's chance stays at or above `threshold` to the end of the game. Each
+// player's record is its own estimate (null if missing); with both, the winner's chance is
+// the mean of the two views (its own estimate, and one minus the loser's), so neither bot's
+// optimism alone decides it. The winner is the side favoured at the end. -1 if the game was
+// never decided that way, or only in its last `min_left` frames (the usual end: the loser
+// resigns once its own estimate collapses). Sampled every `step` frames.
+struct decision {
+	int frame = -1;
+	int winner = -1;  // 0: the first record's owner, 1: the second's
+};
+inline decision decided(const record* a, const record* b, int end_frame, double threshold = 0.9, int min_left = 60 * 24, int step = 24) {
+	decision d;
+	if ((!a && !b) || end_frame <= 0 || step <= 0) return d;
+	auto chance_a = [&](int f) {  // the first player's chance of winning at frame f
+		double sum = 0;
+		int n = 0;
+		if (a) sum += chance_at(*a, f), ++n;
+		if (b) sum += 1 - chance_at(*b, f), ++n;
+		return sum / n;
+	};
+	double last = chance_a(end_frame);
+	if (last == 0.5) return d;
+	int winner = last > 0.5 ? 0 : 1;
+	auto winning = [&](int f) { double c = chance_a(f); return (winner == 0 ? c : 1 - c) >= threshold; };
+	int from = -1;
+	for (int f = end_frame / step * step; f >= 0; f -= step) {
+		if (!winning(f)) break;
+		from = f;
+	}
+	if (from < 0 || end_frame - from < min_left) return d;
+	d.frame = from;
+	d.winner = winner;
+	return d;
+}
+
 }
 
 #endif

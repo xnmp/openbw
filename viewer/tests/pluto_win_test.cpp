@@ -67,6 +67,42 @@ int main() {
 		pluto_win::record r;
 		CHECK(near(pluto_win::chance_at(r, 100), 0.5));
 	}
+	{  // decided(): from when the winner's chance stays high to the end
+		auto rec = [](std::vector<double> traj, int frames) { pluto_win::record r; r.opponent = "x"; r.frames = frames; r.traj = traj; return r; };
+		// 10 points over 24000 frames (2400 each). A turtles from point 4 on: A loses.
+		auto a = rec({0, 0, 0, -0.2, -0.85, -0.9, -0.9, -0.95, -0.95, -1}, 24000);
+		auto b = rec({0, 0, 0, 0.2, 0.85, 0.9, 0.9, 0.95, 0.95, 1}, 24000);
+		auto d = pluto_win::decided(&a, &b, 24000);
+		CHECK(d.winner == 1);
+		CHECK(d.frame > 3 * 2400 && d.frame <= 4 * 2400 + 1200);  // between points 3 and 4
+		// One estimate alone also works; neither: nothing
+		CHECK(pluto_win::decided(&a, nullptr, 24000).winner == 1);
+		CHECK(pluto_win::decided(nullptr, &b, 24000).winner == 1);
+		CHECK(pluto_win::decided(nullptr, nullptr, 24000).frame == -1);
+		// The views are averaged: a winner that is unsure holds it back
+		auto unsure = rec({0, 0, 0, 0.2, 0.3, 0.3, 0.4, 0.5, 0.6, 1}, 24000);
+		auto d2 = pluto_win::decided(&a, &unsure, 24000);
+		CHECK(d2.frame == -1 || d2.frame > d.frame);
+		// A comeback: the side behind recovers, so it's decided only at the very end: none
+		auto back = rec({0, -0.9, -0.9, -0.9, -0.9, 0, 0.5, 0.9, 0.95, 1}, 24000);
+		auto ahead = rec({0, 0.9, 0.9, 0.9, 0.9, 0, -0.5, -0.9, -0.95, -1}, 24000);
+		auto d3 = pluto_win::decided(&back, &ahead, 24000);
+		CHECK(d3.winner == 0);
+		CHECK(d3.frame >= 6 * 2400);  // not during the early lead that didn't last
+		// Decided only in the last minute (the resignation itself): none
+		std::vector<double> late(64, 0.0);  // real records have 64 points
+		late.back() = -1;
+		auto late_a = rec(late, 24000);
+		CHECK(pluto_win::decided(&late_a, nullptr, 24000).frame == -1);
+		// Even all the way (no winner at the end) or nonsense lengths: none
+		auto even = rec({0, 0, 0}, 24000);
+		CHECK(pluto_win::decided(&even, nullptr, 24000).frame == -1);
+		CHECK(pluto_win::decided(&a, &b, 0).frame == -1);
+		// Decided from the start: frame 0
+		auto lost = rec({-1, -1, -1}, 24000);
+		auto d4 = pluto_win::decided(&lost, nullptr, 24000);
+		CHECK(d4.frame == 0 && d4.winner == 1);
+	}
 	std::printf(failures ? "%d failures\n" : "all passed\n", failures);
 	return failures != 0;
 }

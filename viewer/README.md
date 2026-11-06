@@ -85,7 +85,11 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   per game, at least 30 s apart). Hover a marker to see whose unit it was, or each player's
   losses in the battle; click it to jump to 5 s before. They are found by playing the whole
   replay once in the background at startup (a few seconds), so they appear shortly after
-  the window opens.
+  the window opens. With the Pluto bots' win estimates (see the Win % graph), the bar also
+  marks when the game was decided: a gold tick where the eventual winner's chance (the mean
+  of both bots' estimates) rose to 90% and stayed there to the end, with the rest of the bar
+  shaded. Hover it for the time left; click it to skip to the end. Games decided only in
+  their last minute (the loser resigning) get none.
 - **Game menu** (`F10`): pauses the replay with **Return to Game**, **Options** (the
   settings menu) and **Exit Replay**; `F10` or `Esc` returns, playing or paused as before.
 - **Music**: the race soundtracks of the players in the replay, shuffled, from Remastered's

@@ -1696,7 +1696,7 @@ struct ui_functions: ui_util_functions {
 				box(u, 2, 4, x0, y0, x1, y1);
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
-				else blend_fill(x0, y0, x1, y1, minimap_tint(c, 70), 130);  // the units' colour, see-through
+				else blend_fill(x0, y0, x1, y1, minimap_tint(c, 70), 215);  // the units' colour, a little see-through
 			}
 		}
 		// 2: minor units, faint; 3: ground units; 4: air units, outlined.
@@ -4709,6 +4709,10 @@ struct ui_functions: ui_util_functions {
 	std::array<pluto_win::record, 8> win_estimate;
 	std::array<bool, 8> has_win_estimate{};
 	bool any_win_estimate = false;
+	// When the game was decided by the bots' estimates (see pluto_win::decided): the seek
+	// bar shades the rest of the game after it, which is often a lost side holding out.
+	int decided_frame = -1;
+	int decided_winner = -1;
 
 	void load_pluto_win_estimates(const a_string& replay_path) {
 		std::string path(replay_path.c_str());
@@ -4747,6 +4751,13 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 		any_win_estimate = has_win_estimate[players[0]] || has_win_estimate[players[1]];
+		auto d = pluto_win::decided(has_win_estimate[players[0]] ? &win_estimate[players[0]] : nullptr,
+			has_win_estimate[players[1]] ? &win_estimate[players[1]] : nullptr, replay_st.end_frame);
+		if (d.frame >= 0) {
+			decided_frame = d.frame;
+			decided_winner = players[d.winner];
+			ui::log("decided at %s for %s\n", format_game_time(decided_frame), replay_st.player_name[decided_winner]);
+		}
 		if (any_win_estimate) ui::log("pluto win estimates: %s%s\n", has_win_estimate[players[0]] ? replay_st.player_name[players[0]] : "", 
 			has_win_estimate[players[1]] ? " " + replay_st.player_name[players[1]] : a_string());
 	}
@@ -5690,10 +5701,17 @@ struct ui_functions: ui_util_functions {
 	// The marker within `px` pixels of `frame` on a seek bar `bar_w` pixels wide, with its tip.
 	timeline_hit timeline_marker_at(int frame, int px, int bar_w) const {
 		timeline_hit hit;
-		const timeline::markers* m = timeline_markers();
-		if (!m) return hit;
 		int tolerance = (int)((int64_t)px * replay_st.end_frame / std::max(1, bar_w));
-		auto h = timeline::marker_at(*m, frame, tolerance, 5 * 24);
+		const timeline::markers* m = timeline_markers();
+		auto h = m ? timeline::marker_at(*m, frame, tolerance, 5 * 24) : timeline::hit{};
+		if (h.kind == timeline::hit::none && decided_frame >= 0 && std::abs(frame - decided_frame) <= tolerance) {
+			// The decided tick: its tip says why, and a click skips the rest.
+			hit.seek_frame = replay_st.end_frame;
+			hit.tip = "Decided " + format_game_time(decided_frame) + ": " + player_label(decided_winner) + " 90%+ to win (" +
+				format_game_time(replay_st.end_frame - decided_frame) + " left); click to skip";
+			return hit;
+		}
+		if (!m) return hit;
 		hit.seek_frame = h.seek_frame;
 		if (h.kind == timeline::hit::first_loss) {
 			const auto& l = m->first_loss;
@@ -5719,6 +5737,13 @@ struct ui_functions: ui_util_functions {
 	// short cyan line through the track. frame_x maps a frame to a panel x.
 	template<typename frame_x_F>
 	void draw_timeline_markers(uint32_t* buf, size_t pitch, int w, int h, int ty, int bh, frame_x_F&& frame_x) {
+		if (decided_frame >= 0) {
+			// After the game was decided: the track darkened and hatched, from a gold tick.
+			int x0 = frame_x(decided_frame), x1 = frame_x(replay_st.end_frame);
+			blend_rect(buf, pitch, w, h, x0, ty, x1 - x0, bh, hud_rgba(0, 0, 0, 120));
+			for (int x = x0 + 2; x < x1; x += 4) blend_rect(buf, pitch, w, h, x, ty + 1, 1, bh - 2, hud_rgba(0, 0, 0, 90));
+			blend_rect(buf, pitch, w, h, x0, ty - 4, 2, bh + 8, hud_rgba(255, 200, 60, 230));
+		}
 		const timeline::markers* m = timeline_markers();
 		if (!m) return;
 		long long biggest = 1;

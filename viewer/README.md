@@ -62,11 +62,12 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
 - **Minimap** flush in the bottom-left corner; click or drag on it to move the camera. It is
   drawn at the window's resolution, each tile its terrain art averaged over a 4x4 grid (the
-  remastered tiles with those graphics on). Buildings are flat and part transparent in the
-  player's colour, units solid and lighter on top, air army outlined in black. Spider
+  remastered tiles with those graphics on). Buildings are rounded boxes in the
+  units' colour, part transparent, with a dark hairline; units are dots on top, air army
+  outlined in black. Spider
   Mines, Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
   12 tiles of one of their own bases are dimmed, so armies stand out. A concentration of one
-  unit type gets that type's icon: each type's units are grouped (linked within 6 tiles,
+  unit type gets a round badge with that type's icon (a pill for several types): each type's units are grouped (linked within 6 tiles,
   DBSCAN-style, and cut by 2-means until no group is wider than 10 tiles), and a group shows
   when its cost reaches 750 minerals + gas and its density 12 per square tile. Icons of one
   player at about the same spot share a row (20 Zerglings under 8 Mutalisks: both, the

@@ -1628,8 +1628,9 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// ---- Minimap units ----
-	// Layers, bottom to top: resources and other neutrals; buildings (flat, in the same colour
-	// as the player's units but part transparent); ground units; air units (with a dark outline, so a flock reads over
+	// Layers, bottom to top: resources and other neutrals; buildings (rounded, in the same
+	// colour as the player's units but part transparent, with a dark hairline); ground units
+	// (dots, as are all units); air units (with a dark outline, so a flock reads over
 	// ground units and terrain). Units are lighter than buildings, so the two read apart even
 	// in one colour. Minor units (mines, Interceptors, Scarabs, larvae, larva eggs) are a
 	// faint dot: a minefield or an Interceptor cloud shows as a haze rather than a wall of
@@ -1675,6 +1676,21 @@ struct ui_functions: ui_util_functions {
 			int ix1 = std::max(ix0 + 1, (int)std::floor(x1)), iy1 = std::max(iy0 + 1, (int)std::floor(y1));
 			for (int y = iy0; y < iy1; ++y) for (int x = ix0; x < ix1; ++x) blend(x, y, c, a);
 		};
+		// Antialiased shapes: a disc filling a box, and a box with rounded corners (radius in px).
+		auto rounded = [&](double x0, double y0, double x1, double y1, double rad, uint32_t c, int a) {
+			rad = std::max(0.0, std::min(rad, std::min(x1 - x0, y1 - y0) / 2));
+			for (int y = (int)std::floor(y0); y < (int)std::ceil(y1); ++y) for (int x = (int)std::floor(x0); x < (int)std::ceil(x1); ++x) {
+				double px = x + 0.5, py = y + 0.5;
+				double dx = std::max({x0 + rad - px, 0.0, px - (x1 - rad)}), dy = std::max({y0 + rad - py, 0.0, py - (y1 - rad)});
+				double edge = std::min({px - x0, x1 - px, py - y0, y1 - py});  // coverage at straight edges
+				double cov = std::min(std::max(0.0, std::min(1.0, rad - std::sqrt(dx * dx + dy * dy) + 0.5)), std::max(0.0, std::min(1.0, edge + 0.5)));
+				if (rad <= 0) cov = std::max(0.0, std::min(1.0, edge + 0.5));
+				if (cov > 0) blend(x, y, c, (int)(a * cov));
+			}
+		};
+		auto disc = [&](double x0, double y0, double x1, double y1, uint32_t c, int a) {
+			rounded(x0, y0, x1, y1, std::min(x1 - x0, y1 - y0) / 2, c, a);
+		};
 		auto shown = [&](const unit_t* u) {
 			if (!unit_visble_on_minimap(u)) return false;
 			// Under fog, neutral units (resources, critters) show only where explored.
@@ -1700,7 +1716,11 @@ struct ui_functions: ui_util_functions {
 				box(u, 2, 4, x0, y0, x1, y1);
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
-				else blend_fill(x0, y0, x1, y1, minimap_tint(c, 70), 215);  // the units' colour, a little see-through
+				else {
+					// A dark hairline just outside, then the units' colour, a little see-through.
+					rounded(x0 - 1, y0 - 1, x1 + 1, y1 + 1, 2.5, hud_rgba(0, 0, 0, 255), 130);
+					rounded(x0, y0, x1, y1, 1.5, minimap_tint(c, 70), 215);
+				}
 			}
 		}
 		// 2: minor units, faint; 3: ground units; 4: air units, outlined.
@@ -1720,12 +1740,12 @@ struct ui_functions: ui_util_functions {
 					}
 					box(u, 2, 3, x0, y0, x1, y1);
 					if (minimap_worker_at_work(u, depots)) {
-						blend_fill(x0, y0, x1, y1, minimap_tint(c, 70), 215);  // as the buildings: part of the base
+						disc(x0, y0, x1, y1, minimap_tint(c, 70), 215);  // as the buildings: part of the base
 						continue;
 					}
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
-					if (air && unit_counts_as_army(u)) fill(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255));
-					fill(x0, y0, x1, y1, minimap_tint(c, 70));
+					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
+					disc(x0, y0, x1, y1, minimap_tint(c, 70), 255);
 				}
 			}
 		}
@@ -1745,31 +1765,19 @@ struct ui_functions: ui_util_functions {
 			auto& cl = clumps[i];
 			uint32_t c = palette_rgba(img.player_minimap_colors.at(player_color(cl.owner)));
 			const int x0 = placed[i].x, y0 = placed[i].y, bw = want[i].w, bh = want[i].h, s = bh - 2;
-			// A badge: a rounded plate in the player's colour, a white border and a thin dark
-			// edge outside it, so it stands out on any ground and over the unit dots under it;
-			// inside, each type's silhouette in white, most cost first, its shading kept as
-			// darker tones of the plate's colour.
-			const int r = 3;  // corner radius
-			auto inside = [&](int x, int y, int inset) {  // in the rounded rect shrunk by inset
-				int w2 = bw - 2 * inset, h2 = bh - 2 * inset;
-				x -= inset, y -= inset;
-				if (x < 0 || y < 0 || x >= w2 || y >= h2) return false;
-				int rr = std::max(0, r - inset);
-				int cx = x < rr ? rr - 1 - x : x >= w2 - rr ? x - (w2 - rr) : -1;
-				int cy = y < rr ? rr - 1 - y : y >= h2 - rr ? y - (h2 - rr) : -1;
-				return cx < 0 || cy < 0 || cx * cx + cy * cy < rr * rr;
-			};
-			uint32_t plate = minimap_shade(c, 3, 4), white = hud_rgba(255, 255, 255, 255), black = hud_rgba(0, 0, 0, 255);
-			for (int y = -1; y <= bh; ++y) for (int x = -1; x <= bw; ++x) {
-				if (inside(x, y, 1)) blend(x0 + x, y0 + y, plate, 245);
-				else if (inside(x, y, 0)) blend(x0 + x, y0 + y, white, 235);
-				else if (inside(x + 1, y + 1, 0) || inside(x - 1, y - 1, 0) || inside(x + 1, y - 1, 0) || inside(x - 1, y + 1, 0)) blend(x0 + x, y0 + y, black, 150);
-			}
-			const int is = s - 2;  // icons sit inside the border with a pixel to spare
+			// A badge: a round plate in the player's colour (a pill for a row of types), a
+			// white border and a thin dark edge outside it, so it stands out on any ground and
+			// over the unit dots under it; inside, each type's silhouette in white, most cost
+			// first, its shading kept as darker tones of the plate's colour.
+			uint32_t plate = minimap_shade(c, 3, 4), black = hud_rgba(0, 0, 0, 255);
+			rounded(x0 - 1, y0 - 1, x0 + bw + 1, y0 + bh + 1, bh / 2.0 + 1, black, 150);
+			rounded(x0, y0, x0 + bw, y0 + bh, bh / 2.0, hud_rgba(255, 255, 255, 255), 235);
+			rounded(x0 + 1.5, y0 + 1.5, x0 + bw - 1.5, y0 + bh - 1.5, bh / 2.0 - 1.5, plate, 250);
+			const int is = std::max(6, (bh - 4) * 4 / 5);  // the square icon fits inside the round plate
 			uint32_t shadow = minimap_shade(c, 1, 3);
 			for (size_t t = 0; t != cl.c.types.size(); ++t) {
 				const auto& m = minimap_icon_mask(cl.c.types[t], is);
-				const int ix = x0 + 2 + (int)t * (s + 1), iy = y0 + 2;
+				const int ix = x0 + 1 + (int)t * (s + 1) + (s - is) / 2, iy = y0 + (bh - is) / 2;
 				for (int y = 0; y != is; ++y) for (int x = 0; x != is; ++x) {
 					uint16_t v = m[(size_t)y * is + x];
 					int a = v >> 8, l = v & 0xff;

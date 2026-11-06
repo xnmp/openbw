@@ -218,7 +218,7 @@ Playback starts at 1×, so press `=` a few times.
   its two Templar's kills, and spellcasters show their count too. Kill counts are
   display only, so replays still play back identically.
 
-- The overlay font in `ui/hud_font.h` is a bitmap rendering of JetBrains Mono Bold
+- The overlay font in `ui/hud_font.h` is an 18px bitmap rendering of JetBrains Mono Bold
   (SIL OFL 1.1, see `LICENSE-JetBrainsMono.txt`). Regenerate it with `gen_hud_font.py`.
 - `ui/order_names.h` is generated from `bwenums.h` by `gen_order_names.py`.
 - Wireframes come from the game's own `unit/wirefram/*.grp` files (with the remastered

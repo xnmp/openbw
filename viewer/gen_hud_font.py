@@ -3,7 +3,7 @@ from a monospace TTF, for the replay viewer's stats overlay. Run once; the heade
 self-contained so the viewer has no runtime font dependency.
 
   uv run --no-project --with pillow python viewer/gen_hud_font.py \
-      /usr/share/fonts/TTF/JetBrainsMono-Bold.ttf 16 ui/hud_font.h
+      /usr/share/fonts/TTF/JetBrainsMono-Bold.ttf 18 ui/hud_font.h
 JetBrains Mono is SIL OFL 1.1; the bitmaps are a derived rendering of it.
 """
 import sys

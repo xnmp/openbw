@@ -1812,12 +1812,27 @@ struct ui_functions: ui_util_functions {
 		double x0, y0, x1, y1;
 		// 1: neutrals and buildings.
 		for (size_t i = 12; i != 0;) {
+		// Bases on the map as shown (a Nexus, Command Center or Hatchery, finished or not, that
+		// the minimap itself shows, so fog hides an expansion here too). Mineral fields away from
+		// all of them, and their geysers, are dimmed: untaken bases recede and taken ones stand out.
+		a_vector<xy> bases;
+		for (int p = 0; p != 8; ++p) {
+			for (unit_t* u : ptr(st.player_units[p])) if (ut_resource_depot(u) && shown(u)) bases.push_back(u->sprite->position);
+		}
+		auto near_base = [&](const unit_t* u) {
+			const int r = 12 * 32;
+			return std::any_of(bases.begin(), bases.end(), [&](xy b) {
+				xy v = b - u->sprite->position;
+				return v.x * v.x + v.y * v.y <= r * r;
+			});
+		};
 			--i;
 			for (unit_t* u : ptr(st.player_units[i])) {
 				if (!shown(u) || !(ut_building(u) || u->owner >= 8)) continue;
 				box(u, 2, 4, x0, y0, x1, y1, u->owner >= 8 ? 1.0 : minimap_owned_scale);
 				uint32_t c = colour(u);
-				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
+				if (u->owner >= 8 && (unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser)) && !near_base(u)) blend_fill(x0, y0, x1, y1, c, 95);
+				else if (u->owner >= 8) fill(x0, y0, x1, y1, c);
 				else {
 					draw_minimap_block(x0, y0, x1, y1, minimap_tint(c, 70), blend);
 				}

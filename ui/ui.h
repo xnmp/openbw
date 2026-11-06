@@ -3109,6 +3109,124 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+	// Hits per attack, as shown in a weapon's tip (Zealot 8x2): weapons.dat's bullet count
+	// times how many times the unit's attack animation fires, which is where the Zealot's
+	// and Firebat's two hits come from. Read once per unit type from the loaded iscript.
+	mutable a_unordered_map<int, int> attack_hits_cache;
+	int attack_hits(const unit_type_t* ut, const weapon_type_t* wt, bool air) const {
+		int key = (int)ut->id * 2 + air;
+		auto cached = attack_hits_cache.find(key);
+		int fires = 1;
+		if (cached != attack_hits_cache.end()) fires = cached->second;
+		else {
+			fires = iscript_attack_fires(ut->flingy->sprite->image->iscript_id, air ? iscript_anims::AirAttkRpt : iscript_anims::GndAttkRpt);
+			attack_hits_cache[key] = fires;
+		}
+		return std::max(1, fires) * std::max(1, wt->bullet_count);
+	}
+	// Attack instructions (attack, attackwith, attackmelee, attkshiftproj) in one animation
+	// of a script, followed through gotos to its end or gotorepeatattk; 0 if none or unknown.
+	int iscript_attack_fires(int script_id, int anim) const {
+		using namespace iscript_opcodes;
+		static std::array<const char*, 69> ins_data = [] {
+			std::array<const char*, 69> ins_data{};
+			ins_data[opc_playfram] = "2";
+			ins_data[opc_playframtile] = "2";
+			ins_data[opc_sethorpos] = "s1";
+			ins_data[opc_setvertpos] = "s1";
+			ins_data[opc_setpos] = "s1s1";
+			ins_data[opc_wait] = "1";
+			ins_data[opc_waitrand] = "11";
+			ins_data[opc_goto] = "j";
+			ins_data[opc_imgol] = "211";
+			ins_data[opc_imgul] = "211";
+			ins_data[opc_imgolorig] = "2";
+			ins_data[opc_switchul] = "2";
+			ins_data[opc___0c] = "";
+			ins_data[opc_imgoluselo] = "211";
+			ins_data[opc_imguluselo] = "211";
+			ins_data[opc_sprol] = "2s1s1";
+			ins_data[opc_highsprol] = "211";
+			ins_data[opc_lowsprul] = "211";
+			ins_data[opc_uflunstable] = "2";
+			ins_data[opc_spruluselo] = "211";
+			ins_data[opc_sprul] = "211";
+			ins_data[opc_sproluselo] = "21";
+			ins_data[opc_end] = "e";
+			ins_data[opc_setflipstate] = "1";
+			ins_data[opc_playsnd] = "2";
+			ins_data[opc_playsndrand] = "v";
+			ins_data[opc_playsndbtwn] = "22";
+			ins_data[opc_domissiledmg] = "";
+			ins_data[opc_attackmelee] = "v";
+			ins_data[opc_followmaingraphic] = "";
+			ins_data[opc_randcondjmp] = "1b";
+			ins_data[opc_turnccwise] = "1";
+			ins_data[opc_turncwise] = "1";
+			ins_data[opc_turn1cwise] = "";
+			ins_data[opc_turnrand] = "1";
+			ins_data[opc_setspawnframe] = "1";
+			ins_data[opc_sigorder] = "1";
+			ins_data[opc_attackwith] = "1";
+			ins_data[opc_attack] = "";
+			ins_data[opc_castspell] = "";
+			ins_data[opc_useweapon] = "1";
+			ins_data[opc_move] = "1";
+			ins_data[opc_gotorepeatattk] = "";
+			ins_data[opc_engframe] = "1";
+			ins_data[opc_engset] = "1";
+			ins_data[opc___2d] = "";
+			ins_data[opc_nobrkcodestart] = "";
+			ins_data[opc_nobrkcodeend] = "";
+			ins_data[opc_ignorerest] = "";
+			ins_data[opc_attkshiftproj] = "1";
+			ins_data[opc_tmprmgraphicstart] = "";
+			ins_data[opc_tmprmgraphicend] = "";
+			ins_data[opc_setfldirect] = "1";
+			ins_data[opc_call] = "b";
+			ins_data[opc_return] = "";
+			ins_data[opc_setflspeed] = "2";
+			ins_data[opc_creategasoverlays] = "1";
+			ins_data[opc_pwrupcondjmp] = "b";
+			ins_data[opc_trgtrangecondjmp] = "2b";
+			ins_data[opc_trgtarccondjmp] = "22b";
+			ins_data[opc_curdirectcondjmp] = "22b";
+			ins_data[opc_imgulnextid] = "11";
+			ins_data[opc___3e] = "";
+			ins_data[opc_liftoffcondjmp] = "b";
+			ins_data[opc_warpoverlay] = "2";
+			ins_data[opc_orderdone] = "1";
+			ins_data[opc_grdsprol] = "211";
+			ins_data[opc___43] = "";
+			ins_data[opc_dogrddamage] = "";
+			return ins_data;
+		}();
+		auto it = global_st.iscript.scripts.find(script_id);
+		if (it == global_st.iscript.scripts.end() || (size_t)anim >= it->second.animation_pc.size()) return 0;
+		const auto& prog = global_st.iscript.program_data;
+		size_t pc = it->second.animation_pc[anim];
+		int fires = 0;
+		for (int steps = 0; pc && pc < prog.size() && steps != 256; ++steps) {
+			int op = prog[pc++] - 0x808091;
+			if (op < 0 || op >= (int)ins_data.size() || !ins_data[op]) return fires;
+			if (op == opc_attack || op == opc_attackwith || op == opc_attackmelee || op == opc_attkshiftproj) ++fires;
+			if (op == opc_gotorepeatattk || op == opc_end) return fires;
+			if (op == opc_goto) {
+				if (pc >= prog.size()) return fires;
+				pc = (size_t)prog[pc];
+				continue;
+			}
+			for (const char* c = ins_data[op]; *c; ++c) {  // skip the arguments, as the loader stored them
+				if (*c == 's') ++c;
+				if (*c == 'v') {
+					if (pc >= prog.size()) return fires;
+					pc += 1 + (size_t)prog[pc];
+				} else if (*c != 'e') ++pc;
+			}
+		}
+		return fires;
+	}
+
 	console_info console_info_of(const unit_t* u) const {
 		console_info ci;
 		char buf[96];
@@ -3168,31 +3286,34 @@ struct ui_functions: ui_util_functions {
 			{
 				int bonus = (int)unit_armor(u).integer_part() - ut->armor;
 				a_string name = upgrade_name(ut->armor_upgrade);
-				ci.icons.push_back(level_icon(ut->armor_upgrade, -1, (name.empty() ? a_string("Armor") : name) + ": armor " + plus(ut->armor, bonus)));
+				ci.icons.push_back(level_icon(ut->armor_upgrade, -1, (name.empty() ? a_string("Armor") : name) + "  " + tip_icon(tip_icon_armor) + plus(ut->armor, bonus)));
 			}
 			auto* gw = unit_ground_weapon(armed);
 			auto* aw = unit_air_weapon(armed);
+			// "Arclite Cannon  30<boom>  <range>7": damage (base+upgrades, xN hits per attack,
+			// an icon for explosive or concussive), then range in tiles.
 			auto weapon_icon = [&](const weapon_type_t* wt, const char* kind) {
 				int level = player_upgrade_level(u->owner, wt->damage_upgrade);
 				a_string tip = stat_text(wt->label);
 				if (tip.empty()) tip = kind;
-				tip += ": damage " + plus(wt->damage_amount, wt->damage_bonus * level);
-				if (wt->bullet_count > 1) tip += " x" + a_string(std::to_string(wt->bullet_count).c_str());
-				if (wt->damage_type == weapon_type_t::damage_type_explosive) tip += " explosive";
-				else if (wt->damage_type == weapon_type_t::damage_type_concussive) tip += " concussive";
+				int bonus = wt->damage_bonus * level, hits = attack_hits(armed->unit_type, wt, wt == aw && wt != gw);
+				a_string damage = plus(wt->damage_amount, bonus);
+				if (hits > 1) damage = (bonus ? "(" + damage + ")" : damage) + "x" + a_string(std::to_string(hits).c_str());  // (8+1)x2
+				tip += "  " + damage;
+				if (wt->damage_type == weapon_type_t::damage_type_explosive) tip += tip_icon(tip_icon_explosive);
+				else if (wt->damage_type == weapon_type_t::damage_type_concussive) tip += tip_icon(tip_icon_concussive);
 				int range_px = weapon_max_range(armed, wt);
 				char range[32];
-				if (range_px < 32) std::snprintf(range, sizeof(range), ", melee");  // under a tile
-				else std::snprintf(range, sizeof(range), ", range %g", range_px / 32.0);
-				tip += range;
-				if (gw && aw && gw == aw) tip += ", ground and air";
+				if (range_px < 32) std::snprintf(range, sizeof(range), "melee");  // under a tile
+				else std::snprintf(range, sizeof(range), "%g", range_px / 32.0);
+				tip += "  " + tip_icon(tip_icon_range) + range;
 				return console_icon{wt->icon, level > 0 ? level : -1, tip};
 			};
 			// Brood War's order: armor, shields, weapons, then special counts.
 			if (v.has_shields) {
 				int level = player_upgrade_level(u->owner, UpgradeTypes::Protoss_Plasma_Shields);
 				ci.icons.push_back(level_icon(UpgradeTypes::Protoss_Plasma_Shields, -1,
-					upgrade_name(UpgradeTypes::Protoss_Plasma_Shields) + ": shield armor " + a_string(std::to_string(level).c_str())));
+					upgrade_name(UpgradeTypes::Protoss_Plasma_Shields) + "  " + tip_icon(tip_icon_shield) + a_string(std::to_string(level).c_str())));
 			}
 			if (gw) ci.icons.push_back(weapon_icon(gw, "Ground weapon"));
 			if (aw && aw != gw) ci.icons.push_back(weapon_icon(aw, "Air weapon"));
@@ -5574,10 +5695,71 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
-	// Small timer label centred on x, just above the replay bar panel whose top is panel_y.
+	// Small icons that tip text can carry inline, as control characters (tip_icon_*), each
+	// a 13x13 mask drawn in its colour.
+	enum { tip_icon_explosive = 1, tip_icon_concussive, tip_icon_range, tip_icon_armor, tip_icon_shield, tip_icon_count };
+	static const char* const* tip_icon_mask(int kind) {
+		static const char* const explosive[13] = {
+			"......#......", "..#...#...#..", "...#.###.#...", "....#####....", ".#.#######.#.", "..#########..",
+			"#############", "..#########..", ".#.#######.#.", "....#####....", "...#.###.#...", "..#...#...#..", "......#......"};
+		static const char* const concussive[13] = {
+			"#...#...#....", ".#...#...#...", "..#...#...#..", "..#...#...#..", "...#...#...#.", "...#...#...#.",
+			"...#...#...#.", "...#...#...#.", "...#...#...#.", "..#...#...#..", "..#...#...#..", ".#...#...#...", "#...#...#...."};
+		static const char* const range[13] = {
+			".............", ".............", "#...........#", "#...........#", "#..#.....#..#", "#.##.....##.#",
+			"#############", "#.##.....##.#", "#..#.....#..#", "#...........#", "#...........#", ".............", "............."};
+		static const char* const shield[13] = {
+			"#############", "#############", "##.#######.##", "##.#######.##", "##.#######.##", "##.#######.##",
+			".##.#####.##.", ".##.#####.##.", "..##.###.##..", "...##.#.##...", "....##.##....", ".....###.....", "......#......"};
+		switch (kind) {
+		case tip_icon_explosive: return explosive;
+		case tip_icon_concussive: return concussive;
+		case tip_icon_range: return range;
+		default: return shield;
+		}
+	}
+	static wire_rgb tip_icon_rgb(int kind) {
+		switch (kind) {
+		case tip_icon_explosive: return {255, 150, 40};
+		case tip_icon_concussive: return {120, 200, 255};
+		case tip_icon_range: return {200, 206, 210};
+		case tip_icon_shield: return {90, 150, 255};
+		default: return {196, 200, 204};  // armor
+		}
+	}
+	static a_string tip_icon(int kind) { return a_string(1, (char)kind); }
+	static constexpr int tip_icon_w = 13, tip_icon_adv = 17;
+	static bool is_tip_icon(char c) { return c > 0 && c < tip_icon_count; }
+	static int tip_text_w(const a_string& text) {
+		int w = 0;
+		for (char c : text) w += is_tip_icon(c) ? tip_icon_adv : hud_font::cell_w;
+		return w;
+	}
+	void draw_tip_text(uint32_t* buf, size_t pitch, int w, int h, int x, int y, const a_string& text, int r, int g, int b) {
+		const int ch = hud_font::cell_h;
+		char one[2] = {0, 0};
+		for (char c : text) {
+			if (is_tip_icon(c)) {
+				auto* mask = tip_icon_mask(c);
+				wire_rgb col = tip_icon_rgb(c);
+				int iy = y + (ch - tip_icon_w) / 2;
+				for (int my = 0; my != tip_icon_w; ++my) for (int mx = 0; mx != tip_icon_w; ++mx) {
+					if (mask[my][mx] == '#') fill_rgba(buf, pitch, w, h, x + 2 + mx, iy + my, 1, 1, hud_rgba(col.r, col.g, col.b, 255));
+				}
+				x += tip_icon_adv;
+			} else {
+				one[0] = c;
+				hud_text(buf, pitch, w, h, x, y, one, r, g, b);
+				x += hud_font::cell_w;
+			}
+		}
+	}
+
+	// Small label centred on x, just above whatever has its top at panel_y (the replay bar,
+	// a panel icon). The text may carry tip icons.
 	void draw_replay_tip(const a_string& text, int x, int panel_y) {
-		const int cw = hud_font::cell_w, ch = hud_font::cell_h;
-		int w = (int)text.size() * cw + 10, h = ch + 6;
+		const int ch = hud_font::cell_h;
+		int w = tip_text_w(text) + 10, h = ch + 6;
 		if (!replay_tip_surface || replay_tip_surface->w != w || replay_tip_surface->h != h) {
 			replay_tip_surface = native_window_drawing::create_rgba_surface(w, h);
 			replay_tip_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
@@ -5586,7 +5768,7 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = replay_tip_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 230));
 		bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
-		hud_text(buf, pitch, w, h, 5, 2, text.c_str(), 248, 240, 170);
+		draw_tip_text(buf, pitch, w, h, 5, 2, text, 248, 240, 170);
 		replay_tip_surface->unlock();
 		int left = std::max(viewport_x, std::min(viewport_x + viewport_w - w, x - w / 2));
 		replay_tip_surface->blit(&*window_surface, left, std::max(0, panel_y - h - 3));

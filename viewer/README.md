@@ -11,7 +11,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   with shields, HP and energy below it, and what a Defensive Matrix on it has left to absorb. Beside the wireframe are its name, owner and kills,
   and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Hover
   one for its name and numbers, base plus upgrades: armor, shield armor, or a weapon's damage
-  (with hits per attack and explosive / concussive type) and range. Carriers, Reavers and
+  (with hits per attack, e.g. a Zealot's 8x2, and an icon for explosive or concussive) and range. Carriers, Reavers and
   Vultures also show interceptor, scarab or mine counts. A second row shows completed research
   that affects the unit (e.g. Metabolic Boost and Adrenal Glands on a Zergling, Stim Packs on a
   Marine); hover an icon for its name. Buildings show the training queue

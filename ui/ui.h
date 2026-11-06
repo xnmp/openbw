@@ -5217,9 +5217,9 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// Draws the markers around the seek bar's track (top ty, height bh), leaving the track
-	// itself to the progress fill: each battle a thin red strip just under the track (more
-	// solid the more was lost) with a small tick above its start, the first loss a short
-	// cyan line through the track. frame_x maps a frame to a panel x.
+	// itself mostly to the progress fill: each battle framed by red strips just above and
+	// below the track (more solid the more was lost) over a light tint, the first loss a
+	// short cyan line through the track. frame_x maps a frame to a panel x.
 	template<typename frame_x_F>
 	void draw_timeline_markers(uint32_t* buf, size_t pitch, int w, int h, int ty, int bh, frame_x_F&& frame_x) {
 		const timeline::markers* m = timeline_markers();
@@ -5228,9 +5228,10 @@ struct ui_functions: ui_util_functions {
 		for (const auto& b : m->battles) biggest = std::max(biggest, b.total);
 		for (const auto& b : m->battles) {
 			int x0 = frame_x(b.start), x1 = std::max(x0 + 2, frame_x(b.end) + 1);
-			int a = 120 + (int)(110 * b.total / biggest);
+			int a = 170 + (int)(85 * b.total / biggest);  // bigger battles are more solid
+			blend_rect(buf, pitch, w, h, x0, ty + 2, x1 - x0, bh - 4, hud_rgba(255, 40, 30, a / 3));  // light tint
+			blend_rect(buf, pitch, w, h, x0, ty - 4, x1 - x0, 3, hud_rgba(255, 50, 36, a));
 			blend_rect(buf, pitch, w, h, x0, ty + bh + 1, x1 - x0, 3, hud_rgba(255, 50, 36, a));
-			blend_rect(buf, pitch, w, h, x0, ty - 4, 1, 3, hud_rgba(255, 70, 50, a));
 		}
 		if (m->has_first_loss) {
 			int x = frame_x(m->first_loss.frame);

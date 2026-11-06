@@ -69,8 +69,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Brood War's cursor**: the animated green arrow, from Remastered with its graphics on.
 - **Replay bar** in the bottom-right corner: slower / pause-play / faster buttons, game timer,
   speed or pause state, and a seek bar. Hover the seek bar to see the game time under the cursor.
-  The seek bar marks where the first unit died (cyan line) and each big battle (a thin red
-  strip under the bar, more solid the more was lost; at least 2000 minerals + gas of units within 20 s, up to 12
+  The seek bar marks where the first unit died (cyan line) and each big battle (red strips
+  above and below the bar, more solid the more was lost; at least 2000 minerals + gas of units within 20 s, up to 12
   per game, at least 30 s apart). Hover a marker to see whose unit it was, or each player's
   losses in the battle; click it to jump to 5 s before. They are found by playing the whole
   replay once in the background at startup (a few seconds), so they appear shortly after

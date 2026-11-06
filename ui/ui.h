@@ -13,6 +13,7 @@
 #include "minimap_clumps.h"
 #include "replay_result.h"
 #include "ui_theme.h"
+#include "health_bar.h"
 #ifdef OPENBW_REMASTERED
 #include "scr_render.h"
 #endif
@@ -1279,6 +1280,24 @@ struct ui_functions: ui_util_functions {
 		};
 
 		int hp_percent = unit_hp_percent(u);
+		if (hd_drawing) {
+			// Remastered: queued, then drawn crisp at window resolution after the sprites.
+			hd_bar_spec b;
+			b.map_x = sprite->position.x;
+			b.map_y = sprite->position.y + offsety;
+			b.map_width = sprite->sprite_type->health_bar_size;
+			b.max_hp = max_visible_hp(u);
+			b.hp = std::min(1.0, std::max(0.0, u->hp.ceil().integer_part() / (double)std::max(b.max_hp, 1)));
+			b.has_shield = has_shield;
+			b.has_energy = has_energy;
+			if (has_shield) b.shield = std::min(1.0, (double)u->shield_points.integer_part() / std::max(u->unit_type->shield_points, 1));
+			if (has_energy) {
+				if (ut_has_energy(u)) b.energy = std::min(1.0, (double)u->energy.integer_part() / std::max((int)unit_max_energy(u).integer_part(), 1));
+				else b.energy = std::min(1.0, (double)(int)u->remove_timer / std::max((int)default_remove_timer(u), 1));
+			}
+			hd_bars.push_back(b);
+			return;
+		}
 		int dw = filled_width(hp_percent);
 
 		int shield_dw = 0;
@@ -1410,6 +1429,76 @@ struct ui_functions: ui_util_functions {
 		}
 
 	}
+
+	struct hd_bar_spec {
+		int map_x = 0, map_y = 0, map_width = 0, max_hp = 1;
+		double hp = 1, shield = 0, energy = 0;
+		bool has_shield = false, has_energy = false;
+	};
+	a_vector<hd_bar_spec> hd_bars;
+
+#ifdef OPENBW_REMASTERED
+	// Health bars for the Remastered view, drawn straight into the window-resolution canvas
+	// (not the logical-pixel overlay, which would blow each bar up in blocks): a dark rounded
+	// backing with a 1 px outline, a track, pips scaled to max hp, a graded fill with a lit
+	// top edge, shield above and energy below. Rules live in health_bar.h.
+	void hd_draw_health_bars() {
+		auto& c = hd_canvas;
+		const double s = hd_zoom();
+		auto put = [&](int x, int y, health_bar::rgb col, int alpha) {
+			if (x < 0 || y < 0 || x >= c.w || y >= c.h || alpha <= 0) return;
+			uint32_t& d = c.px[(size_t)y * c.pitch + x];
+			auto mix = [&](int sc, int dc) { return (sc * alpha + dc * (255 - alpha) + 127) / 255; };
+			d = scr::rgba(mix(col.r, d & 255), mix(col.g, d >> 8 & 255), mix(col.b, d >> 16 & 255), 255);
+		};
+		for (auto& b : hd_bars) {
+			auto l = health_bar::layout(b.has_shield, b.has_energy, s);
+			int w = health_bar::bar_width(b.map_width, s);
+			int outer_w = w + 2 * l.pad;
+			int x0 = hd_screen_x(b.map_x) - outer_w / 2, y0 = hd_screen_y(b.map_y) - l.total_h / 2;
+			if (x0 >= c.w || y0 >= c.h || x0 + outer_w <= 0 || y0 + l.total_h <= 0) continue;
+			bool full = b.hp >= 1 && (!b.has_shield || b.shield >= 1) && (!b.has_energy || b.energy >= 1);
+			int a = health_bar::bar_alpha(full);
+			// Backing with softened corners.
+			for (int y = 0; y != l.total_h; ++y) {
+				for (int x = 0; x != outer_w; ++x) {
+					bool cx = x == 0 || x == outer_w - 1, cy = y == 0 || y == l.total_h - 1;
+					int ca = (cx && cy) ? 70 : 255;
+					put(x0 + x, y0 + y, health_bar::outline_color(), a * ca / 255 * 225 / 255);
+				}
+			}
+			int ix = x0 + l.pad;
+			int segs = health_bar::segment_count(b.max_hp, w);
+			auto row = [&](const health_bar::row& r, double frac, health_bar::rgb col, bool ticks) {
+				if (r.h <= 0) return;
+				int fw = health_bar::fill_width(frac, w);
+				for (int j = 0; j != r.h; ++j) {
+					int sh = health_bar::row_shade(j, r.h);
+					auto fill = health_bar::shade(col, sh);
+					auto track = health_bar::shade(health_bar::track_color(), sh / 3);
+					for (int x = 0; x != w; ++x) put(ix + x, y0 + r.y + j, x < fw ? fill : track, a);
+				}
+				if (!ticks) return;
+				// Pips: a dark line between segments, 2 px wide from 3x up.
+				int tw = s >= 3 ? 2 : 1;
+				for (int i = 1; i < segs; ++i) {
+					int tx = ix + health_bar::tick_x(i, segs, w);
+					for (int j = 0; j != r.h; ++j) for (int k = 0; k != tw; ++k) put(tx + k - (tw - 1), y0 + r.y + j, health_bar::outline_color(), a * 150 / 255);
+				}
+			};
+			row(l.shield, b.shield, health_bar::shield_color(), false);
+			row(l.hp, b.hp, health_bar::hp_color(b.hp), true);
+			row(l.energy, b.energy, health_bar::energy_color(), false);
+			// Hairline separators between rows.
+			auto sep = [&](int y) { for (int x = 0; x != w; ++x) put(ix + x, y0 + y, health_bar::outline_color(), a); };
+			if (l.shield.h) sep(l.shield.y + l.shield.h);
+			if (l.energy.h) sep(l.energy.y - 1);
+		}
+		hd_bars.clear();
+	}
+#else
+	void hd_draw_health_bars() { hd_bars.clear(); }
+#endif
 
 	void draw_sprite(const sprite_t* sprite, uint8_t* data, size_t data_pitch) {
 		const unit_t* draw_selection_u = current_selection_sprites_set.at(sprite->index);
@@ -3358,6 +3447,8 @@ struct ui_functions: ui_util_functions {
 	struct panel_line {
 		a_string text;
 		wire_rgb rgb{230, 230, 230};
+		int icon = -1;     // cmdicons.grp frame drawn before the text (vitals), one text line high
+		a_string tip = {};  // hover label of the icon and text together
 	};
 	struct console_icon {
 		int frame;          // cmdicons.grp frame
@@ -3564,8 +3655,11 @@ struct ui_functions: ui_util_functions {
 			ci.vitals.push_back({buf, {225, 225, 225}});
 		}
 		if (u->defensive_matrix_hp != 0_fp8) {  // what the Defensive Matrix has left to absorb
-			std::snprintf(buf, sizeof(buf), "Matrix %d", (int)u->defensive_matrix_hp.ceil().integer_part());
-			ci.vitals.push_back({buf, {120, 200, 255}});
+			int left = (int)u->defensive_matrix_hp.ceil().integer_part();
+			std::snprintf(buf, sizeof(buf), "%d", left);
+			char tip[64];
+			std::snprintf(tip, sizeof(tip), "Defensive Matrix: %d damage left to absorb", left);
+			ci.vitals.push_back({buf, {120, 200, 255}, get_tech_type(TechTypes::Defensive_Matrix)->icon, tip});
 		}
 
 		ci.lines.push_back({stat_text((int)shown_type(u)->id + 1), {255, 255, 255}});
@@ -4019,9 +4113,12 @@ struct ui_functions: ui_util_functions {
 		// Research icons: two thirds the size of the upgrade icons above them.
 		const int res_w = icon_w * 2 / 3, res_h = icon_h * 2 / 3;
 		auto text_w = [&](const a_string& s) { return (int)s.size() * cw; };
+		// A vitals line may lead with a small icon, one text line high (the art is 36x34).
+		const int vit_icon_h = ch, vit_icon_w = ch * 36 / 34;
+		auto vital_w = [&](const panel_line& l) { return text_w(l.text) + (l.icon >= 0 ? vit_icon_w + cw / 2 : 0); };
 
 		int left_w = wire;
-		for (auto& l : ci.vitals) left_w = std::max(left_w, text_w(l.text));
+		for (auto& l : ci.vitals) left_w = std::max(left_w, vital_w(l));
 		int left_h = wire + (int)ci.vitals.size() * ch;
 
 		int right_w = 0, right_h = 0;
@@ -4062,7 +4159,14 @@ struct ui_functions: ui_util_functions {
 		}
 		for (size_t i = 0; i != ci.vitals.size(); ++i) {
 			auto& l = ci.vitals[i];
-			hud_text(buf, pitch, w, h, pad + (left_w - text_w(l.text)) / 2, pad + wire + (int)i * ch, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
+			int lx = pad + (left_w - vital_w(l)) / 2, ly = pad + wire + (int)i * ch;
+			if (l.icon >= 0) {
+				if (!ui_skin) fill_rgba(buf, pitch, w, h, lx, ly, vit_icon_w, vit_icon_h, hud_rgba(0, 0, 0, 255));
+				draw_cmd_icon_scaled(buf, pitch, w, h, lx, ly, l.icon, scale, vit_icon_w, vit_icon_h);
+				panel_tips.push_back({rect{{lx, ly}, {lx + vital_w(l), ly + ch}}, l.tip});
+				lx += vit_icon_w + cw / 2;
+			}
+			hud_text(buf, pitch, w, h, lx, ly, l.text.c_str(), l.rgb.r, l.rgb.g, l.rgb.b);
 		}
 
 		int x0 = pad * 2 + left_w, y = pad;
@@ -6939,6 +7043,7 @@ struct ui_functions: ui_util_functions {
 #ifdef OPENBW_REMASTERED
 		if (hd_frame) {
 			hd_flush();
+			hd_draw_health_bars();
 			if (show_fog) {
 				// Health bars drawn with the sprites sit under the fog, as in the classic view.
 				hd_composite_overlay(data, indexed_surface->pitch, overlay_sentinel, rect{});

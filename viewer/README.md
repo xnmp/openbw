@@ -8,7 +8,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   count beside the race's Marine / Zergling / Zealot and SCV / Drone / Probe icons. Supply
   turns red when blocked. On by default; turn it off in the `?` menu.
 - **Selection panel** laid out like the in-game console. Click a unit to see its wireframe,
-  with shields, HP and energy below it, and what a Defensive Matrix on it has left to absorb. Beside the wireframe are its name, owner and kills,
+  with shields, HP and energy below it, and what a Defensive Matrix on it has left to absorb (its icon and the number; hover for the tip). Beside the wireframe are its name, owner and kills,
   and upgrade icons with their levels: armor, shields, weapons (Brood War's order). Hover
   one for its name and numbers, base plus upgrades: armor, shield armor, or a weapon's damage
   (with hits per attack, e.g. a Zealot's 8x2, and an icon for explosive or concussive) and range. Carriers, Reavers and
@@ -139,8 +139,10 @@ What is drawn from Remastered: terrain (HD megatiles and creep edges), every ima
 sprite with team colour, shadows, cloaking, warp-in and warp flash, fire, smoke and
 explosions, selection circles, selection-panel wireframes and the mouse cursor. Sprites are composited the way Remastered's own
 shaders do it (team colour mask, shadows that darken by up to half without stacking).
-Not reproduced: the dynamic lighting from normal/specular maps, animated water, and HD
-health bars (the classic ones are drawn over the HD view). Assets load the first time
+Not reproduced: the dynamic lighting from normal/specular maps and animated water. Health
+bars are the viewer's own, drawn at window resolution (dark rounded backing, pips scaled to max hp,
+green/amber/red fill, blue shield row above, purple energy row below; rules in `ui/health_bar.h`),
+fainter at full health so a healthy crowd stays quiet; the classic view keeps the 8-bit bars. Assets load the first time
 they are seen and stay block-compressed; frames are decoded and scaled as they are drawn,
 with both kept within fixed budgets (384 MB of atlases, 256 MB of scaled frames; past
 one, what was drawn least recently is dropped). Over a whole

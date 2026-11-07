@@ -28,7 +28,17 @@ int main() {
 	CHECK(pick(level_zerg, {protoss}) == race::zerg);
 	CHECK(pick(level_protoss, {zerg}) == race::protoss);
 	CHECK(pick(level_terran, {zerg}) == race::terran);
-	// A bad level (hand-edited settings file) falls back to Auto.
+	// Minimal (the default) wears no art; its race (for the music) follows the first player.
+	CHECK(level_default == level_minimal && level_count == 5);
+	CHECK(!styled(level_minimal));
+	CHECK(styled(level_auto) && styled(level_terran) && styled(level_protoss) && styled(level_zerg));
+	CHECK(pick(level_minimal, {protoss, zerg}) == race::protoss);
+	CHECK(pick(level_minimal, {}) == race::terran);
+	// The saved levels 1..4 keep their meaning; a bad level (hand-edited settings file) is the
+	// default, Minimal, whose race follows the first player as Auto's does.
+	CHECK(clamp_level(0) == level_minimal && clamp_level(6) == level_minimal && clamp_level(-1) == level_minimal);
+	CHECK(clamp_level(1) == level_auto && clamp_level(4) == level_zerg && clamp_level(5) == level_minimal);
+	CHECK(!styled(0) && !styled(99) && !styled(-7));
 	CHECK(pick(0, {protoss}) == race::protoss);
 	CHECK(pick(99, {zerg}) == race::zerg);
 	CHECK(pick(-5, {zerg}) == race::zerg);

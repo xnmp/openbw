@@ -1962,8 +1962,9 @@ struct ui_functions: ui_util_functions {
 		// Edge on the top and right (the other two are the window's).
 		if (ui_skin) skin_minimap_frame(surface_px, pitch, w, h);
 		else {
-			for (int x = 0; x != w; ++x) buf[x] = hud_rgba(0, 0, 0, 255);
-			for (int y = 0; y != h; ++y) buf[(size_t)y * pitch + w - 1] = hud_rgba(0, 0, 0, 255);
+			const uint32_t edge = minimal_rgba(ui_theme::minimal::border);  // the panels' hairline
+			for (int x = 0; x != w; ++x) buf[x] = edge;
+			for (int y = 0; y != h; ++y) buf[(size_t)y * pitch + w - 1] = edge;
 		}
 		minimap_surface->unlock();
 		minimap_surface->blit(&*window_surface, r.from.x, r.from.y - frame_top);
@@ -2959,9 +2960,7 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = hud_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
-			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 200));
-			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
-			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
+			plain_panel(buf, pitch, w, h, 200);
 		}
 		static const int army_icon[3] = {37, 0, 65}, worker_icon[3] = {41, 7, 64};  // Zergling Marine Zealot, Drone SCV Probe
 		char text[32];
@@ -2971,7 +2970,7 @@ struct ui_functions: ui_util_functions {
 		for (size_t i = 0; i != rows.size(); ++i) {
 			auto& row = rows[i];
 			int y = pad_t + (int)i * row_h, ty = y + (row_h - ch) / 2, iy = y + (row_h - icon) / 2;
-			if (i && !ui_skin) fill_rgba(buf, pitch, w, h, pad_x, y, w - 2 * pad_x, 1, hud_rgba(36, 42, 26, 255));
+			if (i && !ui_skin) fill_rgba(buf, pitch, w, h, pad_x, y, w - 2 * pad_x, 1, minimal_rgba(ui_theme::minimal::separator));
 			if (i && ui_skin) blend_rect(buf, pitch, w, h, pad_x, y, w - 2 * pad_x, 1, hud_rgba(120, 126, 128, 40));
 			int x = pad_x;
 			// Player colour: a small bevelled chip.
@@ -3805,7 +3804,7 @@ struct ui_functions: ui_util_functions {
 
 	// UI theme (ui/ui_theme.h): the setting's level (1 = Auto, the first player's race) and
 	// the race it resolves to this frame.
-	int ui_theme_level = ui_theme::level_auto;
+	int ui_theme_level = ui_theme::level_default;
 	ui_theme::race active_theme = ui_theme::race::terran;
 	const ui_theme::palette& theme() const { return ui_theme::palette_of(active_theme); }
 	ui_theme::race resolve_theme() const {
@@ -4117,23 +4116,12 @@ struct ui_functions: ui_util_functions {
 	// bars, filled pips green with a highlight row on top and shade on the bottom.
 	void draw_bw_bar(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int bw, int bh, double frac, int pip_w) {
 		if (skin_bar(buf, pitch, w, h, x, y, bw, bh, frac)) return;
-		fill_rgba(buf, pitch, w, h, x, y, bw, bh, hud_rgba(0, 0, 0, 255));
-		fill_rgba(buf, pitch, w, h, x, y, bw, 1, hud_rgba(30, 34, 22, 255));
-		fill_rgba(buf, pitch, w, h, x, y + bh - 1, bw, 1, hud_rgba(110, 122, 80, 255));
-		fill_rgba(buf, pitch, w, h, x + bw - 1, y, 1, bh, hud_rgba(110, 122, 80, 255));
-		int ix = x + 2, iy = y + 2, iw = bw - 4, ih = bh - 4;
-		if (iw <= 0 || ih <= 0) return;
-		int filled_px = (int)std::lround(iw * std::max(0.0, std::min(1.0, frac)));
-		for (int px = 0; px < iw; px += pip_w + 1) {
-			int pw = std::min(pip_w, iw - px);
-			bool on = px < filled_px;
-			uint32_t top = on ? hud_rgba(168, 252, 140, 255) : hud_rgba(44, 50, 40, 255);
-			uint32_t mid = on ? hud_rgba(40, 204, 36, 255) : hud_rgba(28, 32, 26, 255);
-			uint32_t bot = on ? hud_rgba(16, 112, 16, 255) : hud_rgba(18, 20, 16, 255);
-			fill_rgba(buf, pitch, w, h, ix + px, iy, pw, ih, mid);
-			fill_rgba(buf, pitch, w, h, ix + px, iy, pw, 1, top);
-			if (ih > 2) fill_rgba(buf, pitch, w, h, ix + px, iy + ih - 1, pw, 1, bot);
-		}
+		// Minimal: a flat track and a solid accent fill; `pip_w` is the classic look's and unused.
+		(void)pip_w;
+		namespace m = ui_theme::minimal;
+		fill_rgba(buf, pitch, w, h, x, y, bw, bh, minimal_rgba(m::track));
+		int filled_px = (int)std::lround(bw * std::max(0.0, std::min(1.0, frac)));
+		if (filled_px > 0) fill_rgba(buf, pitch, w, h, x, y, filled_px, bh, minimal_rgba(m::accent));
 	}
 
 	void prepare_panel_surface(int w, int h) {
@@ -4393,11 +4381,9 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = panel_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
-			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 200));
-			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
-			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
+			plain_panel(buf, pitch, w, h, 200);
 		}
-		hud_text(buf, pitch, w, h, pad_x, pad_t - 2, title, ui_skin ? 214 : 248, ui_skin ? 220 : 240, ui_skin ? 222 : 170);
+		hud_text(buf, pitch, w, h, pad_x, pad_t - 2, title, ui_skin ? 214 : 246, ui_skin ? 220 : 247, ui_skin ? 222 : 250);
 		for (int i = 0; i != shown; ++i) {
 			unit_t* u = units[i];
 			int x = pad_x + (i % per_row) * cell, y = pad_t + ch + 2 + (i / per_row) * cell;
@@ -4406,8 +4392,8 @@ struct ui_functions: ui_util_functions {
 			blend_rect(buf, pitch, w, h, x, y, slot, slot, hud_rgba(0, 0, 0, 130));
 			blend_rect(buf, pitch, w, h, x, y, slot, 1, hud_rgba(0, 0, 0, 200));
 			blend_rect(buf, pitch, w, h, x, y, 1, slot, hud_rgba(0, 0, 0, 200));
-			blend_rect(buf, pitch, w, h, x, y + slot - 1, slot, 1, ui_skin ? hud_rgba(150, 156, 158, 80) : hud_rgba(120, 132, 88, 120));
-			blend_rect(buf, pitch, w, h, x + slot - 1, y, 1, slot, ui_skin ? hud_rgba(150, 156, 158, 80) : hud_rgba(120, 132, 88, 120));
+			blend_rect(buf, pitch, w, h, x, y + slot - 1, slot, 1, ui_skin ? hud_rgba(150, 156, 158, 80) : hud_rgba(255, 255, 255, 26));
+			blend_rect(buf, pitch, w, h, x + slot - 1, y, 1, slot, ui_skin ? hud_rgba(150, 156, 158, 80) : hud_rgba(255, 255, 255, 26));
 			auto pc = player_rgb(u->owner);
 			fill_rgba(buf, pitch, w, h, x + 2, y + slot - 3, slot - 4, 2, hud_rgba(pc.r, pc.g, pc.b, 255));
 			size_t id = (size_t)shown_type(u)->id;
@@ -5127,15 +5113,14 @@ struct ui_functions: ui_util_functions {
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (ui_skin && !skin_framed()) fill_rgba(buf, pitch, w, h, 6, 6, w - 12, h - 12, hud_rgba(4, 6, 8, mini ? 150 : 190));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
-			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, mini ? 200 : 225));
-			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
-			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
+			plain_panel(buf, pitch, w, h, mini ? 200 : 225);
 		}
-		// Console colours: the observer skin's greys, or the olive of the classic panels.
-		const wire_rgb dim = ui_skin ? wire_rgb{150, 156, 160} : wire_rgb{150, 164, 108};
-		const wire_rgb title = ui_skin ? wire_rgb{255, 232, 150} : wire_rgb{248, 240, 170};
-		const uint32_t grid = ui_skin ? hud_rgba(64, 68, 70, 255) : hud_rgba(48, 56, 34, 255);
-		const uint32_t tick = ui_skin ? hud_rgba(40, 43, 45, 255) : hud_rgba(30, 36, 22, 255);
+		// Console colours: the observer skin's greys, or the Minimal look's.
+		namespace mn = ui_theme::minimal;
+		const wire_rgb dim = ui_skin ? wire_rgb{150, 156, 160} : wire_rgb{mn::dim.r, mn::dim.g, mn::dim.b};
+		const wire_rgb title = ui_skin ? wire_rgb{255, 232, 150} : wire_rgb{mn::title.r, mn::title.g, mn::title.b};
+		const uint32_t grid = ui_skin ? hud_rgba(64, 68, 70, 255) : minimal_rgba(mn::grid);
+		const uint32_t tick = ui_skin ? hud_rgba(40, 43, 45, 255) : minimal_rgba(mn::tick);
 
 		auto rows = hud_rows();
 		bool difference = graph_difference && rows.size() >= 2;
@@ -5641,7 +5626,7 @@ struct ui_functions: ui_util_functions {
 			r.push_back(std::move(v));
 		}
 		{
-			static const char* const names[] = {"auto", "Terran", "Protoss", "Zerg"};
+			static const char* const names[] = {"auto", "Terran", "Protoss", "Zerg", "Minimal"};
 			viewer_setting v{"ui_theme", "UI theme", "", true, [] { return false; },
 				[this] { ui_theme_level = ui_theme_level % ui_theme::level_count + 1; }};
 			v.levels = ui_theme::level_count;
@@ -5776,8 +5761,13 @@ struct ui_functions: ui_util_functions {
 		return x0 + 3 + (track_w - 7) * (level - 1) / std::max(1, levels - 1);
 	}
 
+	// What is on or chosen in the settings menu: the game's green, or Minimal's accent.
+	wire_rgb settings_on_rgb() const {
+		return ui_skin ? wire_rgb{110, 230, 90} : wire_rgb{ui_theme::minimal::accent.r, ui_theme::minimal::accent.g, ui_theme::minimal::accent.b};
+	}
+
 	// Like the sliders in Brood War's options: a sunken groove with a tick per level, lit
-	// green up to a bevelled metal thumb.
+	// green up to a bevelled metal thumb (Minimal: a flat track lit in its accent).
 	void draw_level_slider(uint32_t* buf, size_t pitch, int w, int h, int x0, int row_y, int row_h, int track_w, int levels, int level) {
 		int cy = row_y + row_h / 2, gy = cy - 2;
 		int tx = slider_level_x(x0, track_w, levels, level);
@@ -5785,11 +5775,17 @@ struct ui_functions: ui_util_functions {
 		fill_rgba(buf, pitch, w, h, x0, gy, track_w, 1, hud_rgba(30, 30, 28, 255));
 		fill_rgba(buf, pitch, w, h, x0, gy + 1, track_w, 3, hud_rgba(0, 0, 0, 255));
 		fill_rgba(buf, pitch, w, h, x0, gy + 4, track_w, 1, hud_rgba(120, 120, 110, 255));
-		fill_rgba(buf, pitch, w, h, x0 + 1, gy + 1, std::max(0, tx - x0 - 1), 3, hud_rgba(40, 200, 36, 255));
-		fill_rgba(buf, pitch, w, h, x0 + 1, gy + 1, std::max(0, tx - x0 - 1), 1, hud_rgba(168, 252, 140, 255));
+		if (ui_skin) {
+			fill_rgba(buf, pitch, w, h, x0 + 1, gy + 1, std::max(0, tx - x0 - 1), 3, hud_rgba(40, 200, 36, 255));
+			fill_rgba(buf, pitch, w, h, x0 + 1, gy + 1, std::max(0, tx - x0 - 1), 1, hud_rgba(168, 252, 140, 255));
+		} else {
+			fill_rgba(buf, pitch, w, h, x0, gy, track_w, 5, minimal_rgba(ui_theme::minimal::track));
+			fill_rgba(buf, pitch, w, h, x0, gy, std::max(0, tx - x0), 5, minimal_rgba(ui_theme::minimal::accent));
+		}
+		const wire_rgb lit = settings_on_rgb();
 		for (int i = 1; i <= levels; ++i) {
 			int x = slider_level_x(x0, track_w, levels, i);
-			fill_rgba(buf, pitch, w, h, x, gy + 7, 1, 3, i <= level ? hud_rgba(110, 230, 90, 255) : hud_rgba(100, 104, 110, 255));
+			fill_rgba(buf, pitch, w, h, x, gy + 7, 1, 3, i <= level ? hud_rgba(lit.r, lit.g, lit.b, 255) : hud_rgba(100, 104, 110, 255));
 		}
 		// Thumb
 		fill_rgba(buf, pitch, w, h, tx - 3, cy - 7, 7, 14, hud_rgba(0, 0, 0, 255));
@@ -5839,11 +5835,11 @@ struct ui_functions: ui_util_functions {
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (ui_skin && !skin_framed()) fill_rgba(buf, pitch, w, h, 6, 6, w - 12, h - 12, hud_rgba(4, 6, 8, 215));  // the console face alone is too sheer
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
-			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 235));
-			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
-			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
+			plain_panel(buf, pitch, w, h, 235);
 		}
-		hud_text(buf, pitch, w, h, pad, pt, "Settings", 255, 240, 170);
+		const wire_rgb heading = ui_skin ? wire_rgb{255, 240, 170} : wire_rgb{246, 247, 250};
+		const ui_theme::rgb key_rgb = ui_skin ? ui_theme::rgb{248, 240, 170} : ui_theme::minimal::accent;
+		hud_text(buf, pitch, w, h, pad, pt, "Settings", heading.r, heading.g, heading.b);
 		const char* close = "? / esc close";
 		hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(close) * cw, pt, close, 120, 130, 150);
 		settings_row_rects.clear();
@@ -5855,9 +5851,10 @@ struct ui_functions: ui_util_functions {
 				int lv = std::max(1, std::min(v.levels, v.level()));
 				bool on = lv > 1;
 				a_string head = a_string(v.label) + ": ";
-				hud_text(buf, pitch, w, h, pad + 3, y + 4, on ? "*" : "-", on ? 110 : 120, on ? 230 : 130, on ? 90 : 150);
+				const wire_rgb lit = settings_on_rgb();
+				hud_text(buf, pitch, w, h, pad + 3, y + 4, on ? "*" : "-", on ? lit.r : 120, on ? lit.g : 130, on ? lit.b : 150);
 				hud_text(buf, pitch, w, h, pad + 4 * cw, y + 4, head.c_str(), on ? 240 : 160, on ? 240 : 165, on ? 240 : 180);
-				hud_text(buf, pitch, w, h, pad + (4 + (int)head.size()) * cw, y + 4, v.level_names[lv - 1], on ? 110 : 160, on ? 230 : 165, on ? 90 : 180);
+				hud_text(buf, pitch, w, h, pad + (4 + (int)head.size()) * cw, y + 4, v.level_names[lv - 1], on ? lit.r : 160, on ? lit.g : 165, on ? lit.b : 180);
 				hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(v.key) * cw, y + 4, v.key, 120, 130, 150);
 				y += row_h;
 				continue;
@@ -5865,7 +5862,8 @@ struct ui_functions: ui_util_functions {
 			if (v.levels) {
 				// The level as a number where the checkbox goes, then the notches up to it lit.
 				int lv = v.level();
-				hud_text(buf, pitch, w, h, pad + 3, y + 4, std::to_string(lv).c_str(), 110, 230, 90);
+				const wire_rgb lit = settings_on_rgb();
+				hud_text(buf, pitch, w, h, pad + 3, y + 4, std::to_string(lv).c_str(), lit.r, lit.g, lit.b);
 				hud_text(buf, pitch, w, h, pad + 4 * cw, y + 4, v.label, 240, 240, 240);
 				draw_level_slider(buf, pitch, w, h, notches_x(w, v.levels), y, row_h, v.levels * notch_pitch - 3, v.levels, lv);
 				y += row_h;
@@ -5877,17 +5875,17 @@ struct ui_functions: ui_util_functions {
 			// A sunken box (dark top-left edge, lit bottom-right), a lit green pip when on.
 			fill_rgba(buf, pitch, w, h, bx, by, 14, 14, hud_rgba(6, 8, 8, 255));
 			if (ui_skin) bevel(buf, pitch, w, h, bx, by, 14, 14, hud_rgba(78, 82, 84, 255), hud_rgba(150, 156, 158, 255));
-			else bevel(buf, pitch, w, h, bx, by, 14, 14, hud_rgba(24, 28, 18, 255), hud_rgba(120, 132, 88, 255));
-			if (on) {
+			else bevel(buf, pitch, w, h, bx, by, 14, 14, minimal_rgba(ui_theme::minimal::border), minimal_rgba(ui_theme::minimal::border));
+			if (on && ui_skin) {
 				fill_rgba(buf, pitch, w, h, bx + 3, by + 3, 8, 8, hud_rgba(60, 190, 50, 255));
 				fill_rgba(buf, pitch, w, h, bx + 3, by + 3, 8, 3, hud_rgba(150, 250, 120, 255));
-			}
+			} else if (on) fill_rgba(buf, pitch, w, h, bx + 3, by + 3, 8, 8, minimal_rgba(ui_theme::minimal::accent));
 			hud_text(buf, pitch, w, h, pad + 4 * cw, y + 4, v.label, on ? 240 : 160, on ? 240 : 165, on ? 240 : 180);
 			hud_text(buf, pitch, w, h, w - pad - (int)std::strlen(v.key) * cw, y + 4, v.key, 120, 130, 150);
 			y += row_h;
 		}
 		y += 12;
-		hud_text(buf, pitch, w, h, pad, y, "Other keys", 255, 240, 170);
+		hud_text(buf, pitch, w, h, pad, y, "Other keys", heading.r, heading.g, heading.b);
 		y += ch + 6;
 		// Keys in a column of their own (lit like the hotkeys above), then what they do.
 		for (int r = 0; r != key_rows; ++r) {
@@ -5896,7 +5894,7 @@ struct ui_functions: ui_util_functions {
 				int i = c * key_rows + r;
 				if (i >= n_other) break;
 				int x = pad + c * key_col_w;
-				hud_text(buf, pitch, w, h, x, y, other_keys[i][0], 248, 240, 170);
+				hud_text(buf, pitch, w, h, x, y, other_keys[i][0], key_rgb.r, key_rgb.g, key_rgb.b);
 				hud_text(buf, pitch, w, h, x + (other_key_cols + 3) * cw, y, other_keys[i][1], 175, 185, 200);
 			}
 			y += ch;
@@ -6042,6 +6040,16 @@ struct ui_functions: ui_util_functions {
 		else std::snprintf(buf, sizeof(buf), "1/%dx", one / std::max(1, raw));
 		return is_paused ? a_string("Paused ") + buf : a_string(buf);
 	}
+
+	// A panel in the Minimal look (also the look without Remastered art): flat, part
+	// transparent, with a hairline edge.
+	void plain_panel(uint32_t* buf, size_t pitch, int w, int h, int alpha) {
+		namespace m = ui_theme::minimal;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(m::panel.r, m::panel.g, m::panel.b, alpha));
+		uint32_t edge = hud_rgba(m::border.r, m::border.g, m::border.b, 255);
+		bevel(buf, pitch, w, h, 0, 0, w, h, edge, edge);
+	}
+	static uint32_t minimal_rgba(ui_theme::rgb c, int a = 255) { return hud_rgba(c.r, c.g, c.b, a); }
 
 	void bevel(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int rw, int rh, uint32_t light, uint32_t dark) {
 		fill_rgba(buf, pitch, w, h, x, y, rw, 1, light);
@@ -6211,14 +6219,12 @@ struct ui_functions: ui_util_functions {
 			draw_skin_button(buf, pitch, w, h, x, y, bw, bh, hover && enabled, pressed);
 			return;
 		}
-		fill_rgba(buf, pitch, w, h, x, y, bw, bh, hud_rgba(0, 0, 0, 255));
-		uint32_t face = pressed ? hud_rgba(14, 18, 10, 255) : hover && enabled ? hud_rgba(52, 62, 36, 255) : hud_rgba(30, 36, 22, 255);
-		fill_rgba(buf, pitch, w, h, x + 1, y + 1, bw - 2, bh - 2, face);
-		// Lighter upper half, as on the console's buttons.
-		if (!pressed) fill_rgba(buf, pitch, w, h, x + 2, y + 2, bw - 4, (bh - 4) / 2, hover && enabled ? hud_rgba(62, 74, 44, 255) : hud_rgba(38, 46, 28, 255));
-		uint32_t light = hud_rgba(150, 164, 108, 255), dark = hud_rgba(44, 50, 32, 255);
-		if (pressed) std::swap(light, dark);
-		bevel(buf, pitch, w, h, x + 1, y + 1, bw - 2, bh - 2, light, dark);
+		// Minimal: a flat face with a hairline edge, lighter when hovered, darker when pressed.
+		namespace m = ui_theme::minimal;
+		uint32_t face = minimal_rgba(pressed ? m::button_pressed : hover && enabled ? m::button_hover : m::button);
+		fill_rgba(buf, pitch, w, h, x, y, bw, bh, face);
+		uint32_t edge = minimal_rgba(m::border);
+		bevel(buf, pitch, w, h, x, y, bw, bh, edge, edge);
 	}
 
 	void draw_replay_controls(uint32_t* buf, size_t pitch, int w, int h, int ox, int oy) {
@@ -6232,9 +6238,9 @@ struct ui_functions: ui_util_functions {
 			bool pressed = replay_button_held == i && hovered == i;
 			draw_replay_button(buf, pitch, w, h, rect{{r.from.x - ox, r.from.y - oy}, {r.to.x - ox, r.to.y - oy}}, hovered == i, pressed, enabled);
 			int size = r.to.x - r.from.x, x = r.from.x - ox + (pressed ? 1 : 0), y = r.from.y - oy + (pressed ? 1 : 0);
-			uint32_t c = !enabled ? (ui_skin ? hud_rgba(84, 88, 90, 255) : hud_rgba(80, 86, 64, 255))
-				: hovered == i ? (ui_skin ? hud_rgba(255, 232, 150, 255) : hud_rgba(255, 252, 220, 255))
-				: ui_skin ? hud_rgba(214, 220, 222, 255) : hud_rgba(248, 240, 170, 255);
+			uint32_t c = !enabled ? (ui_skin ? hud_rgba(84, 88, 90, 255) : hud_rgba(78, 84, 96, 255))
+				: hovered == i ? (ui_skin ? hud_rgba(255, 232, 150, 255) : hud_rgba(255, 255, 255, 255))
+				: ui_skin ? hud_rgba(214, 220, 222, 255) : minimal_rgba(ui_theme::minimal::text);
 			if (i == replay_button_pause && is_paused) c = hovered == i ? hud_rgba(190, 255, 160, 255) : hud_rgba(150, 230, 110, 255);
 			auto icon = [&](int ix, int iy, uint32_t col) {
 				if (i == replay_button_pause) {
@@ -6252,8 +6258,7 @@ struct ui_functions: ui_util_functions {
 			blend_rect(buf, pitch, w, h, dx, dy, 1, dh, hud_rgba(0, 0, 0, 170));
 			blend_rect(buf, pitch, w, h, dx + 1, dy, 1, dh, hud_rgba(150, 156, 158, 70));
 		} else {
-			fill_rgba(buf, pitch, w, h, dx, 6, 1, h - 12, hud_rgba(24, 28, 18, 255));
-			fill_rgba(buf, pitch, w, h, dx + 1, 6, 1, h - 12, hud_rgba(84, 94, 60, 255));
+			fill_rgba(buf, pitch, w, h, dx, 8, 1, h - 16, minimal_rgba(ui_theme::minimal::separator));
 		}
 	}
 
@@ -6515,13 +6520,12 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = replay_bar_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
-			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 215));
-			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
-			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
+			plain_panel(buf, pitch, w, h, 215);
 		}
 
 		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(replay_st.end_frame);
-		hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 248, 240, 170);
+		if (ui_skin) hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 248, 240, 170);
+		else hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 246, 247, 250);
 		if (auto_observer) {
 			bool held = clock.now() < observer_manual_until;
 			hud_text(buf, pitch, w, h, lx + ((int)timer.size() + 2) * cw, pad - 2, held ? "AUTO (manual)" : "AUTO", held ? 150 : 120, held ? 150 : 220, held ? 150 : 255);
@@ -6537,13 +6541,13 @@ struct ui_functions: ui_util_functions {
 		int fx = frame_x(st.current_frame);
 		if (replay_frame != st.current_frame) {  // seek target while catching up
 			int sx = frame_x(replay_frame);
-			fill_rgba(buf, pitch, w, h, sx, ty - 2, 1, bh + 4, hud_rgba(248, 240, 170, 255));
+			fill_rgba(buf, pitch, w, h, sx, ty - 2, 1, bh + 4, ui_skin ? hud_rgba(248, 240, 170, 255) : hud_rgba(255, 255, 255, 255));
 		}
 		draw_timeline_markers(buf, pitch, w, h, ty, bh, frame_x);
 		int hover = replay_bar_hover_frame(bar);
 		timeline_hit hover_marker;
 		if (hover >= 0) {
-			fill_rgba(buf, pitch, w, h, frame_x(hover), ty, 1, bh, hud_rgba(248, 240, 170, 200));
+			fill_rgba(buf, pitch, w, h, frame_x(hover), ty, 1, bh, ui_skin ? hud_rgba(248, 240, 170, 200) : hud_rgba(255, 255, 255, 170));
 			hover_marker = timeline_marker_at(hover, 4, bw);
 		}
 		// Thumb, standing out over the markers
@@ -6634,9 +6638,8 @@ struct ui_functions: ui_util_functions {
 		}
 		uint32_t* buf = (uint32_t*)replay_tip_surface->lock();
 		size_t pitch = replay_tip_surface->pitch / 4;
-		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 230));
-		bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
-		draw_tip_text(buf, pitch, w, h, 5, 2, text, 248, 240, 170);
+		plain_panel(buf, pitch, w, h, 235);
+		draw_tip_text(buf, pitch, w, h, 5, 2, text, 246, 247, 250);
 		replay_tip_surface->unlock();
 		int left = std::max(viewport_x, std::min(viewport_x + viewport_w - w, x - w / 2));
 		replay_tip_surface->blit(&*window_surface, left, std::max(0, panel_y - h - 3));
@@ -7176,7 +7179,7 @@ struct ui_functions: ui_util_functions {
 		const bool hd_frame = hd_ready();
 		minimap_hd = hd_frame;
 		active_theme = resolve_theme();
-		ui_skin = hd_frame && skin_ready();
+		ui_skin = hd_frame && ui_theme::styled(ui_theme_level) && skin_ready();
 		auto drag_rect = [&] {
 			auto r = rect{{drag_select_from_x, drag_select_from_y}, {drag_select_to_x, drag_select_to_y}};
 			if (r.from.x > r.to.x) std::swap(r.from.x, r.to.x);

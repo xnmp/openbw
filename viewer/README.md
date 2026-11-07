@@ -74,12 +74,16 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   like the buildings, so armies stand out. Very close dots of one player's units of one type
   (overlapping by about 70%; three or more) combine into one larger dot with their total area,
   up to 4x a single dot (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
-- **UI theme** (settings menu: auto, Terran, Protoss, Zerg; saved as `ui_theme=1..4`): with
-  Remastered graphics, the panels, minimap frame and buttons wear the race's colours (command
-  icons stay yellow under every theme), and the progress bars use that race's own Remastered bars. Remastered has no
-  race variants of the observer panels, so those are the one observer art recoloured. Auto
-  follows the first player's race. The music follows the theme too (the playlist restarts
-  when the theme's race changes). The classic graphics are unchanged.
+- **UI theme** (settings menu: auto, Terran, Protoss, Zerg, Minimal; saved as `ui_theme=1..5`):
+  **Minimal**, the default, uses no game art: flat dark panels with a hairline edge, neutral
+  greys and one blue accent (the seek bar, progress bars, what is on in the settings menu).
+  It is also the look without a Remastered install. The race themes, with Remastered
+  graphics, dress the panels, minimap frame and buttons in the race's colours (command icons
+  stay yellow under every theme) and use the race's own Remastered progress bars; Remastered
+  has no race variants of the observer panels, so those are the one observer art recoloured.
+  Auto follows the first player's race. The music follows the theme's race (Minimal's is the
+  first player's; the playlist restarts when it changes). The game menu and end card look
+  like the game's own under every theme. Colours: `ui/ui_theme.h`.
 - **Order lines** (`l`: off, selected units, all units): a dotted line from each unit to its
   order's target and on through queued orders, coloured by kind (move green, attack red,
   spell violet, build and repair cyan, gathering amber for selected units only). Builders

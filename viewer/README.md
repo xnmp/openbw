@@ -84,6 +84,11 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   Auto follows the first player's race. The music follows the theme's race (Minimal's is the
   first player's; the playlist restarts when it changes). The game menu and end card look
   like the game's own under every theme. Colours: `ui/ui_theme.h`.
+- **FPS counter** (settings menu, on by default; saved as `show_fps`): small, top right,
+  under the stats panel: frames drawn per second (over half a second, `ui/fps_meter.h`) and
+  the display refresh the viewer paces itself to, one frame per refresh ("60 Hz?" when the
+  display does not report one and 60 is assumed). The small font is `ui/hud_font_small.h`
+  (JetBrains Mono Bold 12 px, from `viewer/gen_hud_font.py`).
 - **Order lines** (`l`: off, selected units, all units): a dotted line from each unit to its
   order's target and on through queued orders, coloured by kind (move green, attack red,
   spell violet, build and repair cyan, gathering amber for selected units only). Builders

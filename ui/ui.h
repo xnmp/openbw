@@ -7,6 +7,8 @@
 #include "native_sound.h"
 #include "music_player.h"
 #include "hud_font.h"
+#include "hud_font_small.h"
+#include "fps_meter.h"
 #include "order_names.h"
 #include "timeline_markers.h"
 #include "pluto_win.h"
@@ -2734,9 +2736,34 @@ struct ui_functions: ui_util_functions {
 	std::chrono::high_resolution_clock clock;
 	std::chrono::high_resolution_clock::time_point last_draw;
 	std::chrono::high_resolution_clock::time_point last_input_poll;
-	std::chrono::high_resolution_clock::time_point last_fps;
-	int fps_counter = 0;
+	std::chrono::high_resolution_clock::time_point last_refresh_poll;
 	int refresh_hz = 0;  // of the window's display; 0 if unknown
+
+	// ---- FPS readout (settings: FPS counter) ----
+	// Small, top right (under the stats panel when it shows): frames drawn per second, and the
+	// display refresh the viewer paces itself to ("60 Hz?" when the display did not say and 60
+	// is assumed), so a low number can be told apart from a slow display.
+	fps_meter::meter frame_meter;
+	bool show_fps = true;
+	std::unique_ptr<native_window_drawing::surface> fps_surface;
+	void draw_fps(int top) {
+		if (!show_fps || !frame_meter.ready()) return;
+		char text[48];
+		if (refresh_hz > 0) std::snprintf(text, sizeof(text), "%d fps / %d Hz", (int)std::lround(frame_meter.fps()), refresh_hz);
+		else std::snprintf(text, sizeof(text), "%d fps / 60 Hz?", (int)std::lround(frame_meter.fps()));
+		const int cw = hud_font_small::cell_w, ch = hud_font_small::cell_h;
+		const int w = (int)std::strlen(text) * cw + 10, h = ch + 2;
+		if (!fps_surface || fps_surface->w != w || fps_surface->h != h) {
+			fps_surface = native_window_drawing::create_rgba_surface(w, h);
+			fps_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)fps_surface->lock();
+		size_t pitch = fps_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 140));
+		small_text(buf, pitch, w, h, 5, 1, text, 205, 210, 220);
+		fps_surface->unlock();
+		fps_surface->blit(&*window_surface, viewport_x + viewport_w - w - 8, top);
+	}
 
 	// Frame pacing for the main loop: a frame per display refresh (60 Hz if unknown), so
 	// scrolling moves every time the screen does. With vsync presentation the present call
@@ -2862,15 +2889,23 @@ struct ui_functions: ui_util_functions {
 	}
 
 	void hud_text(uint32_t* buf, size_t pitch, int w, int h, int x, int y, const char* text, int r, int g, int b) {
-		for (; *text; ++text, x += hud_font::cell_w) {
+		glyph_text<hud_font::cell_w, hud_font::cell_h>(hud_font::glyphs, buf, pitch, w, h, x, y, text, r, g, b);
+	}
+	// The same in the small font (ui/hud_font_small.h).
+	void small_text(uint32_t* buf, size_t pitch, int w, int h, int x, int y, const char* text, int r, int g, int b) {
+		glyph_text<hud_font_small::cell_w, hud_font_small::cell_h>(hud_font_small::glyphs, buf, pitch, w, h, x, y, text, r, g, b);
+	}
+	template <int cell_w, int cell_h>
+	void glyph_text(const uint8_t (*glyphs)[cell_w * cell_h], uint32_t* buf, size_t pitch, int w, int h, int x, int y, const char* text, int r, int g, int b) {
+		for (; *text; ++text, x += cell_w) {
 			int c = (unsigned char)*text;
 			if (c < 32 || c > 126) c = '?';
-			const uint8_t* glyph = hud_font::glyphs[c - 32];
-			for (int gy = 0; gy != hud_font::cell_h; ++gy) {
+			const uint8_t* glyph = glyphs[c - 32];
+			for (int gy = 0; gy != cell_h; ++gy) {
 				if (y + gy < 0 || y + gy >= h) continue;
-				for (int gx = 0; gx != hud_font::cell_w; ++gx) {
+				for (int gx = 0; gx != cell_w; ++gx) {
 					if (x + gx < 0 || x + gx >= w) continue;
-					int cov = glyph[gy * hud_font::cell_w + gx];
+					int cov = glyph[gy * cell_w + gx];
 					if (!cov) continue;
 					uint32_t& px = buf[(size_t)(y + gy) * pitch + (size_t)(x + gx)];
 					int pa = px >> 24, pb = (px >> 16) & 0xff, pg = (px >> 8) & 0xff, pr = px & 0xff;
@@ -5638,6 +5673,7 @@ struct ui_functions: ui_util_functions {
 		add("auto_observer", "Auto observer", "o", true, std::make_pair(std::function<bool()>([this] { return auto_observer; }),
 			std::function<void()>([this] { toggle_auto_observer(); })));
 		add("music", "Music", "", true, flag(music_enabled));
+		add("show_fps", "FPS counter", "", true, flag(show_fps));
 		add("muted", "Mute sound", "m", true, std::make_pair(std::function<bool()>([this] { return global_volume == 0; }),
 			std::function<void()>([this] { toggle_mute(); })));
 		{
@@ -6802,13 +6838,11 @@ struct ui_functions: ui_util_functions {
 		update_cursor(now);
 		update_music();
 
-		if (now - last_fps >= std::chrono::seconds(1)) {
-			//ui::log("draw fps: %g\n", fps_counter / std::chrono::duration_cast<std::chrono::duration<double, std::ratio<1, 1>>>(now - last_fps).count());
-			last_fps = now;
-			fps_counter = 0;
+		if (now - last_refresh_poll >= std::chrono::seconds(1)) {
+			last_refresh_poll = now;
 			if (wnd) refresh_hz = wnd.refresh_rate();  // the window may have moved to another display
 		}
-		++fps_counter;
+		frame_meter.tick(std::chrono::duration<double>(now.time_since_epoch()).count());
 
 		auto minimap_area = get_minimap_area();
 		auto replay_slider_area = get_replay_slider_area();
@@ -7259,6 +7293,7 @@ struct ui_functions: ui_util_functions {
 				draw_hud();
 				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + viewport_w - hud_surface->w - 8, 8);  // top right
 			}
+			draw_fps(show_hud && hud_surface ? 8 + hud_surface->h + 4 : 6);
 			if (draw_ui_elements) {
 				draw_minimap_window();
 				draw_replay_bar();

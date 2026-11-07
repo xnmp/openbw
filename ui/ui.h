@@ -1641,8 +1641,8 @@ struct ui_functions: ui_util_functions {
 	// ground units and terrain). Units are lighter than buildings, so the two read apart even
 	// in one colour. Minor units (mines, Interceptors, Scarabs, larvae, larva eggs) are a
 	// faint dot: a minefield or an Interceptor cloud shows as a haze rather than a wall of
-	// squares, and the Carrier stays the solid one. Workers mining at one of their own bases
-	// are dimmed (see minimap_worker_at_work), so the mineral lines don't compete with armies.
+	// squares, and the Carrier stays the solid one. Workers in their own base are drawn in the
+	// building style (see minimap_worker_in_base), so the mineral lines don't compete with armies.
 	// Concentrations of one unit type get its icon (see minimap_army_clumps), so a stack of
 	// Mutalisks drawn on one spot still reads as Mutalisks.
 	static uint32_t minimap_shade(uint32_t c, int num, int den) {  // scale towards black
@@ -1723,7 +1723,7 @@ struct ui_functions: ui_util_functions {
 		};
 		double x0, y0, x1, y1;
 		// 1: neutrals, and everything in the building style: buildings, workers at work, Overlords.
-		const auto depots = minimap_depots();
+		const auto depots = minimap_buildings();
 		std::array<a_vector<std::array<double, 4>>, 8> building_rects;
 		for (size_t i = 12; i != 0;) {
 			--i;
@@ -1882,50 +1882,31 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
-	// Each player's completed resource depots (Nexus, Command Center, Hatchery, Lair, Hive).
-	a_vector<std::pair<int, xy>> minimap_depots() const {
+	// Where each player's buildings stand (any building, finished or not).
+	a_vector<std::pair<int, xy>> minimap_buildings() const {
 		a_vector<std::pair<int, xy>> out;
 		for (int p = 0; p != 8; ++p) {
 			for (const unit_t* u : ptr(st.player_units[p])) {
-				// A Hatchery morphing into a Lair (or a Lair into a Hive) is not 'completed' while
-				// it morphs, yet still takes the drones' minerals.
-				if (ut_resource_depot(u) && (u_completed(u) || unit_is_morphing_building(u))) out.push_back({p, u->sprite->position});
+				if (ut_building(u)) out.push_back({p, u->sprite->position});
 			}
 		}
 		return out;
 	}
-	// A worker gathering (on its way to, at, or returning from minerals or gas) or idle within
-	// 12 tiles of one of its own depots, or one building or sent to build anywhere: ordinary
-	// economy, drawn like a small building. A worker that is fighting, scouting or long-distance
-	// mining (no depot of its own nearby) is not.
 	bool minimap_resource(const unit_t* u) const { return unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser); }
-	// Units drawn in the building style: workers at work, and Overlords (supply, like the
+	// Units drawn in the building style: workers in base, and Overlords (supply, like the
 	// Pylons and Supply Depots they stand in for).
-	bool minimap_building_style(const unit_t* u, const a_vector<std::pair<int, xy>>& depots) const {
-		return unit_is(u, UnitTypes::Zerg_Overlord) || minimap_worker_at_work(u, depots);
+	bool minimap_building_style(const unit_t* u, const a_vector<std::pair<int, xy>>& buildings) const {
+		return unit_is(u, UnitTypes::Zerg_Overlord) || minimap_worker_in_base(u, buildings);
 	}
-	bool minimap_worker_at_work(const unit_t* u, const a_vector<std::pair<int, xy>>& depots) const {
+	// A worker within 10 tiles of one of its own buildings, whatever it is doing: mining,
+	// building, idle or defending its base. Workers away from their buildings (scouting, on
+	// their way to an expansion) stay dots.
+	bool minimap_worker_in_base(const unit_t* u, const a_vector<std::pair<int, xy>>& buildings) const {
 		if (!ut_worker(u)) return false;
-		switch (u->order_type->id) {
-		case Orders::ConstructingBuilding:  // an SCV building
-		case Orders::PlaceBuilding: case Orders::PlaceProtossBuilding: case Orders::DroneStartBuild:  // sent to build
-			return true;
-		default:
-			break;
-		}
-		switch (u->order_type->id) {
-		case Orders::PlayerGuard: case Orders::Guard: case Orders::Nothing: case Orders::Stop:  // idle
-		case Orders::Harvest1: case Orders::Harvest2: case Orders::ResetHarvestCollision:
-		case Orders::MoveToMinerals: case Orders::WaitForMinerals: case Orders::MiningMinerals: case Orders::ReturnMinerals:
-		case Orders::MoveToGas: case Orders::WaitForGas: case Orders::HarvestGas: case Orders::ReturnGas:
-			break;
-		default:
-			return false;
-		}
-		const int r = 12 * 32;
-		for (auto& d : depots) {
-			if (d.first != u->owner) continue;
-			xy v = d.second - u->sprite->position;
+		const int r = 10 * 32;
+		for (auto& b : buildings) {
+			if (b.first != u->owner) continue;
+			xy v = b.second - u->sprite->position;
 			if (v.x * v.x + v.y * v.y <= r * r) return true;
 		}
 		return false;
@@ -4190,8 +4171,8 @@ struct ui_functions: ui_util_functions {
 	int frame_bottom() const { return skin.framed ? skin.inset_top : 0; }
 	int frame_side() const { return skin.framed ? skin.inset_side : 0; }
 
-	// Remastered's progress bar (a green segmented pill), its ends kept and the middle
-	// repeated to the width; resampled once per height when not drawn at its own.
+	// Remastered's progress bar (a segmented pill in the race's colour), its ends kept and a
+	// segment repeated to the width; resampled once per height when not drawn at its own.
 	bool skin_bar(uint32_t* buf, size_t pitch, int w, int h, int x, int y, int bw, int bh, double frac) {
 		if (!ui_skin || bw < 14 || bh < 4) return false;
 		const scr::image* empty = &skin.bar_empty;
@@ -4205,10 +4186,16 @@ struct ui_functions: ui_util_functions {
 			empty = &skin.bar_empty_h;
 			full = &skin.bar_full_h;
 		}
-		const int cap = 6, W = empty->w;
+		// The art (216 wide) ends two empty columns short of its width, and its segments repeat
+		// every 12 pixels (7 + 5; Zerg's every 6). The ends keep 16 pixels each (the rounded end
+		// and its first segments); between them one segment period from the middle repeats, in
+		// step with the left end, so a bar of any width is one even run of segments.
+		const int W = empty->w - 2, period = 12, cap = std::min(16, bw / 2);
+		if (W < 2 * 16 + period) return false;
+		const int from = 16 + period * ((W / 2 - 16) / period);
 		auto pill = [&](const scr::image& img, int clip) {
 			skin_blit(buf, pitch, clip, h, img, 0, 0, cap, bh, x, y, cap, bh);
-			skin_blit(buf, pitch, clip, h, img, cap, 0, W - 2 * cap, bh, x + cap, y, bw - 2 * cap, bh, true);
+			if (bw > 2 * cap) skin_blit(buf, pitch, clip, h, img, from, 0, period, bh, x + cap, y, bw - 2 * cap, bh, true);
 			skin_blit(buf, pitch, clip, h, img, W - cap, 0, cap, bh, x + bw - cap, y, cap, bh);
 		};
 		pill(*empty, w);

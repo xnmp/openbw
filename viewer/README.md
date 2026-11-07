@@ -69,8 +69,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   250+ minerals and gas, 0.75x under 100); overlapping buildings of
   one player, and its workers drawn in their style, merge into one shape with a single outer
   border. Spider
-  Mines are tiny solid dots; Interceptors, Scarabs, larvae and eggs are faint dots, and workers mining within
-  12 tiles of one of their own bases (or idle there), and workers building or sent to build, and Overlords, are drawn as small tiles like the buildings,
+  Mines are tiny solid dots; Interceptors, Scarabs, larvae and eggs are faint dots, and workers within
+  10 tiles of one of their own buildings (whatever they are doing), and Overlords, are drawn as small tiles like the buildings,
   so armies stand out. A concentration of one
   unit type gets a round badge with that type's icon (a pill for several types): each type's units are grouped (linked within 6 tiles,
   DBSCAN-style, and cut by 2-means until no group is wider than 10 tiles), and a group shows

@@ -337,6 +337,9 @@ struct graphics {
 		return casc.read(path, b) && parse_dds_grp(std::move(b), out);
 	}
 
+	// Any file from the store as it is (e.g. the menus' font, "font/eurostile-reg.ttf").
+	bool read_file(const std::string& path, bytes& out) const { return casc.read(path, out); }
+
 	// A standalone .dds from the store (UI art such as "HD2/game/observer/..."), premultiplied.
 	bool read_ui_image(const std::string& path, image& out) const {
 		bytes b;

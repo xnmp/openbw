@@ -62,22 +62,16 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   (`~/.config/...`; `%APPDATA%\openbw-viewer\settings` on Windows) and restored next time.
 - **Minimap** flush in the bottom-left corner; click or drag on it to move the camera. It is
   drawn at the window's resolution, each tile its terrain art averaged over a 4x4 grid (the
-  remastered tiles with those graphics on). Buildings are flat tiles in the
-  units' colour, part transparent, inside a dark border; units are dots on top, air army outlined in black; minerals and geysers are drawn over
-  everything else, so a mineral line stays solid under its workers.
-  Players' buildings are drawn 1.2x their footprint and units 1.6x (1.3x that for units costing
-  250+ minerals and gas, 0.75x under 100); overlapping buildings of
-  one player, and its workers drawn in their style, merge into one shape with a single outer
-  border. Spider
-  Mines are tiny solid dots; Interceptors, Scarabs, larvae and eggs are faint dots, and workers within
-  10 tiles of one of their own buildings (whatever they are doing), and Overlords, are drawn as small tiles like the buildings,
-  so armies stand out. A concentration of one
-  unit type gets a round badge with that type's icon (a pill for several types): each type's units are grouped (linked within 6 tiles,
-  DBSCAN-style, and cut by 2-means until no group is wider than 10 tiles), and a group shows
-  when its cost reaches 800 minerals + gas and its density 12 per square tile. Icons of one
-  player at about the same spot share a row (20 Zerglings under 8 Mutalisks: both, the
-  costlier first); where rows would overlap, only the costlier is drawn. The grouping is in
-  `ui/minimap_clumps.h`.
+  remastered tiles with those graphics on). Buildings are flat tiles in the units' colour,
+  part transparent, inside a dark border; units are dots on top. Flyers cast a soft shadow
+  below and to the right, and air army is outlined in black. Minerals and geysers are drawn
+  over everything else, so a mineral line stays solid under its workers. Players' buildings
+  are drawn 1.2x their footprint and units 1.6x (1.3x that for units costing 250+ minerals
+  and gas, 0.75x under 100); overlapping buildings of one player, and its workers drawn in
+  their style, merge into one shape with a single outer border. Spider Mines are tiny solid
+  dots; Interceptors, Scarabs, larvae and eggs are faint dots; workers within 10 tiles of one
+  of their own buildings (whatever they are doing), and Overlords, are drawn as small tiles
+  like the buildings, so armies stand out.
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg; saved as `ui_theme=1..4`): with
   Remastered graphics, the panels, minimap frame and buttons wear the race's colours (command
   icons stay yellow under every theme), and the progress bars use that race's own Remastered bars. Remastered has no
@@ -103,23 +97,26 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   of both bots' estimates) rose to 90% and stayed there to the end, with the rest of the bar
   shaded. Hover it for the time left; click it to skip to the end. Games decided only in
   their last minute (the loser resigning) get none.
-- **Game menu** (`F10`): pauses the replay with **Return to Game**, **Options** (the
-  settings menu) and **Exit Replay**, stacked as in the game's own menu; `F10` or `Esc`
-  returns, playing or paused as before. With Remastered graphics the card uses the race
-  theme's panel and the race's own dialog button art (`HD2/game/consoles/<race>/dlg.dds.grp`);
-  the end-of-replay card shares it. Protoss and Zerg panels (and the minimap's top and right
-  edges) are framed like the race's main screen, cut from its console art
-  (`console_center.dds`): the blue bezel and cyan rail under the gold rail and leaves, or the
-  flesh ring, mirrored into a nine-slice frame (`ui/skin_frame.h`); panels pad their content
-  to clear it. Layout maths is in `ui/modal_layout.h`; tests: `viewer/tests/modal_layout_test.cpp`,
-  `skin_frame_test.cpp`.
-- **Music**: the race soundtracks of the players in the replay, shuffled, from Remastered's
-  `music/*.ogg` when an install is found (the classic data files have none). The master
-  volume and mute apply; **Music** in the settings menu turns it off on its own.
+- **Game menu** (`F10`): pauses the replay with **Options** (`O`, the settings menu,
+  returning here when it closes), **Exit Replay** (`E`) and **Return to Game** (`Esc` or
+  `F10`), which resumes playing or paused as before; other keys do nothing while it is open.
 - **End of replay**: when playback reaches the end, a card gives each player's result
   (victorious, defeated, dropped; a player left standing after the others left is the
-  winner) with **Watch Again** and **Exit Replay**. `Esc` closes it; it shows again at the
-  end.
+  winner) with **Watch Again** (`W`) and **Exit Replay** (`X` as in the game, or `E`). `Esc`
+  closes it; it shows again at the end.
+- Both cards are drawn like the game's own Game Menu (its measurements, from
+  `rez/gamemenu.ui.json`, scaled to the window): the map darkened under a navy veil, buttons
+  outlined twice in blue, yellow labels with the hotkey letter in white, the default button
+  set apart with a brighter ring. The text is the game's Eurostile, read at run time from a
+  Remastered install (`font/eurostile-reg.ttf`, rendered with the vendored public-domain
+  `ui/third_party/stb_truetype.h` through `ui/tt_font.h`); without an install, the viewer's
+  own font. Layout and hotkeys: `ui/modal_layout.h`; tests: `viewer/tests/modal_layout_test.cpp`,
+  `tt_font_test.cpp`.
+- **Race frames**: with Remastered graphics, Protoss and Zerg panels (and the minimap's top
+  and right edges) are framed like the race's main screen, cut from its console art
+  (`console_center.dds`): the blue bezel and cyan rail under the gold rail and leaves, or the
+  flesh ring, mirrored into a nine-slice frame (`ui/skin_frame.h`, tested by
+  `viewer/tests/skin_frame_test.cpp`); panels pad their content to clear it.
 - **Observer console skin**: with the remastered graphics on, the stats overlay, selection
   panel, graphs, replay bar and minimap frame are drawn on Remastered's own observer-mode UI
   art (metal edge, corner rivets, red inner line), with its green progress bars and its HD

@@ -10,11 +10,11 @@
 #include "order_names.h"
 #include "timeline_markers.h"
 #include "pluto_win.h"
-#include "minimap_clumps.h"
 #include "replay_result.h"
 #include "supply_state.h"
 #include "ui_theme.h"
 #include "modal_layout.h"
+#include "tt_font.h"
 #include "skin_frame.h"
 #ifdef OPENBW_REMASTERED
 #include "scr_render.h"
@@ -1637,14 +1637,12 @@ struct ui_functions: ui_util_functions {
 	// ---- Minimap units ----
 	// Layers, bottom to top: resources and other neutrals; buildings (rounded, in the same
 	// colour as the player's units but part transparent, with a dark hairline); ground units
-	// (dots, as are all units); air units (with a dark outline, so a flock reads over
-	// ground units and terrain). Units are lighter than buildings, so the two read apart even
-	// in one colour. Minor units (mines, Interceptors, Scarabs, larvae, larva eggs) are a
+	// (dots, as are all units); air units (army flyers with a dark outline, every flyer with a
+	// soft shadow below and right, so a flock reads over ground units and terrain). Units are
+	// lighter than buildings, so the two read apart even in one colour. Minor units (mines, Interceptors, Scarabs, larvae, larva eggs) are a
 	// faint dot: a minefield or an Interceptor cloud shows as a haze rather than a wall of
 	// squares, and the Carrier stays the solid one. Workers in their own base are drawn in the
 	// building style (see minimap_worker_in_base), so the mineral lines don't compete with armies.
-	// Concentrations of one unit type get its icon (see minimap_army_clumps), so a stack of
-	// Mutalisks drawn on one spot still reads as Mutalisks.
 	static uint32_t minimap_shade(uint32_t c, int num, int den) {  // scale towards black
 		return hud_rgba((c & 0xff) * num / den, (c >> 8 & 0xff) * num / den, (c >> 16 & 0xff) * num / den, 255);
 	}
@@ -1664,12 +1662,6 @@ struct ui_functions: ui_util_functions {
 			return false;
 		}
 	}
-	// Units that make a clump: army that counts in the graphs, without the minor units.
-	// Workers (every mineral line would ring), Overlords and buildings are left out.
-	bool minimap_clump_unit(const unit_t* u) const {
-		return !ut_building(u) && !minimap_minor_unit(u) && unit_counts_as_army(u) && !u_hallucination(u);
-	}
-
 	template<typename fill_F>
 	void draw_minimap_units(uint32_t* buf, size_t pitch, int w, int h, double sx, double sy, uint8_t fog_mask, fill_F&& fill) {
 		auto blend = [&](int x, int y, uint32_t c, int a) {
@@ -1749,14 +1741,21 @@ struct ui_functions: ui_util_functions {
 			if (building_rects[p].empty()) continue;
 			draw_minimap_blob(building_rects[p], palette_rgba(img.player_minimap_colors.at(player_color(p))), w, h, blend);
 		}
-		// 2: minor units, faint; 3: ground units; 4: air units, outlined.
-		for (int pass = 2; pass != 5; ++pass) {
+		// Flyers drawn as dots, by centre: a stack's shadow is darker and cast further.
+		std::vector<std::pair<double, double>> flyers;
+		for (size_t i = 0; i != 8; ++i)
+			for (unit_t* u : ptr(st.player_units[i]))
+				if (shown(u) && !ut_building(u) && u_flying(u) && !minimap_minor_unit(u) && !minimap_building_style(u, depots))
+					flyers.emplace_back(u->sprite->position.x / 32.0 * sx, u->sprite->position.y / 32.0 * sy);
+		// 2: minor units, faint; 3: ground units; 4: air units' shadows; 5: air units, army
+		// flyers outlined.
+		for (int pass = 2; pass != 6; ++pass) {
 			for (size_t i = 12; i != 0;) {
 				--i;
 				for (unit_t* u : ptr(st.player_units[i])) {
 					if (!shown(u) || ut_building(u) || u->owner >= 8) continue;
 					bool minor = minimap_minor_unit(u), air = u_flying(u);
-					if (pass != (minor ? 2 : air ? 4 : 3)) continue;
+					if (minor ? pass != 2 : air ? pass != 4 && pass != 5 : pass != 3) continue;
 					uint32_t c = colour(u);
 					if (minor) {
 						double cx = u->sprite->position.x / 32.0 * sx, cy = u->sprite->position.y / 32.0 * sy;
@@ -1768,6 +1767,18 @@ struct ui_functions: ui_util_functions {
 					}
 					if (minimap_building_style(u, depots)) continue;  // drawn with the buildings
 					box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale * minimap_cost_scale(unit_type_value(u->unit_type)));
+					if (pass == 4) {
+						// A soft shadow below and right, as flyers cast in the game. Over a stack
+						// (other flyers within about two dots) it is darker and cast further, so a
+						// cloud of Mutalisks reads as deep where one Wraith reads as light.
+						const double d = x1 - x0, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, r2 = 4 * d * d;
+						int n = 0;
+						for (auto& f : flyers) n += (f.first - cx) * (f.first - cx) + (f.second - cy) * (f.second - cy) <= r2;
+						const double depth = minimap_shadow_depth(n);
+						const double o = std::max(2.0, d * 0.6) * depth;
+						disc(x0 + o, y0 + o, x1 + o, y1 + o, hud_rgba(0, 0, 0, 255), (int)std::lround(110 + 60 * depth));
+						continue;
+					}
 					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
 					disc(x0, y0, x1, y1, c, 255);
@@ -1784,47 +1795,6 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 		draw_minimap_order_lines(buf, pitch, w, h, sx, sy);
-		// 5: army icons, the costliest placed first. A row that would overlap a costlier
-		// one is left out: at the minimap's scale the two read as one army.
-		const int icon = std::max(16, std::min(30, w * 2 / 19));
-		// Groups of one player closer than about an icon's width share a row.
-		auto clumps = minimap_army_clumps((int)(icon * 32 / std::max(sx, sy) * 0.8));
-		std::vector<minimap_clumps::badge> want;
-		for (auto& cl : clumps) {
-			int n = (int)cl.c.types.size();
-			want.push_back({(int)(cl.c.x / 32.0 * sx), (int)(cl.c.y / 32.0 * sy), n * (icon + 1) + 1, icon + 2});
-		}
-		auto placed = minimap_clumps::place(want, w, h);
-		for (size_t i = 0; i != clumps.size(); ++i) {
-			if (!placed[i].placed) continue;
-			auto& cl = clumps[i];
-			uint32_t c = palette_rgba(img.player_minimap_colors.at(player_color(cl.owner)));
-			const int x0 = placed[i].x, y0 = placed[i].y, bw = want[i].w, bh = want[i].h, s = bh - 2;
-			// A badge: a round plate in the player's colour (a pill for a row of types), a
-			// yellow border and a thin dark edge outside it, so it stands out on any ground and
-			// over the unit dots under it; inside, each type's silhouette in yellow, most cost
-			// first, its shading kept as darker amber. Yellow is no player's colour here, so a
-			// badge reads as an army icon at a glance while the plate says whose it is.
-			uint32_t plate = minimap_shade(c, 3, 4), black = hud_rgba(0, 0, 0, 255);
-			rounded(x0 - 1, y0 - 1, x0 + bw + 1, y0 + bh + 1, bh / 2.0 + 1, black, 150);
-			rounded(x0, y0, x0 + bw, y0 + bh, bh / 2.0, hud_rgba(255, 214, 40, 255), 245);
-			rounded(x0 + 1.5, y0 + 1.5, x0 + bw - 1.5, y0 + bh - 1.5, bh / 2.0 - 1.5, plate, 250);
-			const int is = std::max(6, (bh - 4) * 4 / 5);  // the square icon fits inside the round plate
-			const uint32_t shadow = hud_rgba(110, 70, 0, 255), light = hud_rgba(255, 226, 60, 255);
-			for (size_t t = 0; t != cl.c.types.size(); ++t) {
-				const auto& m = minimap_icon_mask(cl.c.types[t], is);
-				const int ix = x0 + 1 + (int)t * (s + 1) + (s - is) / 2, iy = y0 + (bh - is) / 2;
-				for (int y = 0; y != is; ++y) for (int x = 0; x != is; ++x) {
-					uint16_t v = m[(size_t)y * is + x];
-					int a = v >> 8, l = v & 0xff;
-					if (!a) continue;
-					// Dark tones go to amber, light ones to bright yellow.
-					int t2 = std::min(255, l * 3 / 2);
-					auto mix = [&](int sh) { return ((shadow >> sh & 0xff) * (255 - t2) + (light >> sh & 0xff) * t2) / 255 << sh; };
-					blend(ix + x, iy + y, mix(0) | mix(8) | mix(16) | 0xff000000u, std::min(255, a * 4 / 3));
-				}
-			}
-		}
 	}
 
 	// Buildings (and workers mining at their base) are see-through so units read over them.
@@ -1834,6 +1804,9 @@ struct ui_functions: ui_util_functions {
 	// Dots of costly units (250+ minerals and gas: Tanks, Reavers, Carriers, Ultralisks) are a
 	// little larger, cheap ones (under 100: Zerglings, Marines, Zealots...) a little smaller.
 	static double minimap_cost_scale(int value) { return value >= 250 ? 1.3 : value < 100 ? 0.75 : 1.0; }
+	// How deep a flyer's shadow is (1: alone, up to 2) for `n` flyers in its stack, itself
+	// counted: deeper by a tenth per extra flyer, so a dozen Mutalisks reach the full depth.
+	static double minimap_shadow_depth(int n) { return std::min(2.0, 1.0 + 0.1 * std::max(0, n - 1)); }
 	static constexpr double minimap_worker_tile_scale = 1.35;  // workers drawn as tiles, smaller so bases don't bloat
 
 	// Coverage (0..1) of the pixel centred at (px, py) by a box with corners rounded to `rad`
@@ -1910,84 +1883,6 @@ struct ui_functions: ui_util_functions {
 			if (v.x * v.x + v.y * v.y <= r * r) return true;
 		}
 		return false;
-	}
-
-	// A unit type's command icon at s x s for the clump badges, as (alpha << 8 | lightness).
-	// At this size the shaded art blurs to grey, so the badge draws the icon's silhouette
-	// (alpha: from drawing it over black and over white) with its lightness stretched to the
-	// full range, which keeps the main forms. It is drawn 4x larger, cropped to where the art
-	// actually is, and area-averaged down so the art fills the square.
-	std::map<std::tuple<int, int, bool>, a_vector<uint16_t>> minimap_icon_masks;
-	const a_vector<uint16_t>& minimap_icon_mask(int type, int s) {
-		auto key = std::make_tuple(type, s, ui_skin);
-		auto i = minimap_icon_masks.find(key);
-		if (i != minimap_icon_masks.end()) return i->second;
-		if (minimap_icon_masks.size() > 128) minimap_icon_masks.clear();
-		const int cw = 4 * s * 36 / 30, ch = cw * 34 / 36;
-		a_vector<uint32_t> on_black((size_t)cw * ch, hud_rgba(0, 0, 0, 255)), on_white((size_t)cw * ch, hud_rgba(255, 255, 255, 255));
-		draw_cmd_icon_scaled(on_black.data(), cw, cw, ch, 0, 0, type, 1, cw, ch);
-		draw_cmd_icon_scaled(on_white.data(), cw, cw, ch, 0, 0, type, 1, cw, ch);
-		auto grey = [](uint32_t p) { return (int)((p & 0xff) + (p >> 8 & 0xff) + (p >> 16 & 0xff)) / 3; };
-		// Over black a pixel is a * L; over white a * L + (1 - a).
-		a_vector<int> alpha((size_t)cw * ch), lum((size_t)cw * ch);
-		int x0 = cw, y0 = ch, x1 = -1, y1 = -1;
-		for (int y = 0; y != ch; ++y) for (int x = 0; x != cw; ++x) {
-			size_t k = (size_t)y * cw + x;
-			int a = std::max(0, std::min(255, 255 - (grey(on_white[k]) - grey(on_black[k]))));
-			alpha[k] = a, lum[k] = a ? std::min(255, grey(on_black[k]) * 255 / a) : 0;
-			if (a >= 64) x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
-		}
-		a_vector<uint16_t> m((size_t)s * s, 0);
-		if (x1 < x0) return minimap_icon_masks.emplace(key, std::move(m)).first->second;  // no art
-		// Fit the art's box (its longer side) to the square, centred.
-		const int bw = x1 - x0 + 1, bh = y1 - y0 + 1, side = std::max(bw, bh);
-		const double f = (double)side / s;
-		const double ox = x0 - (side - bw) / 2.0, oy = y0 - (side - bh) / 2.0;
-		a_vector<int> sa((size_t)s * s, 0), sl((size_t)s * s, 0);
-		int lo = 255, hi = 0;
-		for (int y = 0; y != s; ++y) for (int x = 0; x != s; ++x) {
-			int fx0 = (int)(ox + x * f), fx1 = std::max(fx0 + 1, (int)(ox + (x + 1) * f));
-			int fy0 = (int)(oy + y * f), fy1 = std::max(fy0 + 1, (int)(oy + (y + 1) * f));
-			long as = 0, ls = 0, n = 0;
-			for (int yy = fy0; yy < fy1; ++yy) for (int xx = fx0; xx < fx1; ++xx) {
-				++n;
-				if (xx < 0 || yy < 0 || xx >= cw || yy >= ch) continue;
-				size_t k = (size_t)yy * cw + xx;
-				as += alpha[k], ls += (long)alpha[k] * lum[k];
-			}
-			if (!n || as / n < 24) continue;
-			size_t k = (size_t)y * s + x;
-			sa[k] = (int)(as / n), sl[k] = (int)(ls / as);
-			lo = std::min(lo, sl[k]), hi = std::max(hi, sl[k]);
-		}
-		for (size_t k = 0; k != m.size(); ++k) {
-			if (!sa[k]) continue;
-			int l = hi > lo ? (sl[k] - lo) * 255 / (hi - lo) : 255;
-			m[k] = (uint16_t)(std::min(255, sa[k] * 3 / 2) << 8 | l);  // firmer edges
-		}
-		return minimap_icon_masks.emplace(key, std::move(m)).first->second;
-	}
-
-	// Army icon rows per player (see ui/minimap_clumps.h): army that counts in the graphs,
-	// without minor units, hallucinations, workers or Overlords. Siege mode counts as the
-	// tank, so a half-sieged line keeps one icon. Costliest first.
-	struct minimap_army_clump { int owner; minimap_clumps::label c; };
-	a_vector<minimap_army_clump> minimap_army_clumps(int merge_distance) const {
-		a_vector<minimap_army_clump> out;
-		minimap_clumps::params params;
-		params.merge_distance = std::max(32, merge_distance);
-		for (int p = 0; p != 8; ++p) {
-			std::vector<minimap_clumps::point> pts;
-			for (const unit_t* u : ptr(st.player_units[p])) {
-				if (!unit_visble_on_minimap(u) || !minimap_clump_unit(u)) continue;
-				int type = (int)u->unit_type->id;
-				if (unit_is(u, UnitTypes::Terran_Siege_Tank_Siege_Mode)) type = (int)UnitTypes::Terran_Siege_Tank_Tank_Mode;
-				pts.push_back({u->sprite->position.x, u->sprite->position.y, type, unit_value(u)});
-			}
-			for (auto& c : minimap_clumps::find(pts, params)) out.push_back({p, c});
-		}
-		std::stable_sort(out.begin(), out.end(), [](const minimap_army_clump& a, const minimap_army_clump& b) { return a.c.cost > b.c.cost; });
-		return out;
 	}
 
 	void draw_minimap_window() {
@@ -4045,37 +3940,8 @@ struct ui_functions: ui_util_functions {
 		skin.framed = true;
 	}
 
-	// A dialog button in the active race's own art (HD2/game/consoles/<race>/dlg.dds.grp,
-	// frame 0: the plain 120 x 48 plate): the end caps kept, the middle repeated to the width.
-	// The art has no hover frame; the game lights the plate, so a hovered one gets a glow.
 	int skin_edge_top() const { return skin.framed ? frame_top() + 4 : skin.caps_top; }  // rows a panel's frame takes at its top and bottom
 	int skin_edge_bottom() const { return skin.framed ? frame_bottom() + 4 : skin.caps_bottom; }
-	scr::image dialog_plate;
-	int dialog_plate_race = -1;
-	bool skin_dialog_button(uint32_t* buf, size_t pitch, int w, int h, const rect& r, bool hover) {
-		if (!ui_skin) return false;
-		if (dialog_plate_race != (int)active_theme) {
-			dialog_plate_race = (int)active_theme;
-			dialog_plate = {};
-			scr::dds_grp g;
-			scr::image im;
-			if (hd->read_ui_grp(std::string("HD2/game/consoles/") + theme().console_dir + "/dlg.dds.grp", g) && g.decode(0, im) && im.w >= 48 && im.h >= 8) {
-				scr::premultiply(im);
-				dialog_plate = std::move(im);
-			}
-		}
-		const scr::image& a = dialog_plate;
-		const int x = r.from.x, y = r.from.y, bw = r.to.x - r.from.x, bh = r.to.y - r.from.y, cap = std::min(24, a.w / 2);
-		if (a.empty() || bw < 2 * cap || bh <= 0) return false;
-		skin_blit(buf, pitch, w, h, a, 0, 0, cap, a.h, x, y, cap, bh);
-		skin_blit(buf, pitch, w, h, a, cap, 0, a.w - 2 * cap, a.h, x + cap, y, bw - 2 * cap, bh, true);
-		skin_blit(buf, pitch, w, h, a, a.w - cap, 0, cap, a.h, x + bw - cap, y, cap, bh);
-		if (hover) {
-			const auto& th = theme();
-			blend_rect(buf, pitch, w, h, x + 8, y + 6, bw - 16, bh - 16, hud_rgba(th.glow.r, th.glow.g, th.glow.b, 46));
-		}
-		return true;
-	}
 
 	// Copies a region of skin art (premultiplied) over a straight-alpha RGBA buffer, nearest
 	// sampled; along an axis marked tiled the source repeats instead of stretching. Pixels at
@@ -4231,7 +4097,6 @@ struct ui_functions: ui_util_functions {
 	bool skin_ready() { return false; }
 	bool skin_panel(uint32_t*, size_t, int, int, int, int, int, int) { return false; }
 	bool skin_bar(uint32_t*, size_t, int, int, int, int, int, int, double) { return false; }
-	bool skin_dialog_button(uint32_t*, size_t, int, int, const rect&, bool) { return false; }
 	int skin_edge_top() const { return 8; }
 	int skin_edge_bottom() const { return 8; }
 	bool skin_framed() const { return false; }
@@ -6393,20 +6258,23 @@ struct ui_functions: ui_util_functions {
 		return is_paused ? "Play  (space)" : "Pause  (space)";
 	}
 
-	// ---- Modal cards: the end of the replay, and the game menu (F10) ----
-	// A card in the middle of the view with a title, a headline, a few lines (left text in a
-	// colour, right-aligned text in another) and a row of buttons, drawn like the other
-	// panels. Two use it:
+	// ---- Modal cards: the game menu (F10) and the end of the replay ----
+	// Both look like the game's own Game Menu (measurements in ui/modal_layout.h): the map
+	// darkened under a navy veil, a pale title, and buttons outlined twice in blue with yellow
+	// labels whose hotkey letter is white (all white while hovered). The default button, last
+	// and set apart, has a brighter ring. The text is the game's Eurostile, read from a
+	// Remastered install (ui/tt_font.h); without one, the viewer's font. Every UI theme shares
+	// this look.
+	// - Game menu (F10): pauses the replay. Options (O) opens the settings menu, returning here
+	//   when it closes; Exit Replay (E); Return to Game (Esc or F10) resumes, playing or paused
+	//   as before. While it is open other keys do nothing (the game waits on its menu).
 	// - End of replay: when playback reaches the end, each player's result (see
-	//   ui/replay_result.h) with "Watch Again" and "Exit Replay", as the game's own
-	//   end-of-replay menu does. Esc or a seek back closes it; it shows again at the end.
-	// - Game menu (F10): pauses the replay ("Game Paused") with "Return to Game", "Options"
-	//   (the settings menu, returning here when it closes) and "Exit Replay". F10 or Esc
-	//   returns to the game, paused or playing as it was.
-	struct modal_line { a_string left; wire_rgb left_rgb; a_string right; wire_rgb right_rgb; };
-	struct modal_card { a_string title, headline; a_vector<modal_line> lines; a_vector<a_string> buttons; };
+	//   ui/replay_result.h) with Watch Again (W) and Exit Replay (X, the game's key, or E).
+	//   Esc or a seek back closes it; it shows again at the end.
+	struct modal_line { a_string text; wire_rgb rgb; };
+	struct modal_card { a_string title; a_vector<modal_line> lines; std::vector<modal_layout::button> buttons; };
 	enum class modal_kind { none, game_menu, end_of_replay };
-	enum { menu_button_return, menu_button_options, menu_button_exit };
+	enum { menu_button_options, menu_button_exit, menu_button_return };
 	enum { end_button_again, end_button_exit };
 
 	bool end_card_dismissed = false;
@@ -6452,61 +6320,46 @@ struct ui_functions: ui_util_functions {
 	modal_card modal_content(modal_kind k) const {
 		modal_card c;
 		if (k == modal_kind::game_menu) {
-			c.title = "Game Paused";
-			c.headline = format_game_time(std::min(st.current_frame, replay_st.end_frame)) + " / " + format_game_time(replay_st.end_frame);
-			c.buttons = {"Return to Game", "Options", "Exit Replay"};
+			c.title = "Game Menu";
+			c.buttons = {{"Options", 0, "o"}, {"Exit Replay", 0, "e"}, {"Return to Game (Esc)", -1, ""}};
 		} else if (k == modal_kind::end_of_replay) {
 			auto res = end_result();
-			c.title = "End of Replay";
-			if (res.winners.size() == 1) c.headline = player_label(res.winners[0]) + " is victorious";
-			else if (res.winners.size() > 1) c.headline = "Draw";
-			else c.headline = "No result: the game was still on";
-			c.headline += "  (" + format_game_time(replay_st.end_frame) + ")";
+			c.title = "Replay Finished";
 			for (int i = 0; i != 8; ++i) {
 				auto o = res.players[i];
 				if (o == replay_result::outcome::absent) continue;
 				a_string name = player_label(i);
 				if (name.size() > 20) name = name.substr(0, 20);
-				bool won = o == replay_result::outcome::victorious;
-				c.lines.push_back({name, player_rgb(i), replay_result::label(o), won ? wire_rgb{140, 230, 120} : wire_rgb{200, 200, 200}});
+				wire_rgb rgb = o == replay_result::outcome::victorious ? wire_rgb{150, 230, 130}
+					: o == replay_result::outcome::defeated ? wire_rgb{235, 140, 130} : wire_rgb{205, 205, 215};
+				c.lines.push_back({name + "  " + replay_result::label(o), rgb});
 			}
-			c.buttons = {"Watch Again", "Exit Replay"};
+			c.buttons = {{"Watch Again", 0, "w"}, {"Exit Replay", 1, "xe"}};
 		}
 		return c;
 	}
 
-	// The card's size and its buttons, in its own pixels.
-	struct modal_layout { int w = 0, h = 0, title_y = 0, headline_y = 0, lines_y = 0; a_vector<rect> buttons; };
-	modal_layout modal_layout_of(const modal_card& c) const {
-		const int cw = hud_font::cell_w, ch = hud_font::cell_h;
-		::modal_layout::params p;
-		p.cell_w = cw; p.cell_h = ch;
-		p.pad_x = panel_pad() + 12;
-		p.top = ui_skin ? skin_edge_top() : 8;
-		p.bottom = ui_skin ? skin_edge_bottom() : 8;
-		p.button_h = ui_skin ? 48 : ch + 14;  // 48: the game's button art at its own height
-		p.title_cols = (int)c.title.size();
-		p.headline_cols = (int)c.headline.size();
-		for (auto& l : c.lines) p.line_cols = std::max(p.line_cols, (int)(l.left.size() + l.right.size() + 4));
-		p.lines = (int)c.lines.size();
-		for (auto& b : c.buttons) p.button_cols = std::max(p.button_cols, (int)b.size());
-		p.buttons = (int)c.buttons.size();
-		auto g = ::modal_layout::compute(p);
-		modal_layout l;
-		l.w = g.w; l.h = g.h; l.title_y = g.title_y; l.headline_y = g.headline_y; l.lines_y = g.lines_y;
-		for (auto& b : g.buttons) l.buttons.push_back(rect{{b.x0, b.y0}, {b.x1, b.y1}});
-		return l;
+	modal_layout::result modal_layout_of(const modal_card& c) const {
+		return modal_layout::compute((int)c.lines.size(), (int)c.buttons.size(), modal_layout::scale_for(window_height));
 	}
 
 	int modal_button_at(int wx, int wy) const {
 		auto k = active_modal();
 		if (k == modal_kind::none || modal_rect.to.x <= modal_rect.from.x) return -1;
-		auto l = modal_layout_of(modal_content(k));
-		for (size_t b = 0; b != l.buttons.size(); ++b) {
-			rect r = l.buttons[b];
-			if (rect_contains(rect{r.from + modal_rect.from, r.to + modal_rect.from}, wx, wy)) return (int)b;
+		return modal_layout::button_at(modal_layout_of(modal_content(k)), wx - modal_rect.from.x, wy - modal_rect.from.y);
+	}
+
+	void press_modal_button(modal_kind k, int b) {
+		if (k == modal_kind::game_menu) {
+			if (b == menu_button_return) close_game_menu();
+			else if (b == menu_button_options) show_settings_menu = true;
+			else if (b == menu_button_exit) exit_replay();
+		} else if (k == modal_kind::end_of_replay) {
+			if (b == end_button_again) {
+				replay_frame = 0;
+				is_paused = false;
+			} else if (b == end_button_exit) exit_replay();
 		}
-		return -1;
 	}
 
 	// Mouse down (window pixels): a click on the card is consumed; while the game menu is
@@ -6515,18 +6368,89 @@ struct ui_functions: ui_util_functions {
 		auto k = active_modal();
 		if (k == modal_kind::none) return false;
 		int b = modal_button_at(wx, wy);
-		if (k == modal_kind::game_menu) {
-			if (b == menu_button_return) close_game_menu();
-			else if (b == menu_button_options) show_settings_menu = true;
-			else if (b == menu_button_exit) exit_replay();
+		if (k != modal_kind::game_menu && !rect_contains(modal_rect, wx, wy)) return false;
+		if (b >= 0) press_modal_button(k, b);
+		return true;
+	}
+
+	// A key while a card shows: a button's hotkey presses it. The game menu also takes Esc and
+	// F10 (back to the game) and swallows every other key; on the end card other keys keep
+	// their meaning (Esc there is handled with the other Esc uses). True: consumed.
+	bool modal_key(int sym) {
+		auto k = active_modal();
+		if (k == modal_kind::none) return false;
+		int b = modal_layout::button_for_key(modal_content(k).buttons, sym);
+		if (b >= 0) {
+			press_modal_button(k, b);
 			return true;
 		}
-		if (!rect_contains(modal_rect, wx, wy)) return false;
-		if (b == end_button_again) {
-			replay_frame = 0;
-			is_paused = false;
-		} else if (b == end_button_exit) exit_replay();
+		if (k != modal_kind::game_menu) return false;
+		if (sym == 27 || sym == 0x40000043) close_game_menu();  // Esc, F10
 		return true;
+	}
+
+	// The menus' font: the game's Eurostile from the Remastered store, once one is open.
+	tt_font::face menu_font_face;
+	bool menu_font_tried = false;
+	tt_font::face* menu_font() {
+#ifdef OPENBW_REMASTERED
+		if (!menu_font_tried && (hd || music_casc_open)) {
+			menu_font_tried = true;
+			std::vector<uint8_t> b;
+			const char* path = "font/eurostile-reg.ttf";
+			bool read = hd ? hd->read_file(path, b) : music_casc.read(path, b);
+			if (read && menu_font_face.load(std::move(b))) ui::log("menus: the game's font (%s)\n", path);
+			else ui::log("menus: %s unavailable; using the viewer's font\n", path);
+		}
+#endif
+		return menu_font_face.loaded() ? &menu_font_face : nullptr;
+	}
+
+	// Menu text centred on (cx, cy) over a dark shadow, as the game sets it: letter `hot` (an
+	// index into `t`, -1 for none) in `hot_rgb`, the rest in `rgb`. `px`: the font's size.
+	void menu_text(uint32_t* buf, size_t pitch, int w, int h, int cx, int cy, const a_string& t, wire_rgb rgb, int hot, wire_rgb hot_rgb, int px) {
+		auto blend = [&](int x, int y, wire_rgb c, int cov) {
+			if (x < 0 || y < 0 || x >= w || y >= h || cov <= 0) return;
+			uint32_t& p = buf[(size_t)y * pitch + (size_t)x];
+			int pa = p >> 24, pb = (p >> 16) & 0xff, pg = (p >> 8) & 0xff, pr = p & 0xff;
+			p = hud_rgba(pr + (c.r - pr) * cov / 255, pg + (c.g - pg) * cov / 255, pb + (c.b - pb) * cov / 255, pa + (255 - pa) * cov / 255);
+		};
+		tt_font::face* f = menu_font();
+		if (!f) {
+			const int cw = hud_font::cell_w, ch = hud_font::cell_h;
+			int x = cx - (int)t.size() * cw / 2, y = cy - ch / 2;
+			hud_text(buf, pitch, w, h, x, y + 1, t.c_str(), 0, 0, 0);
+			hud_text(buf, pitch, w, h, x, y, t.c_str(), rgb.r, rgb.g, rgb.b);
+			if (hot >= 0 && hot < (int)t.size()) hud_text(buf, pitch, w, h, x + hot * cw, y, t.substr(hot, 1).c_str(), hot_rgb.r, hot_rgb.g, hot_rgb.b);
+			return;
+		}
+		double x = cx - f->width(t, px) / 2;
+		int base = cy + f->cap_height(px) / 2;
+		const int shadow = std::max(1, px / 14);
+		f->draw(t, px, x + shadow, base + shadow, [&](int px_, int py, int, int cov) { blend(px_, py, wire_rgb{0, 0, 0}, cov * 200 / 255); });
+		f->draw(t, px, x, base, [&](int px_, int py, int i, int cov) { blend(px_, py, i == hot ? hot_rgb : rgb, cov); });
+	}
+
+	// A menu button: two thin blue outlines; the default one also a brighter ring and a faint
+	// blue fill. `k`: window pixels per game pixel.
+	void menu_button(uint32_t* buf, size_t pitch, int w, int h, const rect& r, bool is_default, double k) {
+		const int lw = std::max(1, (int)std::lround(k)), gap = std::max(2, (int)std::lround(2.5 * k));
+		auto frame = [&](int x0, int y0, int x1, int y1, uint32_t c) {
+			fill_rgba(buf, pitch, w, h, x0, y0, x1 - x0, lw, c);
+			fill_rgba(buf, pitch, w, h, x0, y1 - lw, x1 - x0, lw, c);
+			fill_rgba(buf, pitch, w, h, x0, y0 + lw, lw, y1 - y0 - 2 * lw, c);
+			fill_rgba(buf, pitch, w, h, x1 - lw, y0 + lw, lw, y1 - y0 - 2 * lw, c);
+		};
+		const int x0 = r.from.x, y0 = r.from.y, x1 = r.to.x, y1 = r.to.y;
+		const uint32_t line = hud_rgba(44, 34, 172, 255);
+		if (is_default) {
+			blend_rect(buf, pitch, w, h, x0, y0, x1 - x0, y1 - y0, hud_rgba(24, 40, 110, 70));
+			const int o = lw + 1;
+			frame(x0 - o, y0 - o, x1 + o, y1 + o, hud_rgba(20, 72, 195, 255));
+		}
+		frame(x0, y0, x1, y1, line);
+		const int i = lw + gap;
+		if (x1 - x0 > 2 * i + 2 * lw && y1 - y0 > 2 * i + 2 * lw) frame(x0 + i, y0 + i, x1 - i, y1 - i, line);
 	}
 
 	void draw_modal() {
@@ -6534,7 +6458,6 @@ struct ui_functions: ui_util_functions {
 		modal_rect = rect{};
 		auto k = active_modal();
 		if (k == modal_kind::none) return;
-		const int cw = hud_font::cell_w, ch = hud_font::cell_h, pad = panel_pad() + 12;
 		auto c = modal_content(k);
 		auto l = modal_layout_of(c);
 		if (!modal_surface || modal_surface->w != l.w || modal_surface->h != l.h) {
@@ -6544,25 +6467,13 @@ struct ui_functions: ui_util_functions {
 		uint32_t* buf = (uint32_t*)modal_surface->lock();
 		size_t pitch = modal_surface->pitch / 4;
 		const int w = l.w, h = l.h;
-		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
-		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) {
-			fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(4, 6, 4, 225));
-			bevel(buf, pitch, w, h, 0, 0, w, h, hud_rgba(120, 132, 88, 255), hud_rgba(44, 50, 32, 255));
-			bevel(buf, pitch, w, h, 1, 1, w - 2, h - 2, hud_rgba(64, 72, 46, 255), hud_rgba(24, 28, 18, 255));
-		}
-		auto centred = [&](int y, const a_string& text, int r, int g, int b) {
-			hud_text(buf, pitch, w, h, (w - (int)text.size() * cw) / 2, y + 1, text.c_str(), 0, 0, 0);  // the game's text sits on a shadow
-			hud_text(buf, pitch, w, h, (w - (int)text.size() * cw) / 2, y, text.c_str(), r, g, b);
-		};
-		centred(l.title_y, c.title, 252, 220, 90);  // the game's yellow
-		if (!c.headline.empty()) centred(l.headline_y, c.headline, 196, 232, 150);
-		int y = l.lines_y;
-		const int lx = pad, rx = w - pad;
-		for (auto& line : c.lines) {
-			hud_text(buf, pitch, w, h, lx, y, line.left.c_str(), line.left_rgb.r, line.left_rgb.g, line.left_rgb.b);
-			hud_text(buf, pitch, w, h, rx - (int)line.right.size() * cw, y, line.right.c_str(), line.right_rgb.r, line.right_rgb.g, line.right_rgb.b);
-			y += ch + 2;
-		}
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(14, 10, 40, 175));  // the veil over the map
+		// The game's text is about 77 of its pixels across "Save Game"; size the font to match.
+		tt_font::face* f = menu_font();
+		const int px = f ? f->fit("Save Game", 77 * l.k) : 0;
+		const wire_rgb yellow{235, 236, 138}, white{250, 248, 250};
+		menu_text(buf, pitch, w, h, w / 2, l.title_y, c.title, wire_rgb{220, 217, 245}, -1, white, px);
+		for (size_t i = 0; i != c.lines.size(); ++i) menu_text(buf, pitch, w, h, w / 2, l.lines_y[i], c.lines[i].text, c.lines[i].rgb, -1, white, px);
 		// Window position: centred in the view, a little above the middle.
 		int ox = viewport_x + (viewport_w - w) / 2, oy = std::max(0, (window_surface->h - h) * 2 / 5);
 		modal_rect = rect{{ox, oy}, {ox + w, oy + h}};
@@ -6570,13 +6481,12 @@ struct ui_functions: ui_util_functions {
 		if (wnd.has_mouse_focus()) wnd.get_cursor_pos(&mx, &my);
 		int hovered = modal_button_at(mx, my);
 		for (size_t b = 0; b != l.buttons.size(); ++b) {
-			const rect& r = l.buttons[b];
+			const auto& g = l.buttons[b];
+			rect r{{g.x0, g.y0}, {g.x1, g.y1}};
+			menu_button(buf, pitch, w, h, r, b + 1 == l.buttons.size(), l.k);
+			const auto& btn = c.buttons[b];
 			bool hov = hovered == (int)b;
-			if (!skin_dialog_button(buf, pitch, w, h, r, hov)) draw_replay_button(buf, pitch, w, h, r, hov, false, true);
-			const a_string& t = c.buttons[b];
-			int tx = r.from.x + (r.to.x - r.from.x - (int)t.size() * cw) / 2, ty = r.from.y + (r.to.y - r.from.y - ch) / 2;
-			hud_text(buf, pitch, w, h, tx, ty + 1, t.c_str(), 0, 0, 0);
-			hud_text(buf, pitch, w, h, tx, ty, t.c_str(), hov ? 255 : 236, hov ? 250 : 206, hov ? 170 : 84);  // yellow, brighter hovered
+			menu_text(buf, pitch, w, h, (g.x0 + g.x1) / 2, (g.y0 + g.y1) / 2, btn.text, hov ? white : yellow, btn.hot, white, px);
 		}
 		modal_surface->unlock();
 		modal_surface->blit(&*window_surface, ox, oy);
@@ -7082,6 +6992,7 @@ struct ui_functions: ui_util_functions {
 					}
 					break;
 				case native_window::event_t::type_key_down:
+					if (modal_key(e.sym)) break;  // a card's hotkeys; the game menu takes every key
 					//if (e.sym == 'q') {
 					//	use_new_images = !use_new_images;
 					//}

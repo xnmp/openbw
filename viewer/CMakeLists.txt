@@ -55,8 +55,6 @@ add_executable(openbw-timeline-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/
 target_include_directories(openbw-timeline-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-pluto-win-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/pluto_win_test.cpp")
 target_include_directories(openbw-pluto-win-test PRIVATE "${OPENBW_DIR}/ui")
-add_executable(openbw-minimap-clumps-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/minimap_clumps_test.cpp")
-target_include_directories(openbw-minimap-clumps-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-ui-theme-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/ui_theme_test.cpp")
 target_include_directories(openbw-ui-theme-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-music-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/music_test.cpp")
@@ -67,6 +65,8 @@ add_executable(openbw-supply-state-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_D
 target_include_directories(openbw-supply-state-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-modal-layout-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/modal_layout_test.cpp")
 target_include_directories(openbw-modal-layout-test PRIVATE "${OPENBW_DIR}/ui")
+add_executable(openbw-tt-font-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/tt_font_test.cpp")
+target_include_directories(openbw-tt-font-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-skin-frame-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/skin_frame_test.cpp")
 target_include_directories(openbw-skin-frame-test PRIVATE "${OPENBW_DIR}/ui")
 

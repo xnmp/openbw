@@ -1,58 +1,58 @@
 #ifndef OPENBW_MODAL_LAYOUT_H
 #define OPENBW_MODAL_LAYOUT_H
 
-// Geometry of the modal cards (the game menu and the end-of-replay card): a narrow panel with a
-// title, an optional headline and result lines, then the buttons stacked top to bottom at the
-// panel's full inner width, as in the game's own menu. Pixel maths only, so it can be tested.
+// The modal cards (the game menu and the end-of-replay card), laid out like the game's own
+// Game Menu (rez/gamemenu.ui.json): a 264-pixel-wide dialog with the title at the top and
+// 224 x 28 buttons, 34 pixels apart, the last ("Return to Game") set 12 pixels further
+// down. Distances are in the game's 640 x 480 pixels and scaled to the window, as
+// Remastered scales its menus. Also the buttons' hotkeys. Pure maths, so it can be tested.
 
 #include <algorithm>
+#include <cmath>
+#include <string>
 #include <vector>
 
 namespace modal_layout {
 
 struct rect { int x0, y0, x1, y1; };
 
-struct params {
-	int cell_w = 10, cell_h = 22;  // the text cell
-	int pad_x = 24;                // panel edge to buttons and text
-	int top = 22, bottom = 22;     // rows the panel's frame takes at the top and bottom
-	int button_h = 44, button_gap = 8;
-	int title_cols = 0, headline_cols = 0;  // text widths in cells (0: no such line)
-	int line_cols = 0;                      // the widest result line, in cells
-	int lines = 0;
-	int button_cols = 0;                    // the longest button label, in cells
-	int min_cols = 24;                      // the panel's inner width is at least this many cells
-	int buttons = 0;
-	int max_w = 0;                          // 0: no limit; else the panel is no wider
-};
+// The game's measurements, in its own pixels.
+constexpr int dialog_w = 264, button_x = 20, button_w = 224, button_h = 28;
+constexpr int title_y = 16;       // the title's centre
+constexpr int first_row = 36;     // the top of the first line or button
+constexpr int line_h = 18, lines_gap = 12;
+constexpr int button_step = 34, last_gap = 12, bottom = 10;
+
+// Window pixels per game pixel for a window `window_h` tall: the game's 480 rows fill it,
+// never shrinking below the game's own size.
+inline double scale_for(int window_h) { return std::max(1.0, window_h / 480.0); }
 
 struct result {
+	double k = 1;  // the scale used
 	int w = 0, h = 0;
-	int title_y = 0, headline_y = 0, lines_y = 0;  // top of each block (lines_y: the first line)
-	std::vector<rect> buttons;
+	int title_y = 0;            // the title's centre
+	std::vector<int> lines_y;   // each text line's centre
+	std::vector<rect> buttons;  // top to bottom; the last is the default
 };
 
-inline result compute(const params& p) {
+inline result compute(int lines, int buttons, double k) {
 	result r;
-	const int cw = std::max(1, p.cell_w), ch = std::max(1, p.cell_h);
-	int cols = std::max({p.min_cols, p.title_cols, p.headline_cols, p.line_cols, p.button_cols + 4});
-	int inner = cols * cw;
-	if (p.max_w > 0) inner = std::min(inner, std::max(cw, p.max_w - 2 * p.pad_x));
-	r.w = inner + 2 * p.pad_x;
-	int y = p.top + ch / 2;
-	r.title_y = y;
-	y += ch + ch / 2;
-	if (p.headline_cols > 0) {
-		r.headline_y = y;
-		y += ch + ch / 2;
+	if (!(k > 0) || !std::isfinite(k)) k = 1;
+	lines = std::max(0, lines);
+	buttons = std::max(0, buttons);
+	r.k = k;
+	auto s = [&](double v) { return (int)std::lround(v * k); };
+	r.w = s(dialog_w);
+	r.title_y = s(title_y);
+	for (int i = 0; i != lines; ++i) r.lines_y.push_back(s(first_row + (i + 0.5) * line_h));
+	double y = first_row + (lines ? lines * line_h + lines_gap : 0);
+	for (int i = 0; i != buttons; ++i) {
+		if (i && i + 1 == buttons) y += last_gap;  // the default button stands apart
+		r.buttons.push_back(rect{s(button_x), s(y), s(button_x + button_w), s(y + button_h)});
+		y += button_step;
 	}
-	r.lines_y = y;
-	if (p.lines > 0) y += p.lines * (ch + 2) + ch / 2;
-	for (int i = 0; i < p.buttons; ++i) {
-		r.buttons.push_back(rect{p.pad_x, y, p.pad_x + inner, y + p.button_h});
-		y += p.button_h + (i + 1 < p.buttons ? p.button_gap : 0);
-	}
-	r.h = y + p.bottom + ch / 2;
+	double end = buttons ? y - button_step + button_h : y;
+	r.h = s(end + bottom);
 	return r;
 }
 
@@ -62,6 +62,23 @@ inline int button_at(const result& r, int x, int y) {
 		const rect& b = r.buttons[i];
 		if (x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1) return (int)i;
 	}
+	return -1;
+}
+
+// A button's label and keys. `hot` is the index in `text` of the letter the game shows in
+// white (-1: none); `keys` are the lower-case letters that press it.
+struct button {
+	std::string text;
+	int hot = -1;
+	std::string keys;
+};
+
+// The button a key presses (an ASCII key code, either case), or -1.
+inline int button_for_key(const std::vector<button>& bs, int key) {
+	if (key >= 'A' && key <= 'Z') key += 'a' - 'A';
+	if (key <= 0 || key > 127) return -1;
+	for (size_t i = 0; i != bs.size(); ++i)
+		if (bs[i].keys.find((char)key) != std::string::npos) return (int)i;
 	return -1;
 }
 

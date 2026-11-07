@@ -78,8 +78,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   costlier first); where rows would overlap, only the costlier is drawn. The grouping is in
   `ui/minimap_clumps.h`.
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg; saved as `ui_theme=1..4`): with
-  Remastered graphics, the panels, minimap frame, buttons and command icons wear the race's
-  colours, and the progress bars use that race's own Remastered bars. Remastered has no
+  Remastered graphics, the panels, minimap frame and buttons wear the race's colours (command
+  icons stay yellow under every theme), and the progress bars use that race's own Remastered bars. Remastered has no
   race variants of the observer panels, so those are the one observer art recoloured. Auto
   follows the first player's race. The music follows the theme too (the playlist restarts
   when the theme's race changes). The classic graphics are unchanged.

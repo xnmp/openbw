@@ -3823,7 +3823,7 @@ struct ui_functions: ui_util_functions {
 	// cmdicons.grp pixels 1..15 index the first ticon.pcx remap row (the lit button look).
 #ifdef OPENBW_REMASTERED
 	// Remastered's command icons (HD2/unit/cmdicons, 64 px greyscale art the game tints) in
-	// the console's gold, resampled to the size wanted and cached.
+	// the console's gold under every theme, resampled to the size wanted and cached.
 	scr::dds_grp hd_cmdicons;
 	bool hd_cmdicons_tried = false;
 	std::map<std::tuple<int, int, int>, scr::image> hd_cmdicon_cache;
@@ -3841,11 +3841,11 @@ struct ui_functions: ui_util_functions {
 			if (hd_cmdicon_cache.size() > 256) hd_cmdicon_cache.clear();
 			scr::image src;
 			if (!hd_cmdicons.decode((size_t)frame, src) || src.w <= 0 || src.h <= 0) return false;
-			// Grey to the theme's colour: black, through its mid tone at mid grey, to its pale
-			// highlight (Terran: the console's gold to pale yellow).
+			// Grey to yellow: black, through the console's gold at mid grey, to pale yellow (the
+			// Terran ramp, whatever the theme: icons read the same in every race's panels).
 			for (auto& p : src.px) {
 				uint32_t a = scr::ch_a(p), g = (scr::ch_r(p) + scr::ch_g(p) + scr::ch_b(p)) / 3;
-				auto c = ui_theme::icon_color((int)g, theme());
+				auto c = ui_theme::icon_color((int)g, ui_theme::palette_of(ui_theme::race::terran));
 				p = scr::rgba(c.r, c.g, c.b, a);
 			}
 			scr::premultiply(src);
@@ -3996,7 +3996,6 @@ struct ui_functions: ui_util_functions {
 		skin.bar_empty = std::move(e);
 		skin.bar_full = std::move(f);
 		skin.bar_height = 0;  // the resampled copies are of the old bars
-		hd_cmdicon_cache.clear();
 		skin.themed = (int)active_theme;
 	}
 

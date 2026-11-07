@@ -63,7 +63,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Minimap** flush in the bottom-left corner; click or drag on it to move the camera. It is
   drawn at the window's resolution, each tile its terrain art averaged over a 4x4 grid (the
   remastered tiles with those graphics on). Buildings are flat tiles in the
-  units' colour, part transparent, inside a dark border; units are dots on top, air army outlined in black.
+  units' colour, part transparent, inside a dark border; units are dots on top, air army outlined in black; minerals and geysers are drawn over
+  everything else, so a mineral line stays solid under its workers.
   Players' buildings are drawn 1.2x their footprint and units 1.6x (1.3x that for units costing
   250+ minerals and gas, 0.75x under 100); overlapping buildings of
   one player, and its workers drawn in their style, merge into one shape with a single outer

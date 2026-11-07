@@ -1736,6 +1736,7 @@ struct ui_functions: ui_util_functions {
 					}
 					continue;
 				}
+				if (u->owner >= 8 && minimap_resource(u)) continue;  // drawn last, see below
 				box(u, 2, 4, x0, y0, x1, y1, u->owner >= 8 ? 1.0 : minimap_owned_scale);
 				uint32_t c = colour(u);
 				if (u->owner >= 8) fill(x0, y0, x1, y1, c);
@@ -1771,6 +1772,15 @@ struct ui_functions: ui_util_functions {
 					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
 					disc(x0, y0, x1, y1, c, 255);
 				}
+			}
+		}
+		// Minerals and geysers over everything above: where workers (part transparent) or units
+		// overlap a mineral line, the minerals show, not a mix of the two.
+		for (size_t i = 8; i != 12; ++i) {
+			for (unit_t* u : ptr(st.player_units[i])) {
+				if (!shown(u) || !minimap_resource(u)) continue;
+				box(u, 2, 4, x0, y0, x1, y1, 1.0);
+				fill(x0, y0, x1, y1, colour(u));
 			}
 		}
 		draw_minimap_order_lines(buf, pitch, w, h, sx, sy);
@@ -1888,6 +1898,7 @@ struct ui_functions: ui_util_functions {
 	// 12 tiles of one of its own depots, or one building or sent to build anywhere: ordinary
 	// economy, drawn like a small building. A worker that is fighting, scouting or long-distance
 	// mining (no depot of its own nearby) is not.
+	bool minimap_resource(const unit_t* u) const { return unit_is_mineral_field(u) || unit_is(u, UnitTypes::Resource_Vespene_Geyser); }
 	// Units drawn in the building style: workers at work, and Overlords (supply, like the
 	// Pylons and Supply Depots they stand in for).
 	bool minimap_building_style(const unit_t* u, const a_vector<std::pair<int, xy>>& depots) const {

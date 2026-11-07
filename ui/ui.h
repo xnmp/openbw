@@ -14,6 +14,7 @@
 #include "supply_state.h"
 #include "ui_theme.h"
 #include "modal_layout.h"
+#include "minimap_merge.h"
 #include "tt_font.h"
 #include "skin_frame.h"
 #ifdef OPENBW_REMASTERED
@@ -1741,49 +1742,53 @@ struct ui_functions: ui_util_functions {
 			if (building_rects[p].empty()) continue;
 			draw_minimap_blob(building_rects[p], palette_rgba(img.player_minimap_colors.at(player_color(p))), w, h, blend);
 		}
-		// Flyers drawn as dots, by centre: a stack's shadow is darker and cast further.
-		std::vector<std::pair<double, double>> flyers;
-		for (size_t i = 0; i != 8; ++i)
-			for (unit_t* u : ptr(st.player_units[i]))
-				if (shown(u) && !ut_building(u) && u_flying(u) && !minimap_minor_unit(u) && !minimap_building_style(u, depots))
-					flyers.emplace_back(u->sprite->position.x / 32.0 * sx, u->sprite->position.y / 32.0 * sy);
-		// 2: minor units, faint; 3: ground units; 4: air units' shadows; 5: air units, army
-		// flyers outlined.
-		for (int pass = 2; pass != 6; ++pass) {
-			for (size_t i = 12; i != 0;) {
-				--i;
-				for (unit_t* u : ptr(st.player_units[i])) {
-					if (!shown(u) || ut_building(u) || u->owner >= 8) continue;
-					bool minor = minimap_minor_unit(u), air = u_flying(u);
-					if (minor ? pass != 2 : air ? pass != 4 && pass != 5 : pass != 3) continue;
-					uint32_t c = colour(u);
-					if (minor) {
-						double cx = u->sprite->position.x / 32.0 * sx, cy = u->sprite->position.y / 32.0 * sy;
-						// Spider Mines are worth seeing (a minefield is a position): a tiny solid
-						// dot. The rest (Interceptors, Scarabs, larvae, eggs) stay faint pixels.
-						if (unit_is(u, UnitTypes::Terran_Vulture_Spider_Mine)) disc(cx - 1.4, cy - 1.4, cx + 1.4, cy + 1.4, c, 235);
-						else blend((int)cx, (int)cy, c, 110);
-						continue;
-					}
-					if (minimap_building_style(u, depots)) continue;  // drawn with the buildings
-					box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale * minimap_cost_scale(unit_type_value(u->unit_type)));
-					if (pass == 4) {
-						// A soft shadow below and right, as flyers cast in the game. Over a stack
-						// (other flyers within about two dots) it is darker and cast further, so a
-						// cloud of Mutalisks reads as deep where one Wraith reads as light.
-						const double d = x1 - x0, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, r2 = 4 * d * d;
-						int n = 0;
-						for (auto& f : flyers) n += (f.first - cx) * (f.first - cx) + (f.second - cy) * (f.second - cy) <= r2;
-						const double depth = minimap_shadow_depth(n);
-						const double o = std::max(2.0, d * 0.6) * depth;
-						disc(x0 + o, y0 + o, x1 + o, y1 + o, hud_rgba(0, 0, 0, 255), (int)std::lround(110 + 60 * depth));
-						continue;
-					}
-					// Only army flyers are outlined: scattered Overlords and Observers stay plain.
-					if (air && unit_counts_as_army(u)) disc(x0 - 1, y0 - 1, x1 + 1, y1 + 1, hud_rgba(0, 0, 0, 255), 255);
-					disc(x0, y0, x1, y1, c, 255);
+		// Minor units first, faint, as they come; then ground units; then air units, their
+		// shadows first, then their dots, army flyers outlined. Among ground units and among air
+		// units, very close dots of one player's units of one type combine into one larger dot
+		// (ui/minimap_merge.h), so a ball of Mutalisks reads as one heavy mark.
+		struct dot_style { uint32_t c; bool outline; };
+		std::vector<minimap_merge::dot> ground, air;
+		std::vector<dot_style> ground_style, air_style;
+		for (size_t i = 12; i != 0;) {
+			--i;
+			for (unit_t* u : ptr(st.player_units[i])) {
+				if (!shown(u) || ut_building(u) || u->owner >= 8) continue;
+				uint32_t c = colour(u);
+				if (minimap_minor_unit(u)) {
+					double cx = u->sprite->position.x / 32.0 * sx, cy = u->sprite->position.y / 32.0 * sy;
+					// Spider Mines are worth seeing (a minefield is a position): a tiny solid
+					// dot. The rest (Interceptors, Scarabs, larvae, eggs) stay faint pixels.
+					if (unit_is(u, UnitTypes::Terran_Vulture_Spider_Mine)) disc(cx - 1.4, cy - 1.4, cx + 1.4, cy + 1.4, c, 235);
+					else blend((int)cx, (int)cy, c, 110);
+					continue;
 				}
+				if (minimap_building_style(u, depots)) continue;  // drawn with the buildings
+				box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale * minimap_cost_scale(unit_type_value(u->unit_type)));
+				bool flying = u_flying(u);
+				minimap_merge::dot d{(x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0 + y1 - y0) / 4, (int)u->owner * 1024 + (int)u->unit_type->id};
+				// Only army flyers are outlined: scattered Overlords and Observers stay plain.
+				(flying ? air : ground).push_back(d);
+				(flying ? air_style : ground_style).push_back({c, flying && unit_counts_as_army(u)});
 			}
+		}
+		for (auto& b : minimap_merge::merge(ground)) disc(b.x - b.r, b.y - b.r, b.x + b.r, b.y + b.r, ground_style[b.first].c, 255);
+		auto air_dots = minimap_merge::merge(air);
+		for (auto& b : air_dots) {
+			// A soft shadow below and right, as flyers cast in the game. Over a stack (flyers
+			// within about two dots) it is darker and cast further, so a cloud of Mutalisks reads
+			// as deep where one Wraith reads as light.
+			// The offset follows one unit's dot, so a merged dot's shadow stays under it.
+			const double reach = 2 * (b.r + b.r1), r2 = reach * reach;
+			int n = 0;
+			for (auto& f : air) n += (f.x - b.x) * (f.x - b.x) + (f.y - b.y) * (f.y - b.y) <= r2;
+			const double depth = minimap_shadow_depth(n);
+			const double o = std::max(2.0, 2 * b.r1 * 0.6) * depth;
+			disc(b.x - b.r + o, b.y - b.r + o, b.x + b.r + o, b.y + b.r + o, hud_rgba(0, 0, 0, 255), (int)std::lround(110 + 60 * depth));
+		}
+		for (auto& b : air_dots) {
+			const dot_style& st_ = air_style[b.first];
+			if (st_.outline) disc(b.x - b.r - 1, b.y - b.r - 1, b.x + b.r + 1, b.y + b.r + 1, hud_rgba(0, 0, 0, 255), 255);
+			disc(b.x - b.r, b.y - b.r, b.x + b.r, b.y + b.r, st_.c, 255);
 		}
 		// Minerals and geysers over everything above: where workers (part transparent) or units
 		// overlap a mineral line, the minerals show, not a mix of the two.
@@ -6468,9 +6473,10 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = modal_surface->pitch / 4;
 		const int w = l.w, h = l.h;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(14, 10, 40, 175));  // the veil over the map
-		// The game's text is about 77 of its pixels across "Save Game"; size the font to match.
+		// The game's text is about 77 of its pixels across "Save Game"; ours is a little
+		// smaller (66), which reads better at the viewer's window sizes.
 		tt_font::face* f = menu_font();
-		const int px = f ? f->fit("Save Game", 77 * l.k) : 0;
+		const int px = f ? f->fit("Save Game", 66 * l.k) : 0;
 		const wire_rgb yellow{235, 236, 138}, white{250, 248, 250};
 		menu_text(buf, pitch, w, h, w / 2, l.title_y, c.title, wire_rgb{220, 217, 245}, -1, white, px);
 		for (size_t i = 0; i != c.lines.size(); ++i) menu_text(buf, pitch, w, h, w / 2, l.lines_y[i], c.lines[i].text, c.lines[i].rgb, -1, white, px);

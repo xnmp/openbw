@@ -71,7 +71,9 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   their style, merge into one shape with a single outer border. Spider Mines are tiny solid
   dots; Interceptors, Scarabs, larvae and eggs are faint dots; workers within 10 tiles of one
   of their own buildings (whatever they are doing), and Overlords, are drawn as small tiles
-  like the buildings, so armies stand out.
+  like the buildings, so armies stand out. Very close dots of one player's units of one type
+  (overlapping by about 70%; three or more) combine into one larger dot with their total area,
+  up to 4x a single dot (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg; saved as `ui_theme=1..4`): with
   Remastered graphics, the panels, minimap frame and buttons wear the race's colours (command
   icons stay yellow under every theme), and the progress bars use that race's own Remastered bars. Remastered has no

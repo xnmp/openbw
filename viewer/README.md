@@ -65,15 +65,17 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   remastered tiles with those graphics on). Buildings are flat tiles in the units' colour,
   part transparent, inside a dark border; units are dots on top. Flyers cast a soft shadow
   below and to the right, and air army is outlined in black. Minerals and geysers are drawn
-  over everything else, so a mineral line stays solid under its workers. Players' buildings
+  over buildings and ground units, so a mineral line stays solid under its workers; flyers
+  stay on top of them. Players' buildings
   are drawn 1.2x their footprint and units 1.6x (1.3x that for units costing 250+ minerals
   and gas, 0.75x under 100); overlapping buildings of one player, and its workers drawn in
   their style, merge into one shape with a single outer border. Spider Mines are tiny solid
   dots; Interceptors, Scarabs, larvae and eggs are faint dots; workers within 10 tiles of one
   of their own buildings (whatever they are doing), and Overlords, are drawn as small tiles
   like the buildings, so armies stand out. Very close dots of one player's units of one type
-  (overlapping by about 70%; three or more) combine into one larger dot with their total area,
-  up to 4x a single dot (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
+  (overlapping by about 70%; three or more) combine into one larger dot whose area follows
+  their total minerals + gas on one scale for every type (a mid-sized unit's dot stands for
+  150; never smaller than one member, at most 4x that dot) (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg, Minimal; saved as `ui_theme=1..5`):
   **Minimal**, the default, uses no game art: flat dark panels with a hairline edge, neutral
   greys and one blue accent (the seek bar, progress bars, what is on in the settings menu).

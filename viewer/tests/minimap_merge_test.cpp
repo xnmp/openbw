@@ -83,6 +83,40 @@ int main() {
 	m = merge({{10, 10, r, 1}}, p);
 	CHECK(m.size() == 1 && m[0].n == 1);
 
+	// With a cost scale, size follows the group's total cost, the same scale for every type:
+	// 12 Mutalisks (2400) are much bigger than 12 Zerglings (300), which are bigger than one
+	// unit's dot of the reference cost; equal totals give equal sizes whatever the count.
+	{
+		params c;
+		c.unit_r = 3, c.ref_cost = 150;
+		std::vector<dot> lings(12, dot{10, 10, 2, 1, 25}), mutas(12, dot{50, 50, 3.5, 2, 200});
+		auto ml = merge(lings, c), mm = merge(mutas, c);
+		CHECK(ml.size() == 1 && mm.size() == 1);
+		CHECK(near(ml[0].r, 3 * std::sqrt(300.0 / 150)));
+		CHECK(near(mm[0].r, 3 * 4));  // 2400 would be 4x: the cap
+		CHECK(mm[0].r > ml[0].r);
+		std::vector<dot> a(4, dot{0, 0, 2, 3, 150}), b(8, dot{90, 90, 2, 4, 75});
+		CHECK(near(merge(a, c)[0].r, merge(b, c)[0].r));
+		// Three Zerglings (75): sized by their cost; on a scale where that would be smaller
+		// than one Zergling's dot, they keep a Zergling's size.
+		std::vector<dot> three(3, dot{10, 10, 2, 1, 25});
+		auto m3 = merge(three, c);
+		CHECK(m3.size() == 1 && m3[0].n == 3 && near(m3[0].r, 3 * std::sqrt(75.0 / 150)));
+		params small = c;
+		small.unit_r = 1.5;
+		auto m3s = merge(three, small);
+		CHECK(m3s.size() == 1 && near(m3s[0].r, 2));
+		// Costs that are not numbers or not positive count as nothing.
+		std::vector<dot> bad = {{0, 0, 2, 5, nan}, {0, 0, 2, 5, -100}, {0, 0, 2, 5, inf}};
+		auto mb = merge(bad, c);
+		CHECK(mb.size() == 1 && near(mb[0].r, 2));
+		// A broken scale falls back to sizing by count.
+		c.unit_r = nan;
+		CHECK(near(merge(three, c)[0].r, 2 * std::sqrt(3.0)));
+		c.unit_r = 3, c.ref_cost = 0;
+		CHECK(near(merge(three, c)[0].r, 2 * std::sqrt(3.0)));
+	}
+
 	// Many dots spread out: each its own, and the merge stays fast enough per frame.
 	std::vector<dot> spread;
 	for (int i = 0; i != 400; ++i) spread.push_back({(double)(i % 20) * 10, (double)(i / 20) * 10, r, i % 4});

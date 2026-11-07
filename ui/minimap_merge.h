@@ -5,11 +5,13 @@
 // other combine into one larger dot, so a ball of 12 Mutalisks reads as one heavy mark rather
 // than a smear. Only very close dots merge: their centres must be within `link` of the sum of
 // their radii (with the default, the two overlap by about 70%). Merged dots keep merging by the
-// same rule until nothing changes. A merged dot sits at its members' centroid with their total
-// area (radius r * sqrt(n), capped at `max_scale` times a single dot), the usual sizing for a
-// symbol that stands for a count. Groups smaller than `min_count` stay separate dots. A column
-// of units does not chain into one dot: each merge needs the dots to overlap well, and a
-// merged dot grows only by the square root of its count. Pure maths, so it can be tested.
+// same rule until nothing changes. A merged dot sits at its members' centroid, its area
+// proportional to their total cost on one scale for every unit type (a dot of radius `unit_r`
+// stands for `ref_cost`), the usual sizing for a symbol that stands for a quantity: twelve
+// Mutalisks outweigh twelve Zerglings. It is never smaller than one of its members and at most
+// `max_scale` times `unit_r`. Groups smaller than `min_count` stay separate dots. A column of
+// units does not chain into one dot: each merge needs the dots to overlap well, and a merged
+// dot grows only by the square root of its cost. Pure maths, so it can be tested.
 
 #include <algorithm>
 #include <cmath>
@@ -20,6 +22,7 @@ namespace minimap_merge {
 struct dot {
 	double x = 0, y = 0, r = 0;  // centre and radius, minimap pixels
 	int key = 0;                 // dots merge only with dots of the same key
+	double cost = 0;             // what the unit is worth (minerals + gas)
 };
 
 struct blob {
@@ -33,14 +36,15 @@ struct blob {
 struct params {
 	double link = 0.3;
 	int min_count = 3;
-	double max_scale = 4;
+	double unit_r = 0, ref_cost = 150;  // the cost scale (unit_r <= 0: area grows with the count)
+	double max_scale = 4;               // of unit_r (or of the members' own radius without a scale)
 };
 
 // The dots to draw: merged groups and the dots left alone, in the order of their first dot.
 // Dots with a position that is not a number are dropped; a radius that is not positive is 0.
 inline std::vector<blob> merge(const std::vector<dot>& dots, const params& p = {}) {
 	struct group {
-		double sx = 0, sy = 0, area = 0;  // sums over members
+		double sx = 0, sy = 0, area = 0, cost = 0;  // sums over members
 		int key = 0;
 		std::vector<int> members;
 		bool alive = true;
@@ -49,7 +53,14 @@ inline std::vector<blob> merge(const std::vector<dot>& dots, const params& p = {
 		double y() const { return sy / n(); }
 	};
 	const double cap = std::max(1.0, std::isfinite(p.max_scale) ? p.max_scale : 1.0);
-	auto radius = [&](const group& a) { return std::sqrt(a.area / a.n()) * std::min(std::sqrt((double)a.n()), cap); };
+	const bool by_cost = std::isfinite(p.unit_r) && p.unit_r > 0 && std::isfinite(p.ref_cost) && p.ref_cost > 0;
+	auto radius = [&](const group& a) {
+		double member = std::sqrt(a.area / a.n());
+		if (a.n() == 1) return member;
+		if (!by_cost) return member * std::min(std::sqrt((double)a.n()), cap);
+		double r = std::min(p.unit_r * std::sqrt(a.cost / p.ref_cost), p.unit_r * cap);
+		return std::max(member, r);
+	};
 	std::vector<group> g;
 	g.reserve(dots.size());
 	for (size_t i = 0; i != dots.size(); ++i) {
@@ -58,6 +69,7 @@ inline std::vector<blob> merge(const std::vector<dot>& dots, const params& p = {
 		double r = std::isfinite(d.r) && d.r > 0 ? d.r : 0;
 		group a;
 		a.sx = d.x, a.sy = d.y, a.area = r * r, a.key = d.key, a.members = {(int)i};
+		a.cost = std::isfinite(d.cost) && d.cost > 0 ? d.cost : 0;
 		g.push_back(std::move(a));
 	}
 	for (bool changed = true; changed;) {
@@ -70,7 +82,7 @@ inline std::vector<blob> merge(const std::vector<dot>& dots, const params& p = {
 				if (!b.alive || b.key != a.key) continue;
 				double dx = a.x() - b.x(), dy = a.y() - b.y(), reach = p.link * (radius(a) + radius(b));
 				if (dx * dx + dy * dy > reach * reach) continue;
-				a.sx += b.sx, a.sy += b.sy, a.area += b.area;
+				a.sx += b.sx, a.sy += b.sy, a.area += b.area, a.cost += b.cost;
 				a.members.insert(a.members.end(), b.members.begin(), b.members.end());
 				b.alive = false;
 				changed = true;

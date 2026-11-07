@@ -1744,8 +1744,8 @@ struct ui_functions: ui_util_functions {
 			if (building_rects[p].empty()) continue;
 			draw_minimap_blob(building_rects[p], palette_rgba(img.player_minimap_colors.at(player_color(p))), w, h, blend);
 		}
-		// Minor units first, faint, as they come; then ground units; then air units, their
-		// shadows first, then their dots, army flyers outlined. Among ground units and among air
+		// Minor units first, faint, as they come; then ground units; then the minerals; then air
+		// units, their shadows first, then their dots, army flyers outlined. Among ground units and among air
 		// units, very close dots of one player's units of one type combine into one larger dot
 		// (ui/minimap_merge.h), so a ball of Mutalisks reads as one heavy mark.
 		struct dot_style { uint32_t c; bool outline; };
@@ -1767,39 +1767,47 @@ struct ui_functions: ui_util_functions {
 				if (minimap_building_style(u, depots)) continue;  // drawn with the buildings
 				box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale * minimap_cost_scale(unit_type_value(u->unit_type)));
 				bool flying = u_flying(u);
-				minimap_merge::dot d{(x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0 + y1 - y0) / 4, (int)u->owner * 1024 + (int)u->unit_type->id};
+				minimap_merge::dot d{(x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0 + y1 - y0) / 4, (int)u->owner * 1024 + (int)u->unit_type->id,
+					(double)unit_type_value(u->unit_type)};
 				// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 				(flying ? air : ground).push_back(d);
 				(flying ? air_style : ground_style).push_back({c, flying && unit_counts_as_army(u)});
 			}
 		}
-		for (auto& b : minimap_merge::merge(ground)) disc(b.x - b.r, b.y - b.r, b.x + b.r, b.y + b.r, ground_style[b.first].c, 255);
-		auto air_dots = minimap_merge::merge(air);
-		for (auto& b : air_dots) {
-			// A soft shadow below and right, as flyers cast in the game. Over a stack (flyers
-			// within about two dots) it is darker and cast further, so a cloud of Mutalisks reads
-			// as deep where one Wraith reads as light.
-			// The offset follows one unit's dot, so a merged dot's shadow stays under it.
-			const double reach = 2 * (b.r + b.r1), r2 = reach * reach;
-			int n = 0;
-			for (auto& f : air) n += (f.x - b.x) * (f.x - b.x) + (f.y - b.y) * (f.y - b.y) <= r2;
-			const double depth = minimap_shadow_depth(n);
-			const double o = std::max(2.0, 2 * b.r1 * 0.6) * depth;
-			disc(b.x - b.r + o, b.y - b.r + o, b.x + b.r + o, b.y + b.r + o, hud_rgba(0, 0, 0, 255), (int)std::lround(110 + 60 * depth));
-		}
-		for (auto& b : air_dots) {
-			const dot_style& st_ = air_style[b.first];
-			if (st_.outline) disc(b.x - b.r - 1, b.y - b.r - 1, b.x + b.r + 1, b.y + b.r + 1, hud_rgba(0, 0, 0, 255), 255);
-			disc(b.x - b.r, b.y - b.r, b.x + b.r, b.y + b.r, st_.c, 255);
-		}
-		// Minerals and geysers over everything above: where workers (part transparent) or units
-		// overlap a mineral line, the minerals show, not a mix of the two.
+		// Merged dots are sized by total cost on one scale: a mid-sized unit's dot (2 tiles,
+		// drawn at minimap_unit_scale) stands for 150 minerals + gas.
+		minimap_merge::params merge_params;
+		merge_params.unit_r = minimap_unit_scale * (sx + sy) / 2;
+		merge_params.ref_cost = 150;
+		for (auto& b : minimap_merge::merge(ground, merge_params)) disc(b.x - b.r, b.y - b.r, b.x + b.r, b.y + b.r, ground_style[b.first].c, 255);
+		// Minerals and geysers over the buildings and ground units: where workers (part
+		// transparent) or units overlap a mineral line, the minerals show, not a mix of the two.
+		// Flyers (and their shadows) go over them: a Mutalisk over a mineral line is still seen.
 		for (size_t i = 8; i != 12; ++i) {
 			for (unit_t* u : ptr(st.player_units[i])) {
 				if (!shown(u) || !minimap_resource(u)) continue;
 				box(u, 2, 4, x0, y0, x1, y1, 1.0);
 				fill(x0, y0, x1, y1, colour(u));
 			}
+		}
+		auto air_dots = minimap_merge::merge(air, merge_params);
+		for (auto& b : air_dots) {
+			// A soft shadow below and right, as flyers cast in the game. Over a stack (flyers
+			// within about two dots) it is darker and cast further, so a cloud of Mutalisks reads
+			// as deep where one Wraith reads as light.
+			// The offset is small and follows one unit's dot, so even a big merged dot's shadow
+			// peeks out from under it rather than lying apart; depth mostly darkens it.
+			const double reach = 2 * (b.r + b.r1), r2 = reach * reach;
+			int n = 0;
+			for (auto& f : air) n += (f.x - b.x) * (f.x - b.x) + (f.y - b.y) * (f.y - b.y) <= r2;
+			const double depth = minimap_shadow_depth(n);
+			const double o = std::min(3.0, std::max(1.5, b.r1 * 0.8)) * (1 + 0.3 * (depth - 1));
+			disc(b.x - b.r + o, b.y - b.r + o, b.x + b.r + o, b.y + b.r + o, hud_rgba(0, 0, 0, 255), (int)std::lround(110 + 60 * depth));
+		}
+		for (auto& b : air_dots) {
+			const dot_style& st_ = air_style[b.first];
+			if (st_.outline) disc(b.x - b.r - 1, b.y - b.r - 1, b.x + b.r + 1, b.y + b.r + 1, hud_rgba(0, 0, 0, 255), 255);
+			disc(b.x - b.r, b.y - b.r, b.x + b.r, b.y + b.r, st_.c, 255);
 		}
 		draw_minimap_order_lines(buf, pitch, w, h, sx, sy);
 	}

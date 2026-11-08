@@ -1580,11 +1580,11 @@ struct ui_functions: ui_util_functions {
 	int minimap_cells_tileset = -1;
 	bool minimap_hd = false;  // the frame being drawn uses the remastered art
 
-	// Window pixels: the longer side about 30% of the window height.
+	// Window pixels: the longer side about 26% of the window height.
 	rect minimap_window_rect() const {
 		int tw = (int)game_st.map_tile_width, th = (int)game_st.map_tile_height;
 		if (tw <= 0 || th <= 0 || window_height <= 0 || viewport_w <= 0) return {};
-		int side = std::max(144, std::min(448, (int)(window_height * 0.30)));
+		int side = std::max(144, std::min(400, (int)(window_height * 0.26)));
 		side = std::min(side, std::min(viewport_w, window_height) / 2);
 		int w = std::max(1, side * tw / std::max(tw, th)), h = std::max(1, side * th / std::max(tw, th));
 		return rect{{viewport_x, window_height - h}, {viewport_x + w, window_height}};
@@ -2856,6 +2856,13 @@ struct ui_functions: ui_util_functions {
 			if (race < 0 || race > 2) continue;
 			int supply_half = st.supply_used[p][race].raw_value;
 			for (const unit_t* u : ptr(st.player_units[p])) {
+				if (unit_is(u, UnitTypes::Zerg_Egg) && !u->build_queue.empty() && unit_is_supply_type(u->build_queue.front())) {
+					// An Overlord: Zerg supply, listed (greyed) with the other races' supply buildings.
+					uint32_t uid = (uint32_t)get_unit_id(u).raw_value;
+					int to = (int)u->build_queue.front()->id;
+					if (!build_starts.has(uid, to)) build_starts.add(uid, st.current_frame, p, to, supply_half / 2);
+					continue;
+				}
 				if (!ut_building(u)) continue;
 				uint32_t uid = (uint32_t)get_unit_id(u).raw_value;
 				int type = (int)u->unit_type->id;
@@ -2873,6 +2880,12 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+	// Pylons, Supply Depots and Overlords: supply, greyed in the build order.
+	static bool unit_is_supply_type(const unit_type_t* t) {
+		return t->id == UnitTypes::Protoss_Pylon || t->id == UnitTypes::Terran_Supply_Depot || t->id == UnitTypes::Zerg_Overlord;
+	}
+	// The build order panel lists the opening: what was started in the first 7 minutes.
+	static constexpr int build_order_minutes = 7;
 	// "Zerg Spawning Pool" -> "Spawning Pool": the race is the column's.
 	a_string building_label(int type) const {
 		a_string n = stat_text(type + 1);
@@ -2898,10 +2911,11 @@ struct ui_functions: ui_util_functions {
 		std::vector<int> col_chars;
 		size_t longest = 0;
 		for (int p : players) {
-			lists.push_back(build_starts.upto(p, st.current_frame));
-			int chars = (int)replay_st.player_name[p].size() * hw / cw + 1;
-			for (auto& e : lists.back()) chars = std::max(chars, 3 + 2 + (int)building_label(e.type).size() + 2 + 5);
-			col_chars.push_back(std::max(chars, 22));
+			lists.push_back(build_starts.upto(p, st.current_frame, build_order_minutes * 60 * 1000 / 42));
+			// Supply, name, then start and (estimated) finish times.
+			int chars = (int)replay_st.player_name[p].size() * hw / cw + 1 + 12;
+			for (auto& e : lists.back()) chars = std::max(chars, 3 + 2 + (int)building_label(e.type).size() + 2 + 5 + 2 + 5);
+			col_chars.push_back(std::max(chars, 29) + 1);  // + 1: clear of the panel's frame
 			longest = std::max(longest, lists.back().size());
 		}
 		int bottom = draw_ui_elements ? minimap_window_rect().from.y - 8 : window_surface->h - 8;
@@ -2928,15 +2942,25 @@ struct ui_functions: ui_util_functions {
 			bool more = (int)list.size() > rows;
 			int shown = more ? rows - 1 : (int)list.size();
 			int y = pad_t + hh + 4;
-			int time_x = x + (col_chars[i] - 5) * cw;
+			int done_x = x + (col_chars[i] - 6) * cw, start_x = done_x - 7 * cw;
+			small_text(buf, pitch, w, h, start_x, pad_t - 2 + (hh - ch) / 2, "start   done", 110, 116, 128);
+			auto right = [&](int rx, int ry, const a_string& t, int r_, int g_, int b_) {
+				small_text(buf, pitch, w, h, rx + (5 - (int)t.size()) * cw, ry, t.c_str(), r_, g_, b_);
+			};
 			for (int r = 0; r != shown; ++r) {
 				auto& e = list[r];
+				const unit_type_t* ut = get_unit_type((UnitTypes)e.type);
+				bool supply = unit_is_supply_type(ut);
+				int finish = e.frame + ut->build_time;  // estimated: as if never cancelled or slowed
 				char sup[8];
 				std::snprintf(sup, sizeof(sup), "%3d", e.supply);
-				small_text(buf, pitch, w, h, x, y, sup, 150, 158, 170);
-				small_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 232, 234, 238);
-				a_string t = format_game_time(e.frame);
-				small_text(buf, pitch, w, h, time_x + (5 - (int)t.size()) * cw, y, t.c_str(), 150, 158, 170);
+				small_text(buf, pitch, w, h, x, y, sup, supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
+				if (supply) small_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 125, 129, 137);
+				else small_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 232, 234, 238);
+				right(start_x, y, format_game_time(e.frame), supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
+				// Still being built: the finish is ahead, in amber; done: as the start.
+				if (finish > st.current_frame) right(done_x, y, format_game_time(finish), supply ? 140 : 215, supply ? 128 : 180, supply ? 95 : 95);
+				else right(done_x, y, format_game_time(finish), supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
 				y += line;
 			}
 			if (more) {
@@ -6359,6 +6383,10 @@ struct ui_functions: ui_util_functions {
 	// bar is consumed, so it doesn't select or move the camera.
 	bool replay_controls_click(int wx, int wy) {
 		if (replay_st.end_frame == 0 || !show_replay_panel()) return false;
+		if (rect_contains(live_badge_window, wx, wy)) {
+			go_live();
+			return true;
+		}
 		int b = replay_button_at(wx, wy);
 		if (b == replay_button_pause) is_paused = !is_paused;
 		else if (b == replay_button_slower || b == replay_button_faster) step_speed(b == replay_button_faster);
@@ -6778,16 +6806,43 @@ struct ui_functions: ui_util_functions {
 			plain_panel(buf, pitch, w, h, 215);
 		}
 
-		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(replay_st.end_frame) + (live_waiting() ? a_string(live_stalled() ? " LIVE (waiting)" : " LIVE") : a_string());
+		a_string speed = speed_label();
+		const int speed_x = w - pad_x - (int)speed.size() * cw;
+		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(replay_st.end_frame);
 		if (ui_skin) hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 248, 240, 170);
 		else hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 246, 247, 250);
+		int after_timer = lx + ((int)timer.size() + 2) * cw;
+		live_badge_window = rect{};
+		if (live_waiting()) {
+			// A live game, as streams show it: a red LIVE at the newest frames; grey, with how
+			// far behind, otherwise. Clicking it (or End) goes live.
+			bool at_edge = live_at_edge();
+			int dot = std::max(4, ch / 3), bx = after_timer, by = pad - 2;
+			fill_rgba(buf, pitch, w, h, bx, by + (ch - dot) / 2, dot, dot, at_edge ? hud_rgba(235, 45, 45, 255) : hud_rgba(130, 130, 130, 255));
+			int tx0 = bx + dot + cw / 2;
+			// The longest wording that fits before the speed label.
+			a_string behind = "-" + format_game_time(replay_st.end_frame - st.current_frame);
+			std::vector<a_string> wordings = at_edge ? std::vector<a_string>{live_stalled() ? "LIVE (waiting)" : "LIVE", "LIVE"}
+			                                         : std::vector<a_string>{"LIVE  " + behind, "LIVE " + behind, behind};
+			a_string label = wordings.back();
+			for (auto& wd : wordings) {
+				if (tx0 + ((int)wd.size() + 1) * cw <= speed_x) {
+					label = wd;
+					break;
+				}
+			}
+			if (at_edge) hud_text(buf, pitch, w, h, tx0, by, label.c_str(), 255, 90, 90);
+			else hud_text(buf, pitch, w, h, tx0, by, label.c_str(), 170, 170, 170);
+			int bw_px = tx0 + (int)label.size() * cw - bx;
+			live_badge_window = rect{{ox + bx - 2, oy + by - 2}, {ox + bx + bw_px + 2, oy + by + ch + 2}};
+			after_timer = tx0 + ((int)label.size() + 2) * cw;
+		}
 		if (auto_observer) {
 			bool held = clock.now() < observer_manual_until;
-			hud_text(buf, pitch, w, h, lx + ((int)timer.size() + 2) * cw, pad - 2, held ? "AUTO (manual)" : "AUTO", held ? 150 : 120, held ? 150 : 220, held ? 150 : 255);
+			hud_text(buf, pitch, w, h, after_timer, pad - 2, held ? "AUTO (manual)" : "AUTO", held ? 150 : 120, held ? 150 : 220, held ? 150 : 255);
 		}
-		a_string speed = speed_label();
-		if (is_paused) hud_text(buf, pitch, w, h, w - pad_x - (int)speed.size() * cw, pad - 2, speed.c_str(), 255, 190, 70);
-		else hud_text(buf, pitch, w, h, w - pad_x - (int)speed.size() * cw, pad - 2, speed.c_str(), 150, 230, 110);
+		if (is_paused) hud_text(buf, pitch, w, h, speed_x, pad - 2, speed.c_str(), 255, 190, 70);
+		else hud_text(buf, pitch, w, h, speed_x, pad - 2, speed.c_str(), 150, 230, 110);
 
 		// Track: segmented like the in-game bars
 		int tx = lx, ty = pad + ch + 4;
@@ -7022,6 +7077,16 @@ struct ui_functions: ui_util_functions {
 	}
 	// Still being played, but playback has reached the newest frame and waits for more.
 	bool live_stalled() const { return live_waiting() && live.queue.waiting_for_more(); }
+	// Within 5 s of the newest frame: watching live rather than behind. (Self-play runs faster than
+	// 1x, so playing at 1x drifts behind by a second or so each second.)
+	bool live_at_edge() const { return replay_st.end_frame - st.current_frame <= 5 * 1000 / 42; }
+	// Jump to the newest frames and play, as a stream's "go live" (End, or the LIVE badge).
+	void go_live() {
+		if (!live_waiting()) return;
+		replay_frame = std::max(0, replay_st.end_frame - 12);  // half a second queued
+		is_paused = false;
+	}
+	rect live_badge_window;  // the LIVE badge in window pixels, while a live game is shown
 	// Whether playback should wait for more of the game now (call once per shown frame).
 	bool live_hold() {
 		return live.on && live.queue.hold(st.current_frame, replay_st.end_frame, live_waiting());
@@ -7443,6 +7508,7 @@ struct ui_functions: ui_util_functions {
 						if (replay_frame < t) replay_frame = 0;
 						else replay_frame -= t;
 					}
+					if (e.sym == 0x4000004D) go_live();  // SDLK_END
 					if (e.sym == 0x4000004B || e.sym == 0x4000004E) {  // SDLK_PAGEUP / SDLK_PAGEDOWN
 						int t = 10 * 1000 / 42;  // 10 game seconds
 						// Page Down goes forward and Page Up back, as a document scrolls.

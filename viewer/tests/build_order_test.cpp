@@ -41,6 +41,9 @@ int main() {
 		l.add(31, 10, -1, 142, 9);
 		l.add(32, 10, 1, 142, -4);
 		CHECK(l.upto(0, 100000).size() == 4 && l.upto(1, 100000).front().supply == 0);
+		// Only the opening: starts before a frame (on it is after), still up to the frame shown.
+		CHECK(l.upto(0, 100000, 3046).size() == 1 && l.upto(0, 100000, 3047).size() == 2);
+		CHECK(l.upto(0, 2000, 100000).size() == 1 && l.upto(0, 100000, 0).empty());
 		l.clear();
 		CHECK(l.upto(0, 100000).empty() && !l.has(5, 142));
 		// A long game: thousands of starts stay quick to list.

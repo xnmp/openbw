@@ -85,9 +85,12 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   stands for 150; never smaller than one member, at most 4x that dot) (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
 - **Build order** (`Alt+M`, then `b`; also in the settings menu): each player's buildings in
   the order they were started, a column per player: the supply count at the start, the
-  building and the game time ("9 Spawning Pool 1:20"; a Drone's supply is counted back, as
-  build orders are written). Morphs (Lair, Sunken Colony) count from their start. It shows the
-  starts up to the frame on screen (`ui/build_order.h`). `Alt+M` begins a two-key chord
+  building, the game time it started ("9 Spawning Pool 1:20"; a Drone's supply is counted back,
+  as build orders are written) and when it is due to finish (start plus build time, in amber
+  while still to come; a cancelled or destroyed building keeps its estimate). Morphs (Lair,
+  Sunken Colony) count from their start. Supply (Pylons, Supply Depots and Overlords) is
+  listed greyed. It is the opening: starts in the first 7 minutes, up to the frame on screen
+  (`ui/build_order.h`). `Alt+M` begins a two-key chord
   (`ui/key_chord.h`; a hint shows what can follow; `Esc` cancels); tested by
   `viewer/tests/build_order_test.cpp`.
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg, Minimal; saved as `ui_theme=1..5`):
@@ -232,8 +235,10 @@ python3 viewer/live/bwlive.py net.pcap --map Map.scx -o game.bwlv --follow &
 - The viewer plays the game from the start at its own speed (1x unless changed) through the
   frames that have arrived, a queue (`ui/live_buffer.h`), rather than chasing the newest
   frame: bot self-play runs faster than real time and unevenly, so chasing it stutters. The
-  timer shows the newest frame's time and `LIVE`. Self-play usually gets ahead; the speed
-  keys or seeking toward the end catch up. If playback reaches the newest frame, it waits
+  timer shows the newest frame's time, then a stream-style badge: a red `LIVE` within 5 s of
+  the newest frame, otherwise grey with how far behind (`LIVE -1:23`). Pause, rewind or seek as
+  in a replay; `End` or a click on the badge goes live (and resumes). Self-play usually gets
+  ahead of 1x; the speed keys catch up too. If playback reaches the newest frame, it waits
   (`LIVE (waiting)`) until about half a second more has arrived. When the game is over, it is
   an ordinary replay.
 - `viewer/live/live_check.cpp` checks a live replay against the replay the game saved:
@@ -254,6 +259,7 @@ python3 viewer/live/bwlive.py net.pcap --map Map.scx -o game.bwlv --follow &
 | arrows, or the mouse at the game view's edge | scroll (with the full graph panel open, `←` / `→` switch its tabs) |
 | `backspace` | rewind about 5 s |
 | `page down` / `page up` | skip forward / back 10 s |
+| `end`, or click the `LIVE` badge | a live game: jump to its newest frames and play |
 | click or drag the replay bar | seek |
 | click / drag / `ctrl`-click / `shift`-click | select (`ctrl`-click selects the same type on screen) |
 | click a wireframe in the selection grid | select that unit (`shift` drop it, `ctrl` keep its type) |

@@ -8,6 +8,7 @@
 // starts up to the frame on screen. Pure, so it can be tested.
 
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <map>
 #include <utility>
@@ -32,11 +33,13 @@ public:
 	}
 	bool has(uint32_t uid, int type) const { return starts.count(std::make_pair(uid, type)) != 0; }
 
-	// `player`'s starts up to and including `frame`, in order (ties keep the unit order).
-	std::vector<entry> upto(int player, int frame) const {
+	// `player`'s starts up to and including `frame`, in order (ties keep the unit order); with
+	// `before`, only those started before that frame (an opening: the first minutes).
+	std::vector<entry> upto(int player, int frame, int before = INT_MAX) const {
 		std::vector<std::pair<uint32_t, entry>> r;
 		for (auto& v : starts) {
-			if (v.second.player == player && v.second.frame <= frame) r.push_back({v.first.first, v.second});
+			const entry& e = v.second;
+			if (e.player == player && e.frame <= frame && e.frame < before) r.push_back({v.first.first, e});
 		}
 		std::sort(r.begin(), r.end(), [](const std::pair<uint32_t, entry>& a, const std::pair<uint32_t, entry>& b) {
 			return a.second.frame != b.second.frame ? a.second.frame < b.second.frame : a.first < b.first;

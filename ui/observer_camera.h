@@ -91,6 +91,36 @@ struct rig {
 	double y() const { return cam.y; }
 };
 
+// Important tech going up (a first Templar Archives, Spire, Lair): worth a look, briefly,
+// when nothing is being fought over. `weight` is the building's (0 for ordinary ones),
+// `age_s` game seconds since it was started; it counts fully for the first `window_s` less
+// a short fade, then not at all (a long build is not revisited for its whole duration).
+inline double tech_interest(double weight, double age_s, double window_s = 24, double fade_s = 6) {
+	if (weight <= 0 || age_s < 0 || age_s >= window_s) return 0;
+	double f = std::min(1.0, (window_s - age_s) / fade_s);
+	return weight * f * f * (3 - 2 * f);
+}
+
+// Whether to cut to important tech that has just been started (`tech`: its tech_interest,
+// a site not shown yet). Only while nothing is being fought anywhere (`map_combat`: damage
+// and units with an enemy as their target, not armies merely standing near each other,
+// below `battle`), and not before the current shot has had `min_shot` seconds (shorter at
+// higher playback speed). The director's minimum for a quiet shot then holds it for a few
+// seconds, and a fight elsewhere takes over as soon as it starts.
+inline bool tech_cut(double tech, double map_combat, double shot_s, double speed = 1, double battle = 8, double min_shot = 2.0) {
+	double k = 1.0 / std::sqrt(std::max(1.0, std::min(speed, 8.0)));
+	return tech > 0 && map_combat < battle && shot_s >= min_shot * k;
+}
+
+// Whether a tech shot is still held: `since_s` real seconds after the cut, for `hold_s`
+// (shorter at higher playback speed) so the camera arrives and the building is seen, unless
+// a battle starts (the director's own minimum for a quiet shot gives way to armies merely
+// standing near each other, which is not a reason to leave).
+inline bool tech_hold(double since_s, double map_combat, double speed = 1, double hold_s = 3.5, double battle = 8) {
+	double k = 1.0 / std::sqrt(std::max(1.0, std::min(speed, 8.0)));
+	return since_s < hold_s * k && map_combat < battle;
+}
+
 struct scene {
 	double score = 0;   // total interest
 	double action = 0;  // the fight part of it

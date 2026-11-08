@@ -15,6 +15,7 @@ fights     damage episodes >= 300 hp; missed = never on screen; lat_med = median
            seconds from an episode's start until it is on screen
 cuts/min   camera jumps of > 3/4 view (real time); short<2s = shots under 2 s
 moving     share of time the camera pans; pan = px/s; rev/min = pan direction reversals
+tech       important tech starts (logged by the eval) on screen within 24 game s of starting
 """
 import json, sys, math, collections
 
@@ -26,8 +27,20 @@ def load(path):
         o = json.loads(line)
         if "view" in o: hdr = o
         elif "t" in o: cams.append((o["t"], o["f"], o["x"], o["y"])); units.append((o.get("n", 1), o.get("na", 0)))
-        else: dmg.append((o["d"], o["x"], o["y"], o["a"]))
+        elif "d" in o: dmg.append((o["d"], o["x"], o["y"], o["a"]))
     return hdr, cams, dmg
+
+def tech_framed(path, window=571):
+    """(framed, total): tech starts whose site is in the view within `window` frames."""
+    hdr, cams, tech = None, [], []
+    for line in open(path):
+        o = json.loads(line)
+        if "view" in o: hdr = o
+        elif "t" in o: cams.append((o["f"], o["x"], o["y"]))
+        elif "tech" in o: tech.append((o["tech"], o["x"], o["y"]))
+    vw, vh = hdr["view"]
+    framed = sum(1 for f, x, y in tech if any(f <= cf <= f + window and cx <= x < cx + vw and cy <= y < cy + vh for cf, cx, cy in cams))
+    return framed, len(tech)
 
 def score(path):
     hdr, cams, dmg = load(path)
@@ -152,6 +165,7 @@ def score(path):
 if __name__ == "__main__":
     for p in sys.argv[1:]:
         r = score(p)
+        tf, tn = tech_framed(p)
         print(f"{p.split('/')[-1]:20s} eff={r['eff']:.2f} cerr={r['cerr']:.2f} empty={r['empty']:.2f} dmg_on={r['dmg_on']:.2f} fights={r['fights']} lag med/mean/p90={r['lag_med']:.1f}/{r['lag_mean']:.1f}/{r['lag_p90']:.1f} on<=1s={r['early']:.2f} "
-              f"cuts/min={r['cuts_pm']:.1f} short<2s={r['short_shots']} still={r['still']:.2f} maxstill={r['longest_still']:.1f}s rms_acc={r['jerk']:.0f} pan={r['pan_px_s']:.0f}px/s rev/min={r['reversals_pm']:.1f}")
+              f"cuts/min={r['cuts_pm']:.1f} short<2s={r['short_shots']} still={r['still']:.2f} maxstill={r['longest_still']:.1f}s rms_acc={r['jerk']:.0f} pan={r['pan_px_s']:.0f}px/s rev/min={r['reversals_pm']:.1f} tech={tf}/{tn}")
 

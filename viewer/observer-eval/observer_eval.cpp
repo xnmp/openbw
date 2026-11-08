@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_map>
+#include <unordered_set>
 
 int main(int argc, char** argv) {
 	using namespace bwgame;
@@ -37,6 +38,7 @@ int main(int argc, char** argv) {
 	double frame_acc = 0;
 	const double tick_s = 1.0 / 60;
 	std::unordered_map<uint32_t, int> hp;
+	std::unordered_set<uint32_t> tech_seen;
 	ui.screen_pos = {0, 0};
 	ui.observer_last_screen_pos = ui.screen_pos;
 	while (!ui.is_done()) {
@@ -53,6 +55,9 @@ int main(int argc, char** argv) {
 				if (it != hp.end() && h < it->second && !ui.u_hallucination(u))
 					std::fprintf(out, "{\"d\":%d,\"x\":%d,\"y\":%d,\"a\":%d}\n", ui.st.current_frame, (int)u->sprite->position.x, (int)u->sprite->position.y, it->second - h);
 				hp[id] = h;
+				// Important tech started: {"tech": frame, x, y, type}, once per building.
+				if (ui.observer_tech_now(u) > 0 && tech_seen.insert(id).second)
+					std::fprintf(out, "{\"tech\":%d,\"x\":%d,\"y\":%d,\"type\":%d}\n", ui.st.current_frame, (int)u->sprite->position.x, (int)u->sprite->position.y, (int)u->unit_type->id);
 			}
 		}
 		ui.observer_step(now, false);

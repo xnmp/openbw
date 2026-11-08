@@ -184,6 +184,32 @@ int main() {
 		CHECK(run_until_switch(d, {20, 20, 500, 500}, {nan, nan, 3000, 1000}, 10, 20) < 0);
 	}
 
+	{
+		// Tech: counts for its first 24 game seconds, fading out at the end, never for
+		// ordinary buildings, nonsense ages or after the window.
+		CHECK(tech_interest(4.5, 0) == 4.5 && tech_interest(4.5, 10) == 4.5);
+		CHECK(tech_interest(4.5, 21) > 0 && tech_interest(4.5, 21) < 4.5);
+		CHECK(tech_interest(4.5, 24) == 0 && tech_interest(4.5, 300) == 0 && tech_interest(4.5, -1) == 0);
+		CHECK(tech_interest(0, 5) == 0);
+		// A tech start is cut to while the map is calm and the shot has had a moment...
+		CHECK(tech_cut(6, 0, 3));
+		CHECK(tech_cut(6, 7.9, 2.0));
+		// ... not during a battle anywhere, not straight after a cut, and not for nothing.
+		CHECK(!tech_cut(6, 8, 30) && !tech_cut(6, 50, 30));
+		CHECK(!tech_cut(6, 0, 0.5) && tech_cut(6, 0, 0.8, 8));  // shorter wait at 8x
+		CHECK(!tech_cut(0, 0, 30) && !tech_cut(tech_interest(6, 30), 0, 30));
+		// Held for a few seconds so it is seen; a battle releases it at once.
+		CHECK(tech_hold(0, 0) && tech_hold(3.4, 7.9) && !tech_hold(3.6, 0));
+		CHECK(!tech_hold(1, 8) && !tech_hold(0, 100));
+		CHECK(tech_hold(2.4, 0, 2) && !tech_hold(2.5, 0, 2));  // shorter at 2x
+		// Once there, the shot is quiet: a fight elsewhere takes it back within a second.
+		shot_director d;
+		d.start_shot(0, 0);
+		scene site{0.5, 0, 0, 0}, fight{6, 6, 5000, 5000};
+		double moved_at = -1;
+		for (int k = 0; k != 50 && moved_at < 0; ++k) if (d.tick(k * 0.168, site, fight, 640, 400)) moved_at = k * 0.168;
+		CHECK(moved_at >= 0 && moved_at <= 1.0);
+	}
 	if (failures) { std::printf("%d failure(s)\n", failures); return 1; }
 	std::printf("observer_camera_test: ok\n");
 	return 0;

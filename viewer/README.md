@@ -54,6 +54,12 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   quick, so a fight a view or two away is reached in well under a second; only scenes more
   than 3.5 views away are cut to, as a human observer clicks the minimap. Timing speeds up
   with the playback speed. Moving the camera yourself pauses it for a few seconds.
+  Important tech going up (the first Templar Archives, Robotics Facility, Stargate, Starport,
+  Science Facility, Spire, Lair, Hive and the like a player builds) is cut to within its
+  first 24 game seconds, each site once, and held about 3.5 s so it is seen, but only while
+  nothing is being fought anywhere: damage or units firing at an enemy, not armies merely
+  standing near each other. A battle releases the hold at once
+  (`observer_camera::tech_cut`, `tech_hold`).
 - **Fog of war** (`f`, with the graphs closed): the combined vision of all players, drawn
   as Brood War does (explored ground dimmed, unexplored black, soft edges), on the
   minimap too.
@@ -93,16 +99,18 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   (`ui/build_order.h`). `Alt+M` begins a two-key chord
   (`ui/key_chord.h`; a hint shows what can follow; `Esc` cancels); tested by
   `viewer/tests/build_order_test.cpp`.
-- **Production** (`Alt+M`, then `p`; also in the settings menu): a column per player of what is
-  in production now (units, buildings, morphs, upgrades with their level, research), grouped
-  ("Dragoon x2") with the time left on the soonest and a bar of its progress, soonest first;
-  then what finished in the last game minute, grouped, with how long ago the latest did.
-  Buildings are blue-grey, upgrades amber, research green. A completion is an item seen with a
-  frame or two left that is gone, or followed by the next in a queue, on the next frame; one
-  that goes earlier was cancelled or killed. Seeking forgets nothing and adds no completions;
-  seeking back shows those of that time (`ui/production.h`, tested by
-  `viewer/tests/production_test.cpp`). Interceptors and Scarabs are left out (ammunition). It sits
-  beside the build order panel, and both sit under the minimised graph.
+- **Production** (`Alt+M`, then `p`; also in the settings menu): each player's units,
+  buildings and morphs, upgrades and research in progress as command icons, a tile per kind
+  of item: a count when there are several ("x2"), an upgrade's level in its corner, and under
+  it a bar of the soonest one's progress and its time left; soonest first. Then what finished
+  in the last game minute, dimmed, with how long ago the latest did. Tile edges are tinted by
+  kind (buildings blue, upgrades amber, research green); hovering a tile names it. A
+  completion is an item seen with a frame or two left that is gone, or followed by the next in
+  a queue, on the next frame; one that goes earlier was cancelled or killed. Seeking adds no
+  completions (`ui/production.h`, tested by `viewer/tests/production_test.cpp`).
+  Interceptors and Scarabs are left out (ammunition). It sits top right under the stats
+  panel, a column per player, or the players stacked where the view is too narrow beside the
+  build order panel; both use the HUD font.
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg, Minimal; saved as `ui_theme=1..5`):
   **Minimal**, the default, uses no game art: flat dark panels with a hairline edge, neutral
   greys and one blue accent (the seek bar, progress bars, what is on in the settings menu).
@@ -318,7 +326,9 @@ Playback starts at 1×, so press `=` a few times.
 replay headlessly at a chosen playback speed with the observer on and logs the camera and
 every hp loss; `metrics.py` scores how much of the damage was on screen (against the most a
 single view could have caught) and how calm the camera was (cuts, short shots, panning,
-reversals).
+reversals). It also reports `tech`: important tech starts on screen within 24 game seconds
+(on four Pluto replays at 2x, 25 of 31 with the tech shots against 10 of 31 before, with the
+fight figures unchanged; the misses started during fights).
 
 ```sh
 cmake --build build --target openbw-observer-eval

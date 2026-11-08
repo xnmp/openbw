@@ -3061,7 +3061,22 @@ struct ui_functions: ui_util_functions {
 	}
 
 	std::unique_ptr<native_window_drawing::surface> production_surface;
+	struct production_tip { rect r; a_string text; };  // window pixels
+	a_vector<production_tip> production_tips;
+
+	// Command-card icon of an item: a unit or building's own, an upgrade's or a tech's.
+	int production_icon(production::kind k, int type) const {
+		if (k == production::kind::upgrade) return get_upgrade_type((UpgradeTypes)type)->icon;
+		if (k == production::kind::research) return get_tech_type((TechTypes)type)->icon;
+		return type;
+	}
+
+	// Each player's production as command icons: what is being made (a tile per kind of item,
+	// a count when there are several, its level for an upgrade, the soonest one's progress and
+	// time left under it), then what finished in the last game minute (dimmed, how long ago).
+	// Hovering a tile names it. A column per player, or stacked where the view is narrow.
 	void draw_production_panel() {
+		production_tips.clear();
 		if (!show_production) return;
 		std::vector<int> players;
 		for (int i = 0; i != 8; ++i) {
@@ -3069,79 +3084,69 @@ struct ui_functions: ui_util_functions {
 		}
 		if (players.empty()) return;
 		// The HUD font, as in the stats and graph panels.
-		const int cw = hud_font::cell_w, ch = hud_font::cell_h, hw = cw, hh = ch;
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, hh = ch;
 		const int pad = ui_skin ? std::max(14, frame_side() + 6) : 10, pad_t = ui_skin ? std::max(10, frame_top() + 4) : 8;
-		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, gap = 3 * cw, line = ch + 4;
+		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, line = ch + 4;
+		// A tile: the icon (36 x 34) on a plate, a progress bar, the time under it.
+		const int icon_w = 36, icon_h = 34, tile_w = std::max(icon_w + 12, 5 * cw + 2), plate_h = icon_h + 6;
+		const int bar_h = 3, tile_h = plate_h + 3 + bar_h + 1 + ch, tile_gap = 6, per_row = 6;
+		const int col_w = per_row * tile_w + (per_row - 1) * tile_gap, gap = 3 * cw;
 		const int window = production_recent_seconds * 1000 / 42;
-		struct row { a_string name, time; wire_rgb rgb; double progress; bool done; };
-		auto production_colour = [](production::kind k) -> wire_rgb {
+		struct tile { int frame; a_string name, time; wire_rgb rgb; double progress; bool done; int count, level; };
+		auto kind_rgb = [](production::kind k) -> wire_rgb {
 			switch (k) {
-			case production::kind::building: return {176, 200, 238};
-			case production::kind::upgrade: return {236, 214, 140};
-			case production::kind::research: return {160, 222, 172};
-			default: return {232, 234, 238};
+			case production::kind::building: return {120, 150, 205};
+			case production::kind::upgrade: return {222, 186, 92};
+			case production::kind::research: return {110, 200, 130};
+			default: return {150, 156, 170};
 			}
 		};
-		std::vector<std::vector<row>> making, finished;
-		std::vector<int> col_chars;
+		std::vector<std::vector<tile>> making, finished;
 		for (int p : players) {
 			making.emplace_back();
 			finished.emplace_back();
 			for (auto& g : production::grouped(production_log.now(), p)) {
-				a_string n = production_label(g.what, g.type, g.level);
-				if (g.count > 1) n += " x" + a_string(std::to_string(g.count).c_str());
-				making.back().push_back({n, format_game_time(g.remaining), production_colour(g.what), g.progress, false});
+				making.back().push_back({production_icon(g.what, g.type), production_label(g.what, g.type, g.level), format_game_time(g.remaining),
+					kind_rgb(g.what), g.progress, false, g.count, g.what == production::kind::upgrade ? g.level : 0});
 			}
 			for (auto& f : production::grouped(production_log.recent(p, st.current_frame, window))) {
-				a_string n = production_label(f.what, f.type, f.level);
-				if (f.count > 1) n += " x" + a_string(std::to_string(f.count).c_str());
-				finished.back().push_back({n, "-" + format_game_time(st.current_frame - f.newest), production_colour(f.what), 1, true});
+				finished.back().push_back({production_icon(f.what, f.type), production_label(f.what, f.type, f.level), "-" + format_game_time(st.current_frame - f.newest),
+					kind_rgb(f.what), 1, true, f.count, f.what == production::kind::upgrade ? f.level : 0});
 			}
-			int chars = std::max((int)replay_st.player_name[p].size() * hw / cw + 1, 24);
-			for (auto* list : {&making.back(), &finished.back()}) {
-				for (auto& r : *list) chars = std::max(chars, (int)r.name.size() + 2 + 6);
-			}
-			col_chars.push_back(chars + 1);
 		}
-		// Top right, under the stats panel and the frame rate, above the replay bar. A column per
-		// player; where that is too wide to clear the build order panel (top left), the players
-		// are stacked in one column instead.
+		// Top right, under the stats panel and the frame rate, above the replay bar.
 		const int top = (show_hud && hud_surface ? 8 + hud_surface->h + 4 : 8) + (show_fps ? hud_font_small::cell_h + 2 + 6 : 0);
 		const int bottom = draw_ui_elements ? replay_bar_window_rect().from.y - 8 : window_surface->h - 8;
 		const int n = (int)players.size(), head = hh + 4, block_gap = line / 2;
 		const int left_limit = viewport_x + 8 + (build_order_drawn_w ? build_order_drawn_w + 8 : 0);
-		int w_cols = pad * 2 - gap, w_stack = 0;
-		for (int c : col_chars) w_cols += c * cw + gap, w_stack = std::max(w_stack, pad * 2 + c * cw);
+		const int w_cols = pad * 2 + n * col_w + (n - 1) * gap, w_stack = pad * 2 + col_w;
 		const bool stacked = n > 1 && viewport_x + viewport_w - w_cols - 8 < left_limit;
 		const int w = stacked ? w_stack : w_cols;
-		// Lines under a player's name: "In production", its rows, a gap, "Finished", its rows
-		// (each section at least one line). In production gets the room first.
-		auto caps = [](int budget, size_t nm, size_t nf) {
-			int m = std::max(1, std::min((int)nm, budget - 3 - std::min(std::max((int)nf, 1), 3)));
-			int f = std::max(1, std::min((int)nf, budget - 3 - m));
-			return std::make_pair(m, f);
-		};
-		std::vector<std::pair<int, int>> cap(n);
-		const int avail = bottom - top - pad_t - pad_b;
-		if (stacked) {
-			int budget = std::max(5, (avail - n * head - (n - 1) * block_gap) / line / n);
-			for (int k = 0; k != n; ++k) cap[k] = caps(budget, making[k].size(), finished[k].size());
-		} else {
-			size_t most_making = 1, most_finished = 1;
-			for (int k = 0; k != n; ++k) {
-				most_making = std::max(most_making, making[k].size());
-				most_finished = std::max(most_finished, finished[k].size());
+		auto rows_of = [&](size_t count) { return std::max(1, ((int)count + per_row - 1) / per_row); };
+		// Rows of tiles for each section: production up to two, finished one, fewer when short
+		// of room. In columns they are shared so the sections line up.
+		std::vector<std::pair<int, int>> rows(n);
+		for (int k = 0; k != n; ++k) rows[k] = {std::min(2, rows_of(making[k].size())), 1};
+		if (!stacked) {
+			int m = 1;
+			for (auto& r : rows) m = std::max(m, r.first);
+			for (auto& r : rows) r.first = m;
+		}
+		auto section_h = [&](size_t count, int r) { return line + (count ? r * tile_h + (r - 1) * tile_gap : line); };
+		auto block_h = [&](int k) { return head + section_h(making[k].size(), rows[k].first) + 4 + section_h(finished[k].size(), rows[k].second); };
+		auto panel_h = [&]() {
+			int h = pad_t + pad_b;
+			if (stacked) {
+				for (int k = 0; k != n; ++k) h += block_h(k) + (k ? block_gap : 0);
+			} else {
+				int m = 0;
+				for (int k = 0; k != n; ++k) m = std::max(m, block_h(k));
+				h += m;
 			}
-			auto c = caps(std::max(5, (avail - head) / line), most_making, most_finished);
-			for (int k = 0; k != n; ++k) cap[k] = c;  // shared, so the columns line up
-		}
-		auto block_lines = [&](int k) { return 3 + cap[k].first + cap[k].second; };
-		int h = pad_t + pad_b;
-		if (stacked) {
-			for (int k = 0; k != n; ++k) h += head + block_lines(k) * line + (k ? block_gap : 0);
-		} else {
-			h += head + block_lines(0) * line;
-		}
+			return h;
+		};
+		for (auto& r : rows) if (panel_h() > bottom - top && r.first > 1) r.first = 1;
+		const int h = panel_h();
 		if (!production_surface || production_surface->w != w || production_surface->h != h) {
 			production_surface = native_window_drawing::create_rgba_surface(w, h);
 			production_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
@@ -3150,58 +3155,91 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = production_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) plain_panel(buf, pitch, w, h, 215);
+		const int ox = viewport_x + viewport_w - w - 8;  // right-aligned: better over the build order than off screen
+		auto blend_rect = [&](int x, int y, int rw, int rh, uint32_t c) {
+			for (int Y = y; Y < y + rh; ++Y) for (int X = x; X < x + rw; ++X) blend_px(buf, pitch, w, h, X, Y, c);
+		};
+		auto badge = [&](int x, int y, const char* text, int r, int g, int b) {
+			// Small font with a dark outline, over the icon's corner.
+			for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) if (dx || dy) small_text(buf, pitch, w, h, x + dx, y + dy, text, 0, 0, 0);
+			small_text(buf, pitch, w, h, x, y, text, r, g, b);
+		};
+		auto draw_tile = [&](int x, int y, const tile& t) {
+			const wire_rgb& c = t.rgb;
+			fill_rounded(buf, pitch, w, h, x, y, x + tile_w, y + plate_h, 5, hud_rgba(24, 26, 34, 235), hud_rgba(10, 11, 16, 235));
+			int ix = x + (tile_w - icon_w) / 2, iy = y + (plate_h - icon_h) / 2;
+			draw_cmd_icon_scaled(buf, pitch, w, h, ix, iy, t.frame, 1, icon_w, icon_h);
+			if (t.done) fill_rounded(buf, pitch, w, h, x, y, x + tile_w, y + plate_h, 5, hud_rgba(8, 9, 14, 120), hud_rgba(8, 9, 14, 120));
+			stroke_rounded(buf, pitch, w, h, x + 0.5, y + 0.5, x + tile_w - 0.5, y + plate_h - 0.5, 5, 1, hud_rgba(c.r, c.g, c.b, t.done ? 90 : 200));
+			const int sw = hud_font_small::cell_w, sh = hud_font_small::cell_h;
+			if (t.count > 1) {
+				a_string k = "x" + a_string(std::to_string(t.count).c_str());
+				badge(x + tile_w - 3 - (int)k.size() * sw, y + plate_h - sh, k.c_str(), 240, 240, 240);
+			}
+			if (t.level > 0) badge(x + 3, y + 1, std::to_string(t.level).c_str(), 236, 214, 140);
+			int by = y + plate_h + 3;
+			if (!t.done) {
+				blend_rect(x + 2, by, tile_w - 4, bar_h, hud_rgba(255, 255, 255, 30));
+				blend_rect(x + 2, by, (int)std::lround((tile_w - 4) * t.progress), bar_h, hud_rgba(c.r, c.g, c.b, 230));
+			}
+			int tw = (int)t.time.size() * cw;
+			hud_text(buf, pitch, w, h, x + (tile_w - tw) / 2, by + bar_h + 1, t.time.c_str(), t.done ? 128 : 215, t.done ? 134 : 180, t.done ? 146 : 95);
+			production_tips.push_back({rect{{ox + x, top + y}, {ox + x + tile_w, top + y + plate_h}}, t.name});
+		};
+		auto section = [&](int x, int& y, const char* title, const std::vector<tile>& tiles, int max_rows) {
+			hud_text(buf, pitch, w, h, x, y, title, 120, 128, 145);
+			fill_rgba(buf, pitch, w, h, x, y + ch + 1, col_w, 1, hud_rgba(120, 128, 160, 70));
+			y += line;
+			if (tiles.empty()) {
+				hud_text(buf, pitch, w, h, x + cw, y, "-", 105, 110, 120);
+				y += line;
+				return;
+			}
+			int cap = max_rows * per_row;
+			bool more = (int)tiles.size() > cap;
+			int shown = more ? cap - 1 : (int)tiles.size();
+			for (int i = 0; i != shown; ++i) draw_tile(x + (i % per_row) * (tile_w + tile_gap), y + (i / per_row) * (tile_h + tile_gap), tiles[i]);
+			if (more) {
+				// The last cell says how many more there are.
+				int i = shown, tx = x + (i % per_row) * (tile_w + tile_gap), ty = y + (i / per_row) * (tile_h + tile_gap);
+				char m[16];
+				std::snprintf(m, sizeof(m), "+%d", (int)tiles.size() - shown);
+				hud_text(buf, pitch, w, h, tx + (tile_w - (int)std::strlen(m) * cw) / 2, ty + (plate_h - ch) / 2, m, 150, 158, 170);
+			}
+			int r = std::min(max_rows, rows_of(tiles.size()));
+			y += r * tile_h + (r - 1) * tile_gap;
+		};
 		int x = pad, y0 = pad_t;
 		for (int i = 0; i != n; ++i) {
 			int p = players[i];
 			auto pc = player_rgb(p);
 			a_string name = replay_st.player_name[p].empty() ? a_string("Player ") + std::to_string(p + 1).c_str() : replay_st.player_name[p];
 			hud_text(buf, pitch, w, h, x, y0 - 2, name.c_str(), pc.r, pc.g, pc.b);
-			const int col_w = (stacked ? w - pad * 2 : col_chars[i] * cw - cw), time_x = x + col_w - 6 * cw;
 			int y = y0 + head;
-			auto section = [&](const char* title, const std::vector<row>& rows, int cap) {
-				hud_text(buf, pitch, w, h, x, y, title, 120, 128, 145);
-				fill_rgba(buf, pitch, w, h, x, y + ch + 1, col_w, 1, hud_rgba(120, 128, 160, 70));
-				y += line;
-				if (rows.empty()) {
-					hud_text(buf, pitch, w, h, x + cw, y, "-", 105, 110, 120);
-					y += line;
-					return;
-				}
-				bool more = (int)rows.size() > cap;
-				int shown = more ? cap - 1 : (int)rows.size();
-				for (int r = 0; r != shown; ++r) {
-					const row& e = rows[r];
-					int dim = e.done ? 70 : 100;  // finished rows are quieter
-					hud_text(buf, pitch, w, h, x + cw, y, e.name.c_str(), e.rgb.r * dim / 100, e.rgb.g * dim / 100, e.rgb.b * dim / 100);
-					hud_text(buf, pitch, w, h, time_x + (6 - (int)e.time.size()) * cw, y, e.time.c_str(), e.done ? 120 : 215, e.done ? 126 : 180, e.done ? 138 : 95);
-					if (!e.done) {
-						// Progress of the soonest, as a thin bar under the row.
-						int bw = col_w - cw, by = y + ch + 1;
-						fill_rgba(buf, pitch, w, h, x + cw, by, bw, 2, hud_rgba(255, 255, 255, 28));
-						fill_rgba(buf, pitch, w, h, x + cw, by, (int)std::lround(bw * e.progress), 2, hud_rgba(e.rgb.r, e.rgb.g, e.rgb.b, 170));
-					}
-					y += line;
-				}
-				if (more) {
-					char m[32];
-					std::snprintf(m, sizeof(m), "+%d more", (int)rows.size() - shown);
-					hud_text(buf, pitch, w, h, x + cw, y, m, 120, 128, 145);
-					y += line;
-				}
-			};
-			section("In production", making[i], cap[i].first);
-			y = y0 + head + (1 + cap[i].first + 1) * line;
-			section("Finished, last minute", finished[i], cap[i].second);
+			section(x, y, "In production", making[i], rows[i].first);
+			// In columns, the finished sections start level.
+			if (!stacked) y = y0 + head + section_h(1, rows[i].first);
+			y += 4;
+			section(x, y, "Finished, last minute", finished[i], rows[i].second);
 			if (stacked) {
-				y0 += head + block_lines(i) * line + block_gap;
-				if (i + 1 != n) fill_rgba(buf, pitch, w, h, x, y0 - block_gap / 2 - line / 2, w - pad * 2, 1, hud_rgba(150, 156, 190, 90));
+				y0 += block_h(i) + block_gap;
+				if (i + 1 != n) fill_rgba(buf, pitch, w, h, x, y0 - block_gap / 2 - 2, col_w, 1, hud_rgba(150, 156, 190, 90));
 			} else {
-				x += col_chars[i] * cw + gap;
+				x += col_w + gap;
 			}
 		}
 		production_surface->unlock();
-		// Right-aligned even in a view too narrow for the stack: better over the build order than off screen.
-		production_surface->blit(&*window_surface, viewport_x + viewport_w - w - 8, top);
+		production_surface->blit(&*window_surface, ox, top);
+		// The name of the tile under the cursor.
+		if (wnd.has_mouse_focus()) {
+			int mx = -1, my = -1;
+			wnd.get_cursor_pos(&mx, &my);
+			for (auto& t : production_tips) {
+				if (mx < t.r.from.x || mx >= t.r.to.x || my < t.r.from.y || my >= t.r.to.y) continue;
+				draw_replay_tip(t.text, (t.r.from.x + t.r.to.x) / 2, t.r.from.y);
+				break;
+			}
+		}
 	}
 
 	// While a chord waits for its second key: what it can be.
@@ -5057,7 +5095,8 @@ struct ui_functions: ui_util_functions {
 	}
 
 	// Interest heatmap: a grid of 128 px cells. Each observer tick rebuilds per-cell army
-	// supply per player, decayed damage, scouts and construction sites, takes window sums
+	// supply per player, decayed damage, scouts, construction sites and important tech just
+	// started (observer_tech_now: shown briefly, only while no fight is on), takes window sums
 	// with summed-area tables, and keeps a per-window score smoothed over ~1 game second,
 	// so decisions follow sustained interest rather than single volleys.
 	static constexpr int observer_cell = 128;
@@ -5068,8 +5107,37 @@ struct ui_functions: ui_util_functions {
 	struct observer_interest {
 		double action = 0;  // damage, fights and armies
 		double quiet = 0;   // scouting and construction
+		double combat = 0;  // the fighting part of action: damage and units firing at enemies
 		xy centre;
 	};
+
+	// Tech buildings worth a look when they go up (the first of each type a player builds):
+	// what they unlock changes the game. Others (Gateways, Barracks, Pylons) weigh nothing.
+	static double observer_tech_weight(const unit_type_t* t) {
+		switch (t->id) {
+		case UnitTypes::Protoss_Templar_Archives: case UnitTypes::Protoss_Fleet_Beacon: case UnitTypes::Protoss_Arbiter_Tribunal:
+		case UnitTypes::Protoss_Robotics_Support_Bay: case UnitTypes::Protoss_Observatory: case UnitTypes::Protoss_Stargate:
+		case UnitTypes::Protoss_Robotics_Facility: case UnitTypes::Protoss_Citadel_of_Adun:
+		case UnitTypes::Terran_Factory: case UnitTypes::Terran_Starport: case UnitTypes::Terran_Science_Facility:
+		case UnitTypes::Terran_Covert_Ops: case UnitTypes::Terran_Nuclear_Silo: case UnitTypes::Terran_Physics_Lab:
+		case UnitTypes::Zerg_Lair: case UnitTypes::Zerg_Hive: case UnitTypes::Zerg_Spire: case UnitTypes::Zerg_Greater_Spire:
+		case UnitTypes::Zerg_Hydralisk_Den: case UnitTypes::Zerg_Queens_Nest: case UnitTypes::Zerg_Defiler_Mound:
+		case UnitTypes::Zerg_Ultralisk_Cavern: case UnitTypes::Zerg_Nydus_Canal:
+			return 6;
+		default:
+			return 0;
+		}
+	}
+	// The important tech `u` is starting (being built, or morphing into: a Lair), weighted by
+	// how recently it began; 0 for anything else, or a type its owner already has.
+	double observer_tech_now(const unit_t* u) const {
+		if (!ut_building(u) || u_completed(u) || u->owner < 0 || u->owner >= 8) return 0;
+		const unit_type_t* t = !u->build_queue.empty() && ut_building(u->build_queue.front()) ? u->build_queue.front() : u->unit_type;
+		double w = observer_tech_weight(t);
+		if (w <= 0 || st.completed_unit_counts[u->owner][t->id] > 0) return 0;
+		double age_s = (t->build_time - u->remaining_build_time) * 42 / 1000.0;
+		return observer_camera::tech_interest(w, age_s);
+	}
 
 	struct observer_grid {
 		int w = 0, h = 0;
@@ -5177,6 +5245,7 @@ struct ui_functions: ui_util_functions {
 		observer_interest r;
 		r.action = damage * 0.3 + 3.0 * (engaged / 2.0) + 0.3 * (side[1] / 2.0) + 0.3 * (approaching / 2.0) + 0.05 * (total / 2.0);
 		r.quiet = 1.5 * std::min(scouts, 2) + 0.5 * std::min(builds, 3);
+		r.combat = damage * 0.3 + 3.0 * (engaged / 2.0);
 		if (wsum > 0) {
 			r.centre = xy((int)(observer_grid::rect_sum(g.wx, g, cx - hw, cy - hh, cx + hw, cy + hh) / wsum),
 			              (int)(observer_grid::rect_sum(g.wy, g, cx - hw, cy - hh, cx + hw, cy + hh) / wsum));
@@ -5205,8 +5274,39 @@ struct ui_functions: ui_util_functions {
 			[&](const observer_visit& v) { return v.until <= now; }), observer_visits.end());
 		observer_target = target;
 		observer_has_target = true;
+		observer_on_tech = false;
 		observer_last_switch = now;
 		observer_dir.start_shot(observer_secs(now), action);
+	}
+
+	// Important tech just started (observer_tech_now), each site shown once: cut to the most
+	// recent while the map is calm (observer_camera::tech_cut). Sites already in view count
+	// as shown. Returns true if it cut.
+	double observer_map_combat = 0;
+	std::set<uint32_t> observer_tech_shown;
+	bool observer_on_tech = false;  // the shown shot is a tech site (held: tech_hold)
+	bool observer_tech_shot(std::chrono::high_resolution_clock::time_point now, double shot_s) {
+		double best = 0;
+		const unit_t* site = nullptr;
+		for (int i = 0; i != 8; ++i) {
+			for (const unit_t* u : ptr(st.player_units[i])) {
+				double v = observer_tech_now(u);
+				if (v <= 0) continue;
+				uint32_t uid = (uint32_t)get_unit_id(u).raw_value;
+				if (observer_tech_shown.count(uid)) continue;
+				xy p = u->sprite->position;
+				if (std::abs(p.x - observer_target.x) < (int)view_width / 2 && std::abs(p.y - observer_target.y) < (int)view_height / 2) {
+					observer_tech_shown.insert(uid);
+					continue;
+				}
+				if (v > best) best = v, site = u;
+			}
+		}
+		if (!site || !observer_camera::tech_cut(best, observer_map_combat, shot_s, std::max(observer_speed(), 1.0))) return false;
+		observer_tech_shown.insert((uint32_t)get_unit_id(site).raw_value);
+		observer_switch_to(site->sprite->position, now, 0);
+		observer_on_tech = true;
+		return true;
 	}
 
 	void observer_retarget(std::chrono::high_resolution_clock::time_point now) {
@@ -5229,6 +5329,12 @@ struct ui_functions: ui_util_functions {
 			double d = win[i].action - observer_smooth_action[i];
 			observer_smooth_action[i] += d * (d > 0 ? k_up : k_down);
 		}
+		// The most fighting anywhere, smoothed like the windows: tech is only cut to while
+		// nothing is being fought over.
+		double combat_now = 0;
+		for (auto& wi : win) combat_now = std::max(combat_now, wi.combat);
+		if (restart) { observer_map_combat = combat_now; observer_tech_shown.clear(); }
+		else observer_map_combat += (combat_now - observer_map_combat) * (combat_now > observer_map_combat ? k_up : k_down);
 		double shot_s = observer_has_target ? std::chrono::duration<double>(now - observer_last_switch).count() : 0;
 		double best = 0, current = -1, current_action = 0, best_action = 0;
 		xy best_centre, current_centre = observer_target;
@@ -5258,11 +5364,15 @@ struct ui_functions: ui_util_functions {
 			}
 			return;
 		}
+		// A tech shot stays on its building for a moment, unless a battle starts.
+		if (observer_on_tech && observer_camera::tech_hold(std::chrono::duration<double>(now - observer_last_switch).count(), observer_map_combat, std::max(observer_speed(), 1.0))) return;
+		observer_on_tech = false;
 		// Follow the shown scene (smoothed again in real time by observer_step).
 		if (current > 0) {
 			observer_target.x += (current_centre.x - observer_target.x) / 2;
 			observer_target.y += (current_centre.y - observer_target.y) / 2;
 		}
+		if (observer_tech_shot(now, shot_s)) return;
 		observer_camera::scene cur{std::max(current, 0.0), current_action, (double)observer_target.x, (double)observer_target.y};
 		observer_camera::scene top{best, best_action, (double)best_centre.x, (double)best_centre.y};
 		if (observer_dir.tick(observer_secs(now), cur, top, view_width, view_height, std::max(observer_speed(), 1.0))) observer_switch_to(best_centre, now, best_action);

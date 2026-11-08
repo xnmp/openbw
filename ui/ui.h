@@ -2915,27 +2915,32 @@ struct ui_functions: ui_util_functions {
 	}
 	std::unique_ptr<native_window_drawing::surface> build_order_surface;
 	int build_order_drawn_w = 0;  // the panel's width this frame (0: not shown)
+	struct production_tip { rect r; a_string text; };  // a hover label's area, window pixels
+	a_vector<production_tip> build_order_tips;  // window pixels: each row's icon, named on hover
 	void draw_build_order_panel() {
 		build_order_drawn_w = 0;
+		build_order_tips.clear();
 		if (!show_build_order) return;
 		std::vector<int> players;
 		for (int i = 0; i != 8; ++i) {
 			if (st.players[i].controller == player_t::controller_occupied) players.push_back(i);
 		}
 		if (players.empty()) return;
-		// The HUD font, as in the stats and graph panels.
-		const int cw = hud_font::cell_w, ch = hud_font::cell_h, hw = cw, hh = ch;
+		// The HUD font, as in the stats and graph panels; a command icon for each building.
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, hh = ch;
+		const int icon_h = ch + 3, icon_w = icon_h * 36 / 34, line = icon_h + 3;
 		const int pad = ui_skin ? std::max(14, frame_side() + 6) : 10, pad_t = ui_skin ? std::max(10, frame_top() + 4) : 8;
-		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, gap = 3 * cw, line = ch + 2;
+		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, gap = 3 * cw;
+		// Supply, icon, start, then (estimated) finish.
+		const int icon_x = 4 * cw, start_x = icon_x + icon_w + cw, done_x = start_x + 7 * cw, row_w = done_x + 5 * cw;
 		std::vector<std::vector<build_order::entry>> lists;
-		std::vector<int> col_chars;
+		std::vector<int> col_w;
 		size_t longest = 0;
 		for (int p : players) {
 			lists.push_back(build_starts.upto(p, st.current_frame, build_order_minutes * 60 * 1000 / 42));
-			// Supply, name, then start and (estimated) finish times.
-			int chars = (int)replay_st.player_name[p].size() * hw / cw + 1 + 12;
-			for (auto& e : lists.back()) chars = std::max(chars, 3 + 2 + (int)building_label(e.type).size() + 2 + 5 + 2 + 5);
-			col_chars.push_back(std::max(chars, 29) + 1);  // + 1: clear of the panel's frame
+			// Wide enough for the name before the "start" and "done" headings.
+			int name_w = (int)std::max<size_t>(replay_st.player_name[p].size(), 8) * cw;
+			col_w.push_back(std::max(row_w, name_w + cw + (row_w - start_x)) + cw);
 			longest = std::max(longest, lists.back().size());
 		}
 		int bottom = draw_ui_elements ? minimap_window_rect().from.y - 8 : window_surface->h - 8;
@@ -2943,7 +2948,7 @@ struct ui_functions: ui_util_functions {
 		int max_rows = std::max(1, (bottom - top - pad_t - pad_b - hh - 4) / line);
 		int rows = std::max(1, std::min((int)longest, max_rows));
 		int w = pad * 2 - gap;
-		for (int c : col_chars) w += c * cw + gap;
+		for (int c : col_w) w += c + gap;
 		int h = pad_t + hh + 4 + rows * line + pad_b;
 		if (!build_order_surface || build_order_surface->w != w || build_order_surface->h != h) {
 			build_order_surface = native_window_drawing::create_rgba_surface(w, h);
@@ -2953,6 +2958,7 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = build_order_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) plain_panel(buf, pitch, w, h, 215);
+		const int ox = viewport_x + 8;
 		int x = pad;
 		for (size_t i = 0; i != players.size(); ++i) {
 			int p = players[i];
@@ -2963,37 +2969,57 @@ struct ui_functions: ui_util_functions {
 			bool more = (int)list.size() > rows;
 			int shown = more ? rows - 1 : (int)list.size();
 			int y = pad_t + hh + 4;
-			int done_x = x + (col_chars[i] - 6) * cw, start_x = done_x - 7 * cw;
-			hud_text(buf, pitch, w, h, start_x, pad_t - 2 + (hh - ch) / 2, "start   done", 110, 116, 128);
 			auto right = [&](int rx, int ry, const a_string& t, int r_, int g_, int b_) {
 				hud_text(buf, pitch, w, h, rx + (5 - (int)t.size()) * cw, ry, t.c_str(), r_, g_, b_);
 			};
+			// The times sit at the column's right, under their headings.
+			const int tx = x + col_w[i] - cw - row_w;
+			right(tx + start_x, pad_t - 2, "start", 110, 116, 128);
+			right(tx + done_x, pad_t - 2, "done", 110, 116, 128);
 			for (int r = 0; r != shown; ++r) {
 				auto& e = list[r];
 				const unit_type_t* ut = get_unit_type((UnitTypes)e.type);
 				bool supply = unit_is_supply_type(ut);
 				int finish = e.frame + ut->build_time;  // estimated: as if never cancelled or slowed
+				int ty = y + (icon_h - ch) / 2;
 				char sup[8];
 				std::snprintf(sup, sizeof(sup), "%3d", e.supply);
-				hud_text(buf, pitch, w, h, x, y, sup, supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
-				if (supply) hud_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 125, 129, 137);
-				else hud_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 232, 234, 238);
-				right(start_x, y, format_game_time(e.frame), supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
+				hud_text(buf, pitch, w, h, x, ty, sup, supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
+				int ix = x + icon_x;
+				fill_rounded(buf, pitch, w, h, ix - 1, y - 1, ix + icon_w + 1, y + icon_h + 1, 4, hud_rgba(24, 26, 34, 235), hud_rgba(10, 11, 16, 235));
+				draw_cmd_icon_scaled(buf, pitch, w, h, ix, y, e.type, 1, icon_w, icon_h);
+				// Supply is listed quieter.
+				if (supply) fill_rounded(buf, pitch, w, h, ix - 1, y - 1, ix + icon_w + 1, y + icon_h + 1, 4, hud_rgba(8, 9, 14, 140), hud_rgba(8, 9, 14, 140));
+				build_order_tips.push_back({rect{{ox + ix, top + y}, {ox + ix + icon_w, top + y + icon_h}}, building_label(e.type)});
+				right(tx + start_x, ty, format_game_time(e.frame), supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
 				// Still being built: the finish is ahead, in amber; done: as the start.
-				if (finish > st.current_frame) right(done_x, y, format_game_time(finish), supply ? 140 : 215, supply ? 128 : 180, supply ? 95 : 95);
-				else right(done_x, y, format_game_time(finish), supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
+				if (finish > st.current_frame) right(tx + done_x, ty, format_game_time(finish), supply ? 140 : 215, supply ? 128 : 180, supply ? 95 : 95);
+				else right(tx + done_x, ty, format_game_time(finish), supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
 				y += line;
 			}
 			if (more) {
 				char m[32];
 				std::snprintf(m, sizeof(m), "+%d more", (int)list.size() - shown);
-				hud_text(buf, pitch, w, h, x + 5 * cw, y, m, 150, 158, 170);
+				hud_text(buf, pitch, w, h, x + icon_x, y + (icon_h - ch) / 2, m, 150, 158, 170);
 			}
-			x += col_chars[i] * cw + gap;
+			x += col_w[i] + gap;
 		}
 		build_order_surface->unlock();
-		build_order_surface->blit(&*window_surface, viewport_x + 8, top);
+		build_order_surface->blit(&*window_surface, ox, top);
 		build_order_drawn_w = w;
+		draw_hover_tip(build_order_tips);
+	}
+
+	// The name of whatever tile in `tips` (window pixels) is under the cursor.
+	void draw_hover_tip(const a_vector<production_tip>& tips) {
+		if (!wnd.has_mouse_focus()) return;
+		int mx = -1, my = -1;
+		wnd.get_cursor_pos(&mx, &my);
+		for (auto& t : tips) {
+			if (mx < t.r.from.x || mx >= t.r.to.x || my < t.r.from.y || my >= t.r.to.y) continue;
+			draw_replay_tip(t.text, (t.r.from.x + t.r.to.x) / 2, t.r.from.y);
+			return;
+		}
 	}
 
 	// ---- Production (Alt+M, then P) ----
@@ -3061,7 +3087,6 @@ struct ui_functions: ui_util_functions {
 	}
 
 	std::unique_ptr<native_window_drawing::surface> production_surface;
-	struct production_tip { rect r; a_string text; };  // window pixels
 	a_vector<production_tip> production_tips;
 
 	// Command-card icon of an item: a unit or building's own, an upgrade's or a tech's.
@@ -3230,16 +3255,7 @@ struct ui_functions: ui_util_functions {
 		}
 		production_surface->unlock();
 		production_surface->blit(&*window_surface, ox, top);
-		// The name of the tile under the cursor.
-		if (wnd.has_mouse_focus()) {
-			int mx = -1, my = -1;
-			wnd.get_cursor_pos(&mx, &my);
-			for (auto& t : production_tips) {
-				if (mx < t.r.from.x || mx >= t.r.to.x || my < t.r.from.y || my >= t.r.to.y) continue;
-				draw_replay_tip(t.text, (t.r.from.x + t.r.to.x) / 2, t.r.from.y);
-				break;
-			}
-		}
+		draw_hover_tip(production_tips);
 	}
 
 	// While a chord waits for its second key: what it can be.

@@ -91,11 +91,12 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   stands for 150; never smaller than one member, at most 4x that dot). A loaded Dropship, Shuttle or Overlord grows on the same scale with the cost of what it carries (at most twice as wide) (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
 - **Build order** (`Alt+M`, then `b`; also in the settings menu): each player's buildings in
   the order they were started, a column per player: the supply count at the start, the
-  building, the game time it started ("9 Spawning Pool 1:20"; a Drone's supply is counted back,
+  building as its command icon (hovering names it), the game time it started ("9, Spawning
+  Pool, 1:20"; a Drone's supply is counted back,
   as build orders are written) and when it is due to finish (start plus build time, in amber
   while still to come; a cancelled or destroyed building keeps its estimate). Morphs (Lair,
   Sunken Colony) count from their start. Supply (Pylons, Supply Depots and Overlords) is
-  listed greyed. It is the opening: starts in the first 7 minutes, up to the frame on screen
+  listed greyed, its icons dimmed. It is the opening: starts in the first 7 minutes, up to the frame on screen
   (`ui/build_order.h`). `Alt+M` begins a two-key chord
   (`ui/key_chord.h`; a hint shows what can follow; `Esc` cancels); tested by
   `viewer/tests/build_order_test.cpp`.

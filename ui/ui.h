@@ -4505,7 +4505,7 @@ struct ui_functions: ui_util_functions {
 	//    attack target. Damage only shows after the first shot lands; units that have picked
 	//    a target are a second or two ahead of it.
 	// Choice (observer_retarget, every 4 game frames; observer_camera::shot_director): a
-	// clearly bigger scene (1.5x) takes over after a short hold (0.5-1.2 s shot minimum, longer
+	// clearly bigger scene (1.3x + 0.2) takes over after a short hold (0.5-1.2 s shot minimum, longer
 	// only when swapping one quiet place for another). Motion (observer_step, every frame):
 	// observer_camera::follower, a critically damped spring on the shot's centre with a soft
 	// dead zone, so the view glides rather than waits and lurches; only a scene several views

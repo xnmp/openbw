@@ -105,6 +105,11 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   the display refresh the viewer paces itself to, one frame per refresh ("60 Hz?" when the
   display does not report one and 60 is assumed). The small font is `ui/hud_font_small.h`
   (JetBrains Mono Bold 12 px, from `viewer/gen_hud_font.py`).
+- **Frame cost**: the minimap, stats panel and order lines are rebuilt only when their inputs
+  change (the game frame, camera, sizes, settings, selection; `ui/draw_cache.h`), not on every
+  display refresh. `OPENBW_PROFILE=1` prints per-section ms/frame (wall/thread CPU) to
+  stderr every 240 frames (`ui/frame_profile.h`); `OPENBW_NO_DRAW_CACHE=1` redraws everything
+  every frame, to compare timings or pixels.
 - **Order lines** (`l`: off, selected units, all units): a dotted line from each unit to its
   order's target and on through queued orders, coloured by kind (move green, attack red,
   spell violet, build and repair cyan, gathering amber for selected units only). Builders

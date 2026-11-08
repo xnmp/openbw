@@ -20,6 +20,8 @@
 #include "live_stream.h"
 #include "live_pacer.h"
 #include "live_replay.h"
+#include "build_order.h"
+#include "key_chord.h"
 #include "observer_camera.h"
 #include "tt_font.h"
 #include "skin_frame.h"
@@ -2780,6 +2782,138 @@ struct ui_functions: ui_util_functions {
 		fps_surface->blit(&*window_surface, viewport_x + viewport_w - w - 8, top);
 	}
 
+	// ---- Build order (Alt+M, then B) ----
+	// Each player's buildings in the order they were started, in a column per player: the
+	// supply count when it was started, the building, and the game time. Recorded while
+	// simulating (ui/build_order.h): a building that appears unfinished has just been started
+	// (placed, warped in, or a Drone has begun to morph into it, which frees the Drone's
+	// supply: it is counted back, as in "9 Pool"); a building morphing into another (Lair,
+	// Sunken Colony) shows it in its queue from the start. Only starts up to the frame on
+	// screen show, so seeking back hides later ones.
+	build_order::log build_starts;
+	bool show_build_order = false;
+
+	void record_build_order() {
+		for (int p = 0; p != 8; ++p) {
+			int race = (int)st.players[p].race;
+			if (race < 0 || race > 2) continue;
+			int supply_half = st.supply_used[p][race].raw_value;
+			for (const unit_t* u : ptr(st.player_units[p])) {
+				if (!ut_building(u)) continue;
+				uint32_t uid = (uint32_t)get_unit_id(u).raw_value;
+				int type = (int)u->unit_type->id;
+				// A building morphing into another (a Hatchery into a Lair) is unfinished too, but
+				// what it starts is the one in its queue.
+				bool morphing = !u->build_queue.empty() && ut_building(u->build_queue.front());
+				if (morphing) {
+					int to = (int)u->build_queue.front()->id;
+					if (!build_starts.has(uid, to)) build_starts.add(uid, st.current_frame, p, to, supply_half / 2);
+				} else if (!u_completed(u) && !build_starts.has(uid, type)) {
+					bool from_drone = unit_race(u->unit_type) == race_t::zerg;
+					build_starts.add(uid, st.current_frame, p, type, (supply_half + (from_drone ? 2 : 0)) / 2);
+				}
+			}
+		}
+	}
+
+	// "Zerg Spawning Pool" -> "Spawning Pool": the race is the column's.
+	a_string building_label(int type) const {
+		a_string n = stat_text(type + 1);
+		for (const char* prefix : {"Terran ", "Zerg ", "Protoss "}) {
+			size_t len = std::strlen(prefix);
+			if (n.size() > len && n.compare(0, len, prefix) == 0) return n.substr(len);
+		}
+		return n;
+	}
+
+	std::unique_ptr<native_window_drawing::surface> build_order_surface;
+	void draw_build_order_panel() {
+		if (!show_build_order) return;
+		std::vector<int> players;
+		for (int i = 0; i != 8; ++i) {
+			if (st.players[i].controller == player_t::controller_occupied) players.push_back(i);
+		}
+		if (players.empty()) return;
+		const int cw = hud_font_small::cell_w, ch = hud_font_small::cell_h, hw = hud_font::cell_w, hh = hud_font::cell_h;
+		const int pad = ui_skin ? std::max(14, frame_side() + 6) : 10, pad_t = ui_skin ? std::max(10, frame_top() + 4) : 8;
+		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, gap = 3 * cw, line = ch + 2;
+		std::vector<std::vector<build_order::entry>> lists;
+		std::vector<int> col_chars;
+		size_t longest = 0;
+		for (int p : players) {
+			lists.push_back(build_starts.upto(p, st.current_frame));
+			int chars = (int)replay_st.player_name[p].size() * hw / cw + 1;
+			for (auto& e : lists.back()) chars = std::max(chars, 3 + 2 + (int)building_label(e.type).size() + 2 + 5);
+			col_chars.push_back(std::max(chars, 22));
+			longest = std::max(longest, lists.back().size());
+		}
+		int bottom = draw_ui_elements ? minimap_window_rect().from.y - 8 : window_surface->h - 8;
+		int max_rows = std::max(1, (bottom - 8 - pad_t - pad_b - hh - 4) / line);
+		int rows = std::max(1, std::min((int)longest, max_rows));
+		int w = pad * 2 - gap;
+		for (int c : col_chars) w += c * cw + gap;
+		int h = pad_t + hh + 4 + rows * line + pad_b;
+		if (!build_order_surface || build_order_surface->w != w || build_order_surface->h != h) {
+			build_order_surface = native_window_drawing::create_rgba_surface(w, h);
+			build_order_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)build_order_surface->lock();
+		size_t pitch = build_order_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
+		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) plain_panel(buf, pitch, w, h, 215);
+		int x = pad;
+		for (size_t i = 0; i != players.size(); ++i) {
+			int p = players[i];
+			auto pc = player_rgb(p);
+			a_string name = replay_st.player_name[p].empty() ? a_string("Player ") + std::to_string(p + 1).c_str() : replay_st.player_name[p];
+			hud_text(buf, pitch, w, h, x, pad_t - 2, name.c_str(), pc.r, pc.g, pc.b);
+			auto& list = lists[i];
+			bool more = (int)list.size() > rows;
+			int shown = more ? rows - 1 : (int)list.size();
+			int y = pad_t + hh + 4;
+			int time_x = x + (col_chars[i] - 5) * cw;
+			for (int r = 0; r != shown; ++r) {
+				auto& e = list[r];
+				char sup[8];
+				std::snprintf(sup, sizeof(sup), "%3d", e.supply);
+				small_text(buf, pitch, w, h, x, y, sup, 150, 158, 170);
+				small_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 232, 234, 238);
+				a_string t = format_game_time(e.frame);
+				small_text(buf, pitch, w, h, time_x + (5 - (int)t.size()) * cw, y, t.c_str(), 150, 158, 170);
+				y += line;
+			}
+			if (more) {
+				char m[32];
+				std::snprintf(m, sizeof(m), "+%d more", (int)list.size() - shown);
+				small_text(buf, pitch, w, h, x + 5 * cw, y, m, 150, 158, 170);
+			}
+			x += col_chars[i] * cw + gap;
+		}
+		build_order_surface->unlock();
+		build_order_surface->blit(&*window_surface, viewport_x + 8, 8);
+	}
+
+	// While a chord waits for its second key: what it can be.
+	key_chord::reader chord{'m'};
+	std::unique_ptr<native_window_drawing::surface> chord_surface;
+	void draw_chord_hint() {
+		if (!chord.pending(live_seconds())) return;
+		const char* text = "Alt+M:  B build order   Esc cancel";
+		const int cw = hud_font_small::cell_w, ch = hud_font_small::cell_h;
+		const int w = (int)std::strlen(text) * cw + 16, h = ch + 8;
+		if (!chord_surface || chord_surface->w != w || chord_surface->h != h) {
+			chord_surface = native_window_drawing::create_rgba_surface(w, h);
+			chord_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)chord_surface->lock();
+		size_t pitch = chord_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
+		plain_panel(buf, pitch, w, h, 225);
+		small_text(buf, pitch, w, h, 8, 4, text, 232, 234, 238);
+		chord_surface->unlock();
+		chord_surface->blit(&*window_surface, viewport_x + (viewport_w - w) / 2, window_surface->h / 2 - h / 2);
+	}
+
 	// Frame pacing for the main loop: a frame per display refresh (60 Hz if unknown), so
 	// scrolling moves every time the screen does. With vsync presentation the present call
 	// itself waits for the refresh; half an interval is then only a floor, for when it
@@ -4878,6 +5012,7 @@ struct ui_functions: ui_util_functions {
 	bool graph_arrows_switch_tabs() const { return graph_full(); }
 
 	void record_graph_sample() {
+		record_build_order();
 		if (st.current_frame % graph_sample_interval != 0) return;
 		size_t index = (size_t)st.current_frame / graph_sample_interval;
 		if (graph_samples.size() <= index) graph_samples.resize(index + 1);
@@ -5652,6 +5787,7 @@ struct ui_functions: ui_util_functions {
 			std::function<void()>([this] { toggle_auto_observer(); })));
 		add("music", "Music", "", true, flag(music_enabled));
 		add("show_fps", "FPS counter", "", true, flag(show_fps));
+		add("build_order", "Build order", "Alt+M B", true, flag(show_build_order));
 		add("muted", "Mute sound", "m", true, std::make_pair(std::function<bool()>([this] { return global_volume == 0; }),
 			std::function<void()>([this] { toggle_mute(); })));
 		{
@@ -6997,6 +7133,9 @@ struct ui_functions: ui_util_functions {
 				bool any_non_buildings = false;
 				for (unit_t* u : find_units(translate_rect(r, screen_pos))) {
 					if (!unit_can_be_selected(u)) continue;
+					// A box never takes Spider Mines (they sit under armies and fill the
+					// selection); click one to select it.
+					if (unit_is(u, UnitTypes::Terran_Vulture_Spider_Mine)) continue;
 					new_units.push_back(u);
 					if (u->owner != 11) any_non_neutrals = true;
 					if (!ut_building(u)) any_non_buildings = true;
@@ -7106,6 +7245,15 @@ struct ui_functions: ui_util_functions {
 					break;
 				case native_window::event_t::type_key_down:
 					if (modal_key(e.sym)) break;  // a card's hotkeys; the game menu takes every key
+					{
+						// Chords (key_chord.h): Alt+M, then B for the build order.
+						auto r = chord.key(e.sym, alt_held(), live_seconds());
+						if (r == key_chord::result::completed) {
+							if (chord.second_key() == 'b') show_build_order = !show_build_order;
+							break;
+						}
+						if (r != key_chord::result::none) break;
+					}
 					//if (e.sym == 'q') {
 					//	use_new_images = !use_new_images;
 					//}
@@ -7369,6 +7517,7 @@ struct ui_functions: ui_util_functions {
 				draw_replay_bar();
 			}
 			if (graphs_visible()) draw_graph_panel();
+			draw_build_order_panel();
 			panel_area_window = rect{};
 			if (show_selection_panel && draw_selection_panel()) {
 				// Centred, but kept between the minimap and the replay panel where they allow.
@@ -7382,6 +7531,7 @@ struct ui_functions: ui_util_functions {
 				panel_surface->blit(&*window_surface, px, py);
 				draw_panel_tip();
 			}
+			draw_chord_hint();
 			draw_modal();
 			if (show_settings_menu) draw_settings_menu();
 			save_settings_if_changed();
@@ -7455,6 +7605,7 @@ struct ui_functions: ui_util_functions {
 		apm = {};
 		graph_samples.clear();
 		unit_deaths.clear();
+		build_starts.clear();
 		observer_damage.clear();
 		observer_last_frame = -1;
 		observer_has_target = false;

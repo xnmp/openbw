@@ -20,7 +20,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   show resources left, and transports show their cargo.
   Drag-select to get a grid of health-coloured wireframes, grouped by unit type, with the
   group's kills together beside the unit count. As in Brood War, a box that
-  catches units leaves buildings out. Click a wireframe in the grid to select just that unit,
+  catches units leaves buildings out; it never takes Spider Mines (click one to select it). Click a wireframe in the grid to select just that unit,
   `shift`-click to drop it, `ctrl`-click to keep only units of its type.
 - **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute,
   smoothed over about 7-8 s), unit value, army value, workers and value lost over game
@@ -83,6 +83,13 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   their total minerals + gas on one scale for every type, its diameter growing with the cube
   root of the cost, so nine Wraiths are about twice one Wraith across (a mid-sized unit's dot
   stands for 150; never smaller than one member, at most 4x that dot) (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
+- **Build order** (`Alt+M`, then `b`; also in the settings menu): each player's buildings in
+  the order they were started, a column per player: the supply count at the start, the
+  building and the game time ("9 Spawning Pool 1:20"; a Drone's supply is counted back, as
+  build orders are written). Morphs (Lair, Sunken Colony) count from their start. It shows the
+  starts up to the frame on screen (`ui/build_order.h`). `Alt+M` begins a two-key chord
+  (`ui/key_chord.h`; a hint shows what can follow; `Esc` cancels); tested by
+  `viewer/tests/build_order_test.cpp`.
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg, Minimal; saved as `ui_theme=1..5`):
   **Minimal**, the default, uses no game art: flat dark panels with a hairline edge, neutral
   greys and one blue accent (the seek bar, progress bars, what is on in the settings menu).
@@ -248,6 +255,7 @@ python3 viewer/live/bwlive.py net.pcap --map Map.scx -o game.bwlv --follow &
 | `b` | health bars under all units, or only selected ones (all by default) |
 | hold `Alt` | health bars under all units while held, when `b` has them on selected units only (as in Warcraft III) |
 | `i` | toggle the selection panel |
+| `Alt+M`, `b` | toggle the build order panel |
 | `g` / `esc` | toggle / close the graphs (`g` on the minimized panel restores it); `tab`, `←` / `→` or `1`-`5` (`6` with Pluto data; or click a tab) to switch |
 | `r` | graphs: resource value or supply |
 | `d` | graphs: level or rate of change (with the graphs closed, `d` slows playback) |

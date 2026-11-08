@@ -69,6 +69,8 @@ add_executable(openbw-minimap-merge-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_
 target_include_directories(openbw-minimap-merge-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-observer-camera-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/observer_camera_test.cpp")
 target_include_directories(openbw-observer-camera-test PRIVATE "${OPENBW_DIR}/ui")
+add_executable(openbw-build-order-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/build_order_test.cpp")
+target_include_directories(openbw-build-order-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-live-stream-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/live_stream_test.cpp")
 target_include_directories(openbw-live-stream-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-fps-meter-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/fps_meter_test.cpp")

@@ -1775,7 +1775,8 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 		// Merged dots are sized by total cost on one scale: a mid-sized unit's dot (2 tiles,
-		// drawn at minimap_unit_scale) stands for 150 minerals + gas.
+		// drawn at minimap_unit_scale) stands for 150 minerals + gas, and size grows with the cube
+		// root of cost: nine Wraiths read about twice one Wraith across.
 		minimap_merge::params merge_params;
 		merge_params.unit_r = minimap_unit_scale * (sx + sy) / 2;
 		merge_params.ref_cost = 150;

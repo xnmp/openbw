@@ -16,13 +16,13 @@ int main() {
 	// Nothing in, nothing out.
 	CHECK(merge({}).empty());
 
-	// Three dots almost on one spot become one dot at their centroid, with their total area.
+	// Three dots almost on one spot become one dot at their centroid, grown by the cube root of the count.
 	auto m = merge({{10, 10, r, 1}, {10.5, 10, r, 1}, {10, 10.5, r, 1}});
 	CHECK(m.size() == 1);
 	CHECK(m[0].n == 3 && m[0].key == 1 && m[0].first == 0);
 	CHECK(near(m[0].x, (10 + 10.5 + 10) / 3));
 	CHECK(near(m[0].y, (10 + 10 + 10.5) / 3));
-	CHECK(near(m[0].r, r * std::sqrt(3.0)) && near(m[0].r1, r));
+	CHECK(near(m[0].r, r * std::cbrt(3.0)) && near(m[0].r1, r));
 
 	// Two dots on one spot stay two: a pair is not a crowd.
 	m = merge({{10, 10, r, 1}, {10, 10, r, 1}});
@@ -38,7 +38,7 @@ int main() {
 	for (int i = 0; i != 20; ++i) column.push_back({10, 10 + i * r * 0.9, r, 1});
 	m = merge(column);
 	CHECK(m.size() >= 10);
-	for (auto& b : m) CHECK(b.r <= r * std::sqrt(4.0) + 1e-9);
+	for (auto& b : m) CHECK(b.r <= r * std::cbrt(4.0) + 1e-9);
 
 	// Different kinds (another player, another type) never merge, even on one spot.
 	m = merge({{10, 10, r, 1}, {10, 10, r, 2}, {10, 10, r, 1}, {10, 10, r, 2}, {10, 10, r, 1}});
@@ -48,10 +48,11 @@ int main() {
 	CHECK(ones == 3 && twos == 2);
 	for (auto& b : m) if (b.key == 1) CHECK(b.n == 3 && b.first == 0);
 
-	// A big stack is capped at max_scale times a single dot; a smaller cap is honoured.
+	// A big stack grows by the cube root of its count, capped at max_scale times a single dot.
 	std::vector<dot> stack(40, dot{50, 50, r, 7});
 	m = merge(stack);
-	CHECK(m.size() == 1 && m[0].n == 40 && near(m[0].r, 4 * r));
+	CHECK(m.size() == 1 && m[0].n == 40 && near(m[0].r, std::cbrt(40.0) * r));
+	CHECK(near(merge(std::vector<dot>(100, dot{50, 50, r, 7}))[0].r, 4 * r));
 	params p;
 	p.max_scale = 2;
 	CHECK(near(merge(stack, p)[0].r, 2 * r));
@@ -92,8 +93,14 @@ int main() {
 		std::vector<dot> lings(12, dot{10, 10, 2, 1, 25}), mutas(12, dot{50, 50, 3.5, 2, 200});
 		auto ml = merge(lings, c), mm = merge(mutas, c);
 		CHECK(ml.size() == 1 && mm.size() == 1);
-		CHECK(near(ml[0].r, 3 * std::sqrt(300.0 / 150)));
-		CHECK(near(mm[0].r, 3 * 4));  // 2400 would be 4x: the cap
+		CHECK(near(ml[0].r, 3 * std::cbrt(300.0 / 150)));
+		CHECK(near(mm[0].r, 3 * std::cbrt(16.0)));
+		// Nine Wraiths (350 each) are about twice one Wraith's dot across, not three times.
+		std::vector<dot> wraiths(9, dot{10, 10, 3 * 1.3, 6, 350});
+		auto mw = merge(wraiths, c);
+		CHECK(mw.size() == 1 && mw[0].r / (3 * 1.3) > 1.9 && mw[0].r / (3 * 1.3) < 2.3);
+		// A huge army reaches the cap.
+		CHECK(near(merge(std::vector<dot>(40, dot{0, 0, 3, 9, 400}), c)[0].r, 3 * 4));
 		CHECK(mm[0].r > ml[0].r);
 		std::vector<dot> a(4, dot{0, 0, 2, 3, 150}), b(8, dot{90, 90, 2, 4, 75});
 		CHECK(near(merge(a, c)[0].r, merge(b, c)[0].r));
@@ -101,7 +108,7 @@ int main() {
 		// than one Zergling's dot, they keep a Zergling's size.
 		std::vector<dot> three(3, dot{10, 10, 2, 1, 25});
 		auto m3 = merge(three, c);
-		CHECK(m3.size() == 1 && m3[0].n == 3 && near(m3[0].r, 3 * std::sqrt(75.0 / 150)));
+		CHECK(m3.size() == 1 && m3[0].n == 3 && near(m3[0].r, 3 * std::cbrt(75.0 / 150)));
 		params small = c;
 		small.unit_r = 1.5;
 		auto m3s = merge(three, small);
@@ -112,9 +119,15 @@ int main() {
 		CHECK(mb.size() == 1 && near(mb[0].r, 2));
 		// A broken scale falls back to sizing by count.
 		c.unit_r = nan;
-		CHECK(near(merge(three, c)[0].r, 2 * std::sqrt(3.0)));
+		CHECK(near(merge(three, c)[0].r, 2 * std::cbrt(3.0)));
 		c.unit_r = 3, c.ref_cost = 0;
-		CHECK(near(merge(three, c)[0].r, 2 * std::sqrt(3.0)));
+		CHECK(near(merge(three, c)[0].r, 2 * std::cbrt(3.0)));
+		// A growth that is not a sensible exponent falls back to the cube root.
+		c.ref_cost = 150, c.growth = std::numeric_limits<double>::quiet_NaN();
+		CHECK(near(merge(three, c)[0].r, 3 * std::cbrt(75.0 / 150)));
+		c.growth = 0.5;
+		CHECK(near(merge(three, small)[0].r, 2));
+		CHECK(near(merge(lings, c)[0].r, 3 * std::sqrt(2.0)));
 	}
 
 	// Many dots spread out: each its own, and the merge stays fast enough per frame.

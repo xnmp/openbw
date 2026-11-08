@@ -73,9 +73,10 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   dots; Interceptors, Scarabs, larvae and eggs are faint dots; workers within 10 tiles of one
   of their own buildings (whatever they are doing), and Overlords, are drawn as small tiles
   like the buildings, so armies stand out. Very close dots of one player's units of one type
-  (overlapping by about 70%; three or more) combine into one larger dot whose area follows
-  their total minerals + gas on one scale for every type (a mid-sized unit's dot stands for
-  150; never smaller than one member, at most 4x that dot) (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
+  (overlapping by about 70%; three or more) combine into one larger dot sized by
+  their total minerals + gas on one scale for every type, its diameter growing with the cube
+  root of the cost, so nine Wraiths are about twice one Wraith across (a mid-sized unit's dot
+  stands for 150; never smaller than one member, at most 4x that dot) (`ui/minimap_merge.h`, tested by `viewer/tests/minimap_merge_test.cpp`).
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg, Minimal; saved as `ui_theme=1..5`):
   **Minimal**, the default, uses no game art: flat dark panels with a hairline edge, neutral
   greys and one blue accent (the seek bar, progress bars, what is on in the settings menu).

@@ -18,7 +18,7 @@
 #include "modal_layout.h"
 #include "minimap_merge.h"
 #include "live_stream.h"
-#include "live_pacer.h"
+#include "live_buffer.h"
 #include "live_replay.h"
 #include "build_order.h"
 #include "key_chord.h"
@@ -6676,7 +6676,7 @@ struct ui_functions: ui_util_functions {
 			plain_panel(buf, pitch, w, h, 215);
 		}
 
-		a_string timer = format_game_time(st.current_frame) + " / " + (live_waiting() ? a_string(live.follow && !is_paused ? "LIVE" : "live") + (live_stalled() ? " (waiting)" : "") : format_game_time(replay_st.end_frame));
+		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(replay_st.end_frame) + (live_waiting() ? a_string(live_stalled() ? " LIVE (waiting)" : " LIVE") : a_string());
 		if (ui_skin) hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 248, 240, 170);
 		else hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 246, 247, 250);
 		if (auto_observer) {
@@ -6829,17 +6829,18 @@ struct ui_functions: ui_util_functions {
 	// A live replay (ui/live_stream.h) is a file that grows while the game is played; a
 	// decoder writes it from the players' network traffic (viewer/live/bwlive.py). The viewer
 	// loads its setup as a replay that ends at the newest known frame, then keeps reading:
-	// new commands are appended to the replay's actions and the end moves on. Playback follows
-	// the game a moment behind its newest frame (ui/live_pacer.h) unless the viewer pauses or
-	// seeks back; seeking to the end, or catching up, follows it again. When the game is over
-	// it is an ordinary replay.
+	// new commands are appended to the replay's actions and the end moves on. Playback runs at
+	// the viewer's own speed through the frames that have arrived, a queue (ui/live_buffer.h),
+	// and waits only when it reaches the newest one. When the game is over it is an ordinary
+	// replay.
 	struct live_state {
 		bool on = false;
 		std::string path;
 		std::unique_ptr<FILE, int (*)(FILE*)> file{nullptr, &std::fclose};
 		live_stream::reader reader;
-		live_pacer::pacer pacer;
-		bool follow = true;
+		live_buffer::queue queue;
+		int newest = -1;         // newest known frame
+		double newest_t = 0;     // when it last moved on
 		double checked_t = 0;  // when the file was last checked for having been replaced
 		bool replaced = false;
 	} live;
@@ -6848,7 +6849,6 @@ struct ui_functions: ui_util_functions {
 	}
 	// Still being played: more frames will come.
 	bool live_waiting() const { return live.on && !live.reader.ended() && !live.reader.failed(); }
-	bool live_following() const { return live_waiting() && live.follow && !is_paused; }
 
 	void live_read() {
 		if (!live.file) return;
@@ -6883,7 +6883,7 @@ struct ui_functions: ui_util_functions {
 		auto raw = live_replay::raw_replay(live.reader.game_info(), (uint32_t)std::max(1, known + 1), actions,
 			live_replay::scenario_chk(live.reader.map()));
 		load_replay(data_loading::data_reader_le(raw.data(), raw.data() + raw.size()));
-		live.pacer.known(known, live_seconds());
+		live_known(known, live_seconds());
 		ui::log("live: %s, %d frames so far\n", replay_st.map_name, known + 1);
 		return true;
 	}
@@ -6895,15 +6895,18 @@ struct ui_functions: ui_util_functions {
 		int known = live.reader.known_frame();
 		live_replay::append(replay_st, live.reader.take_actions(), known);
 		double t = live_seconds();
-		live.pacer.known(known, t);
+		live_known(known, t);
 		if (live.reader.ended()) ui::log("live: the game is over at frame %d\n", known);
-		if (live.pacer.quiet_seconds(t) > 2 && t - live.checked_t > 2) {
+		if (t - live.newest_t > 2 && t - live.checked_t > 2) {
 			live.checked_t = t;
 			if (!live.replaced && live_file_replaced()) {
 				live.replaced = true;
 				ui::log("live: %s was replaced by another file; reopen the viewer to follow it\n", live.path.c_str());
 			}
 		}
+	}
+	void live_known(int frame, double t) {
+		if (frame > live.newest) live.newest = frame, live.newest_t = t;
 	}
 	// Whether the path now names a different file than the one being read (a new decode).
 	bool live_file_replaced() const {
@@ -6915,31 +6918,18 @@ struct ui_functions: ui_util_functions {
 		return false;
 #endif
 	}
-	// Still being played, but nothing new has come for a while.
-	bool live_stalled() const { return live_waiting() && live.pacer.quiet_seconds(live_seconds()) > 3; }
+	// Still being played, but playback has reached the newest frame and waits for more.
+	bool live_stalled() const { return live_waiting() && live.queue.waiting_for_more(); }
+	// Whether playback should wait for more of the game now (call once per shown frame).
+	bool live_hold() {
+		return live.on && live.queue.hold(st.current_frame, replay_st.end_frame, live_waiting());
+	}
 
 	// Before simulating a frame (see live_replay::before_frame).
 	void live_before_frame() {
 		if (live.on) live_replay::before_frame(replay_st, action_st);
 	}
 
-	// The viewer moved playback to `frame` itself (the seek bar, keys): following the game
-	// again if that is at its newest frames, watching back otherwise.
-	void live_seeked(int frame) {
-		if (!live_waiting()) return;
-		// Landing within a couple of seek-bar pixels of the newest frame counts as the end.
-		auto area = get_replay_slider_area();
-		int ow = std::max(1, area.to.x - area.from.x);
-		live.follow = live.pacer.at_edge(frame, live_seconds(), 2.0 * replay_st.end_frame / ow);
-	}
-	// Frames to play now while following.
-	int live_step() {
-		return live.pacer.step(st.current_frame, live_seconds());
-	}
-	// Played back up to the game while not following: follow it from here.
-	void live_caught_up() {
-		if (live_waiting() && !live.follow && live.pacer.at_edge(st.current_frame, live_seconds())) live.follow = true;
-	}
 	bool is_drag_selecting = false;
 	bool is_dragging_screen = false;
 	int drag_select_from_x = 0;

@@ -224,11 +224,13 @@ python3 viewer/live/bwlive.py net.pcap --map Map.scx -o game.bwlv --follow &
   game puts players into start slots from that seed, and one turn per player per frame.
   The game picks player colours at random and does not send them, so the colours can differ
   from the game's replay.
-- The viewer plays the game a moment (about 0.35 s) behind its newest frame, at the rate it
-  arrives (`ui/live_pacer.h`); the timer shows `LIVE`. Pause or seek back to watch something
-  again; seeking to the end, or catching up, follows the game again. A game played faster
-  than real time (bot self-play) is shown at its own pace. When the game is over, it is an
-  ordinary replay.
+- The viewer plays the game from the start at its own speed (1x unless changed) through the
+  frames that have arrived, a queue (`ui/live_buffer.h`), rather than chasing the newest
+  frame: bot self-play runs faster than real time and unevenly, so chasing it stutters. The
+  timer shows the newest frame's time and `LIVE`. Self-play usually gets ahead; the speed
+  keys or seeking toward the end catch up. If playback reaches the newest frame, it waits
+  (`LIVE (waiting)`) until about half a second more has arrived. When the game is over, it is
+  an ordinary replay.
 - `viewer/live/live_check.cpp` checks a live replay against the replay the game saved:
   it simulates both and reports the first frame where they differ (optionally reading the
   live replay in small pieces, as the viewer follows it). A replay never records its own

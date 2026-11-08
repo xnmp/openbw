@@ -1,7 +1,7 @@
-// Behaviour tests for following a live replay (ui/live_stream.h) and pacing it (ui/live_pacer.h).
+// Behaviour tests for following a live replay (ui/live_stream.h) and playing it from a queue (ui/live_buffer.h).
 // Build and run: c++ -std=gnu++14 -Wall -O1 -fsanitize=address,undefined -Iui viewer/tests/live_stream_test.cpp -o /tmp/live_stream_test && /tmp/live_stream_test
 #include "live_stream.h"
-#include "live_pacer.h"
+#include "live_buffer.h"
 
 #include <cstdio>
 
@@ -132,95 +132,25 @@ int main() {
 		CHECK(!r.failed() && r.known_frame() == 199999 && total == (200000 + 2) / 3 * 8);
 	}
 
-	using live_pacer::pacer;
-	// Frames arriving steadily at 60 a second: playback runs at that rate, a little behind.
+	// Playing from the queue of arrived frames (ui/live_buffer.h).
 	{
-		pacer p;
-		int cur = 0;
-		double t = 0;
-		int known = 0;
-		for (int i = 0; i != 165 * 10; ++i) {  // ten seconds of 165 Hz display frames
-			t += 1.0 / 165;
-			while (known < (int)(t * 60)) ++known;
-			if (i % 8 == 0) p.known(known, t);  // the decoder writes every ~50 ms
-			cur += p.step(cur, t);
-			CHECK(cur <= known);
-		}
-		CHECK(std::fabs(p.rate() - 60) < 3);
-		double behind = (known - cur) / 60.0;
-		CHECK(behind > 0.1 && behind < 1.0);
-		// Smooth: over a second of display frames, no step jumps more than a few game frames.
-		int worst = 0;
-		for (int i = 0; i != 165; ++i) {
-			t += 1.0 / 165;
-			while (known < (int)(t * 60)) ++known;
-			if (i % 8 == 0) p.known(known, t);
-			int s = p.step(cur, t);
-			worst = std::max(worst, s);
-			cur += s;
-		}
-		CHECK(worst <= 2);
-	}
-	// A stall (the game stops for 2 s) holds playback at the newest frame, then it catches up
-	// faster than the game runs, without jumping.
-	{
-		pacer p;
-		int cur = 0;
-		double t = 0;
-		int known = 0;
-		auto run = [&](double seconds, bool arriving, int& max_step) {
-			for (int i = 0, n = (int)(seconds * 165); i != n; ++i) {
-				t += 1.0 / 165;
-				if (arriving) known += (i % 11 == 0) ? 4 : 0;  // 60/s in bursts of 4
-				p.known(known, t);
-				int s = p.step(cur, t);
-				max_step = std::max(max_step, s);
-				cur += s;
-				CHECK(cur <= known);
-			}
-		};
-		int m = 0;
-		run(5, true, m);
-		run(2, false, m);
-		CHECK(cur == known);  // caught up to the stall's edge, and held
-		int at_resume = known - cur;
-		m = 0;
-		run(1, true, m);
-		CHECK(m <= 3);
-		CHECK(known - cur < at_resume + 60);  // gaining on it
-		run(3, true, m);
-		CHECK((known - cur) / 60.0 < 1.0);
-	}
-	// Joining far behind (a pause, or starting late) jumps near the edge instead of crawling.
-	{
-		pacer p;
-		p.known(100, 0);
-		p.known(700, 10);  // 60/s
-		int s = p.step(0, 10);
-		CHECK(s > 600 && s <= 700);
-	}
-	// Nothing known: nothing to play; nonsense delay falls back to the default.
-	{
-		pacer p(-1);
-		CHECK(p.goal(5) < 0 && p.step(0, 5) == 0);
-		pacer q(std::nan(""));
-		q.known(10, 1);
-		CHECK(q.goal(1) >= 0 && q.goal(1) <= 10);
-		// Going back in time or frames repeating don't move anything backwards.
-		q.known(5, 2);
-		CHECK(q.newest() == 10);
-	}
-
-	{
-		// At the live edge, give or take: playback a moment behind counts; far behind does not
-		// unless the slack (a seek-bar pixel's worth) covers it.
-		live_pacer::pacer p;
-		CHECK(!p.at_edge(0, 0) && p.quiet_seconds(5) == 0);  // nothing known yet
-		for (int i = 0; i <= 40; ++i) p.known(i * 6, i * 0.25);  // 24 frames a second
-		double t = 10;
-		CHECK(p.at_edge(240, t) && p.at_edge(232, t) && !p.at_edge(180, t));
-		CHECK(p.at_edge(180, t, 70) && !p.at_edge(100, t, 70));
-		CHECK(p.quiet_seconds(t) == 0 && p.quiet_seconds(t + 4) == 4 && p.quiet_seconds(t - 1) == 0);
+		live_buffer::queue q(12);
+		// Frames queued up: play on, at the viewer's speed.
+		CHECK(!q.hold(0, 300, true) && !q.hold(299, 300, true));
+		// Caught up with the newest frame: wait...
+		CHECK(q.hold(300, 300, true));
+		// ...until a dozen more have arrived, not at the first one, so playback does not stop
+		// and start every few frames.
+		CHECK(q.hold(300, 301, true) && q.hold(300, 311, true));
+		CHECK(!q.hold(300, 312, true) && !q.hold(305, 312, true));
+		// The game is over: play out the rest without waiting.
+		CHECK(q.hold(312, 312, true) && !q.hold(312, 315, false) && !q.hold(315, 315, false));
+		// Playback ahead of the newest frame (it can't be, but the numbers say so): wait.
+		live_buffer::queue r;
+		CHECK(r.hold(50, 40, true));
+		// A nonsense refill falls back to the default.
+		live_buffer::queue z(-3);
+		CHECK(z.hold(10, 10, true) && z.hold(10, 21, true) && !z.hold(10, 22, true));
 	}
 	if (failures) { std::printf("%d failure(s)\n", failures); return 1; }
 	std::printf("live_stream: all passed\n");

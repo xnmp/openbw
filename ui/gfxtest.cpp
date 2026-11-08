@@ -111,17 +111,11 @@ struct main_t {
 		};
 
 		ui.live_poll();
-		if (ui.live_following() && ui.st.current_frame == ui.replay_frame) {
-			// A live game: play as it arrives, a moment behind its newest frame.
-			for (int n = ui.live_step(); n > 0 && !ui.is_done(); --n) {
-				next();
-				if (clock.now() - now >= std::chrono::milliseconds(50)) break;
-			}
-			ui.replay_frame = ui.st.current_frame;
-			last_tick = now;
-		} else if (!ui.is_done() || ui.st.current_frame != ui.replay_frame) {
+		// A live game played up to its newest frame waits for more to queue up.
+		bool live_hold = ui.live_hold();
+		if (live_hold) last_tick = now;
+		if (!ui.is_done() || ui.st.current_frame != ui.replay_frame) {
 			if (ui.st.current_frame != ui.replay_frame) {
-				ui.live_seeked(ui.replay_frame);
 				if (ui.st.current_frame != ui.replay_frame) {
 					auto i = saved_states.lower_bound(ui.replay_frame);
 					if (i != saved_states.begin()) --i;
@@ -142,7 +136,7 @@ struct main_t {
 				}
 				last_tick = now;
 			} else {
-				if (ui.is_paused) {
+				if (ui.is_paused || live_hold) {
 					last_tick = now;
 				} else {
 					auto tick_t = now - last_tick;
@@ -161,7 +155,6 @@ struct main_t {
 						if (i % 4 == 3 && clock.now() - now >= std::chrono::milliseconds(50)) break;
 					}
 					ui.replay_frame = ui.st.current_frame;
-					ui.live_caught_up();
 				}
 			}
 		}

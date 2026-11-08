@@ -135,6 +135,17 @@ int main() {
 	for (int i = 0; i != 400; ++i) spread.push_back({(double)(i % 20) * 10, (double)(i / 20) * 10, r, i % 4});
 	CHECK(merge(spread).size() == 400);
 
+	{
+		// Transports grow with their cargo, on the merge scale, within limits.
+		using minimap_merge::cargo_scale;
+		CHECK(cargo_scale(200, 0) == 1);                                       // empty
+		CHECK(std::fabs(cargo_scale(200, 400) - std::cbrt(3.0)) < 1e-9);       // eight Marines
+		CHECK(cargo_scale(200, 200) < cargo_scale(200, 400));                  // more is bigger
+		CHECK(cargo_scale(100, 1e9) == 2);                                     // capped
+		CHECK(cargo_scale(0, 400) == 1 && cargo_scale(200, -5) == 1);          // nonsense
+		CHECK(cargo_scale(std::nan(""), 400) == 1 && cargo_scale(200, std::nan("")) == 1);
+		CHECK(cargo_scale(200, 400, 7, 0) == 1);                               // bad growth, cap
+	}
 	if (failures) { std::printf("%d failure(s)\n", failures); return 1; }
 	std::printf("minimap_merge: all passed\n");
 	return 0;

@@ -1739,7 +1739,7 @@ struct ui_functions: ui_util_functions {
 				if (!shown(u)) continue;
 				if (u->owner < 8 && !ut_building(u)) {
 					if (minimap_building_style(u, depots)) {
-						box(u, 2, 3, x0, y0, x1, y1, minimap_worker_tile_scale);
+						box(u, 2, 3, x0, y0, x1, y1, minimap_worker_tile_scale * minimap_cargo_scale(u));
 						building_rects[u->owner].push_back({x0, y0, x1, y1});
 					}
 					continue;
@@ -1778,10 +1778,10 @@ struct ui_functions: ui_util_functions {
 					continue;
 				}
 				if (minimap_building_style(u, depots)) continue;  // drawn with the buildings
-				box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale * minimap_cost_scale(unit_type_value(u->unit_type)));
+				box(u, 2, 3, x0, y0, x1, y1, minimap_unit_scale * minimap_cost_scale(unit_type_value(u->unit_type)) * minimap_cargo_scale(u));
 				bool flying = u_flying(u);
 				minimap_merge::dot d{(x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0 + y1 - y0) / 4, (int)u->owner * 1024 + (int)u->unit_type->id,
-					(double)unit_type_value(u->unit_type)};
+					(double)(unit_type_value(u->unit_type) + minimap_cargo_value(u))};
 				// Only army flyers are outlined: scattered Overlords and Observers stay plain.
 				(flying ? air : ground).push_back(d);
 				(flying ? air_style : ground_style).push_back({c, flying && unit_counts_as_army(u)});
@@ -1826,6 +1826,17 @@ struct ui_functions: ui_util_functions {
 		draw_minimap_order_lines(buf, pitch, w, h, sx, sy);
 	}
 
+	// What a transport (Dropship, Shuttle, Overlord) carries, in minerals + gas, and how much
+	// larger that makes its minimap mark (minimap_merge::cargo_scale).
+	int minimap_cargo_value(const unit_t* u) const {
+		int v = 0;
+		for (const unit_t* c : loaded_units(u)) v += unit_type_value(c->unit_type);
+		return v;
+	}
+	double minimap_cargo_scale(const unit_t* u) const {
+		if (u->loaded_units.empty()) return 1;
+		return minimap_merge::cargo_scale(unit_type_value(u->unit_type), minimap_cargo_value(u));
+	}
 	// Buildings (and workers mining at their base) are see-through so units read over them.
 	static constexpr int minimap_building_alpha = 150;
 	static constexpr double minimap_owned_scale = 1.2;  // players' buildings, over their footprint

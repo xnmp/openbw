@@ -110,6 +110,16 @@ inline std::vector<blob> merge(const std::vector<dot>& dots, const params& p = {
 	return out;
 }
 
+// A transport's dot grows with what it carries, on the scale merged dots use: by the cube root
+// of (its own cost + its cargo's) over its own cost, at most `cap` times. A Dropship holding
+// eight Marines (400) on its own 200 is about 1.44 times as wide; an empty one is unchanged.
+// Nonsense (a cost that is not positive, or not a number) leaves it unchanged.
+inline double cargo_scale(double own_cost, double cargo_cost, double growth = 1.0 / 3, double cap = 2) {
+	if (!std::isfinite(own_cost) || own_cost <= 0 || !std::isfinite(cargo_cost) || cargo_cost <= 0) return 1;
+	if (!std::isfinite(growth) || growth <= 0 || growth > 1) growth = 1.0 / 3;
+	if (!std::isfinite(cap) || cap < 1) cap = 1;
+	return std::min(cap, std::pow((own_cost + cargo_cost) / own_cost, growth));
+}
 }  // namespace minimap_merge
 
 #endif

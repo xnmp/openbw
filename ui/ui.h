@@ -17,6 +17,7 @@
 #include "ui_theme.h"
 #include "modal_layout.h"
 #include "minimap_merge.h"
+#include "observer_camera.h"
 #include "tt_font.h"
 #include "skin_frame.h"
 #ifdef OPENBW_REMASTERED
@@ -4500,12 +4501,15 @@ struct ui_functions: ui_util_functions {
 	//  - a quiet-time part: scouting workers early on and buildings under construction.
 	//    It wears off the longer a shot lasts and counts less where the camera has been
 	//    recently, so a quiet game tours the bases instead of staring at one spot.
-	// Choice (observer_retarget): a shot lasts at least observer_min_shot_s of real time
-	// (less once its fight is over); another place must beat it by 80% for 1.5 game
-	// seconds. Motion (observer_step): follow the shot's weighted centre through a dead zone
-	// with a critically damped spring; cut instead when the target is most of a view away,
-	// as a human observer clicks the minimap. It steps back for a few seconds after a
-	// manual camera move.
+	//  - engagement (a leading signal): army units that already have an enemy unit as their
+	//    attack target. Damage only shows after the first shot lands; units that have picked
+	//    a target are a second or two ahead of it.
+	// Choice (observer_retarget, every 4 game frames; observer_camera::shot_director): a
+	// clearly bigger scene (1.5x) takes over after a short hold (0.5-1.2 s shot minimum, longer
+	// only when swapping one quiet place for another). Motion (observer_step, every frame):
+	// observer_camera::follower, a critically damped spring on the shot's centre with a soft
+	// dead zone, so the view glides rather than waits and lurches; only a scene several views
+	// away is cut to. It steps back for a few seconds after a manual camera move.
 	bool auto_observer = false;
 	struct damage_event {
 		xy pos;
@@ -4518,12 +4522,11 @@ struct ui_functions: ui_util_functions {
 	int observer_tick_frame = -1000;
 	bool observer_has_target = false;
 	xy observer_target;                  // the shown scene's centre, updated on game ticks
-	double observer_sx = 0, observer_sy = 0;  // observer_target smoothed in real time
-	double observer_cx = 0, observer_cy = 0, observer_vx = 0, observer_vy = 0;
-	bool observer_cut_pending = false;
+	observer_camera::rig observer_cam;  // the view centre
+	observer_camera::shot_director observer_dir;
 	xy observer_last_screen_pos;
 	std::chrono::high_resolution_clock::time_point observer_manual_until, observer_last_switch, observer_last_update;
-	static constexpr double observer_min_shot_s = 2.5;
+	static double observer_secs(std::chrono::high_resolution_clock::time_point t) { return std::chrono::duration<double>(t.time_since_epoch()).count(); }
 
 	// Playback speed (1 = Fastest); 0 while paused.
 	double observer_speed() const { return is_paused ? 0.0 : (double)game_speed.raw_value / 256.0; }
@@ -4581,7 +4584,7 @@ struct ui_functions: ui_util_functions {
 		// summed-area tables, (w+1) x (h+1)
 		std::array<a_vector<int>, 8> supply;
 		a_vector<double> damage, wx, wy, wsum;
-		a_vector<int> scouts, builds;
+		a_vector<int> scouts, builds, engaged;
 		size_t at(int x, int y) const { return (size_t)y * (w + 1) + x; }
 		template<typename T>
 		static T rect_sum(const a_vector<T>& t, const observer_grid& g, int x0, int y0, int x1, int y1) {
@@ -4607,7 +4610,7 @@ struct ui_functions: ui_util_functions {
 		size_t n = (size_t)(g.w + 1) * (g.h + 1);
 		for (auto& v : g.supply) v.assign(n, 0);
 		g.damage.assign(n, 0); g.wx.assign(n, 0); g.wy.assign(n, 0); g.wsum.assign(n, 0);
-		g.scouts.assign(n, 0); g.builds.assign(n, 0);
+		g.scouts.assign(n, 0); g.builds.assign(n, 0); g.engaged.assign(n, 0);
 		auto cell = [&](xy p) {
 			int cx = std::max(0, std::min(g.w - 1, p.x / observer_cell)), cy = std::max(0, std::min(g.h - 1, p.y / observer_cell));
 			return g.at(cx + 1, cy + 1);
@@ -4634,6 +4637,10 @@ struct ui_functions: ui_util_functions {
 					if (s <= 0) continue;
 					g.supply[i][c] += s;
 					w = s;
+					// Already has an enemy unit as its attack target: about to fire (or firing).
+					const unit_t* tgt = u->order_type->targets_enemies ? u->order_target.unit : u->auto_target_unit;
+					if (tgt && tgt->owner != u->owner && unit_target_is_enemy(u, tgt))
+						g.engaged[c] += ut_building(tgt) ? s * 2 / 5 : s;
 				}
 				g.wx[c] += p.x * w; g.wy[c] += p.y * w; g.wsum[c] += w;
 			}
@@ -4647,7 +4654,7 @@ struct ui_functions: ui_util_functions {
 		for (auto& v : g.supply) observer_integrate(v, g.w, g.h);
 		observer_integrate(g.damage, g.w, g.h); observer_integrate(g.wx, g.w, g.h);
 		observer_integrate(g.wy, g.w, g.h); observer_integrate(g.wsum, g.w, g.h);
-		observer_integrate(g.scouts, g.w, g.h); observer_integrate(g.builds, g.w, g.h);
+		observer_integrate(g.scouts, g.w, g.h); observer_integrate(g.builds, g.w, g.h); observer_integrate(g.engaged, g.w, g.h);
 		return g;
 	}
 
@@ -4674,8 +4681,9 @@ struct ui_functions: ui_util_functions {
 		int scouts = observer_grid::rect_sum(g.scouts, g, cx - hw, cy - hh, cx + hw, cy + hh);
 		int builds = observer_grid::rect_sum(g.builds, g, cx - hw, cy - hh, cx + hw, cy + hh);
 		double wsum = observer_grid::rect_sum(g.wsum, g, cx - hw, cy - hh, cx + hw, cy + hh);
+		int engaged = observer_grid::rect_sum(g.engaged, g, cx - hw, cy - hh, cx + hw, cy + hh);
 		observer_interest r;
-		r.action = damage / 15.0 + 2.0 * (side[1] / 2.0) + 1.0 * (approaching / 2.0) + 0.15 * (total / 2.0);
+		r.action = damage * 0.3 + 3.0 * (engaged / 2.0) + 0.3 * (side[1] / 2.0) + 0.3 * (approaching / 2.0) + 0.05 * (total / 2.0);
 		r.quiet = 1.5 * std::min(scouts, 2) + 0.5 * std::min(builds, 3);
 		if (wsum > 0) {
 			r.centre = xy((int)(observer_grid::rect_sum(g.wx, g, cx - hw, cy - hh, cx + hw, cy + hh) / wsum),
@@ -4686,10 +4694,6 @@ struct ui_functions: ui_util_functions {
 		return r;
 	}
 
-	int observer_challenger_ticks = 0;
-	xy observer_challenger;
-	std::chrono::high_resolution_clock::time_point observer_challenger_since;
-	double observer_shot_peak = 0;
 	struct observer_visit {
 		xy pos;
 		std::chrono::high_resolution_clock::time_point until;
@@ -4708,13 +4712,9 @@ struct ui_functions: ui_util_functions {
 		observer_visits.erase(std::remove_if(observer_visits.begin(), observer_visits.end(),
 			[&](const observer_visit& v) { return v.until <= now; }), observer_visits.end());
 		observer_target = target;
-		observer_sx = target.x;
-		observer_sy = target.y;
 		observer_has_target = true;
 		observer_last_switch = now;
-		observer_challenger_ticks = 0;
-		observer_shot_peak = action;
-		observer_cut_pending = true;
+		observer_dir.start_shot(observer_secs(now), action);
 	}
 
 	void observer_retarget(std::chrono::high_resolution_clock::time_point now) {
@@ -4766,34 +4766,14 @@ struct ui_functions: ui_util_functions {
 			}
 			return;
 		}
-		observer_shot_peak = std::max(observer_shot_peak, current_action);
 		// Follow the shown scene (smoothed again in real time by observer_step).
 		if (current > 0) {
 			observer_target.x += (current_centre.x - observer_target.x) / 2;
 			observer_target.y += (current_centre.y - observer_target.y) / 2;
 		}
-		bool elsewhere = std::abs(best_centre.x - observer_target.x) > (int)view_width / 2 || std::abs(best_centre.y - observer_target.y) > (int)view_height / 2;
-		if (elsewhere && best > current * 1.8 + 0.5) {
-			bool same = observer_challenger_ticks > 0 && std::abs(best_centre.x - observer_challenger.x) < (int)view_width / 2 && std::abs(best_centre.y - observer_challenger.y) < (int)view_height / 2;
-			if (!same) observer_challenger_since = now;
-			observer_challenger_ticks = same ? observer_challenger_ticks + 1 : 1;
-			observer_challenger = best_centre;
-		} else {
-			observer_challenger_ticks = 0;
-		}
-		// A challenger must lead for 2 ticks and 0.75 game seconds (at most 0.25 s of real
-		// time). Minimum shot lengths: a fight holds the camera for observer_min_shot_s, but
-		// one that has died down, a quiet shot, or one dwarfed by a new fight gives way after
-		// 1-1.5 s; moving on from one quiet place to another waits 5 s, so a tour does not
-		// flicker.
-		bool over = observer_shot_peak > 4 && current_action < observer_shot_peak * 0.25;
-		bool quiet_shot = observer_shot_peak < 2;
-		bool challenger_action = best_action >= 2;
-		bool dwarfed = best > current * 2.5 + 2;
-		double min_shot = !challenger_action ? 5.0 : dwarfed ? 1.0 : (over || quiet_shot) ? 1.5 : observer_min_shot_s;
-		double hold_s = std::min(0.25, 0.75 * 42.0 / 1000.0 / std::max(0.05, observer_speed()));
-		bool held = observer_challenger_ticks >= 2 && std::chrono::duration<double>(now - observer_challenger_since).count() >= hold_s;
-		if (held && shot_s >= min_shot) observer_switch_to(observer_challenger, now, best_action);
+		observer_camera::scene cur{std::max(current, 0.0), current_action, (double)observer_target.x, (double)observer_target.y};
+		observer_camera::scene top{best, best_action, (double)best_centre.x, (double)best_centre.y};
+		if (observer_dir.tick(observer_secs(now), cur, top, view_width, view_height, std::max(observer_speed(), 1.0))) observer_switch_to(best_centre, now, best_action);
 	}
 
 	void observer_step(std::chrono::high_resolution_clock::time_point now, bool manual_move) {
@@ -4802,63 +4782,26 @@ struct ui_functions: ui_util_functions {
 		if (!auto_observer) return;
 		if (manual_move) observer_manual_until = now + std::chrono::seconds(4);
 		observer_scan_damage();
-		if (st.current_frame - observer_tick_frame >= 8 || st.current_frame < observer_tick_frame) {
+		if (st.current_frame - observer_tick_frame >= 4 || st.current_frame < observer_tick_frame) {
 			observer_tick_frame = st.current_frame;
 			observer_retarget(now);
 		}
 		if (!observer_has_target || now < observer_manual_until) {
-			observer_vx = observer_vy = 0;
+			observer_cam.cam.vx = observer_cam.cam.vy = 0;
 			return;
 		}
 		if (screen_pos != observer_last_screen_pos) {
-			observer_cx = screen_pos.x + view_width / 2.0;
-			observer_cy = screen_pos.y + view_height / 2.0;
-			observer_vx = observer_vy = 0;
+			observer_cam.place(screen_pos.x + view_width / 2.0, screen_pos.y + view_height / 2.0);
 		}
 		// Where the camera can actually centre (the view stays inside the map).
 		double min_cx = view_width / 2.0, max_cx = std::max(min_cx, game_st.map_width - view_width / 2.0);
 		double min_cy = view_height / 2.0, max_cy = std::max(min_cy, game_st.map_height - view_height / 2.0);
-		// Smooth the scene centre over ~3/4 game second, kept between 0.1 and 0.3 s of real
-		// time: steady at slow playback, still keeping up with a fight at high speed.
-		{
-			double tau = std::max(0.1, std::min(0.3, 0.75 * 42.0 / 1000.0 / std::max(0.05, observer_speed())));
-			double k = 1.0 - std::exp(-std::max(0.0, std::min(dt, 0.25)) / tau);
-			observer_sx += (observer_target.x - observer_sx) * k;
-			observer_sy += (observer_target.y - observer_sy) * k;
-		}
-		double tx = std::max(min_cx, std::min(max_cx, observer_sx));
-		double ty = std::max(min_cy, std::min(max_cy, observer_sy));
-		double dx = tx - observer_cx, dy = ty - observer_cy;
-		bool far = std::abs(dx) > 0.8 * view_width || std::abs(dy) > 0.8 * view_height;
-		if (far && (observer_cut_pending || std::abs(dx) > 1.5 * view_width || std::abs(dy) > 1.5 * view_height)) {
-			observer_cx = tx;  // cut, like a human observer clicking the minimap
-			observer_cy = ty;
-			observer_vx = observer_vy = 0;
-			observer_panning = false;
-		} else {
-			// Dead zone: start moving when the target leaves the middle 30% of the view,
-			// settle once it is back within 5% of centre.
-			bool outside = std::abs(dx) > view_width * 0.15 || std::abs(dy) > view_height * 0.15;
-			bool centred = std::abs(dx) < view_width * 0.05 && std::abs(dy) < view_height * 0.05;
-			if (outside) observer_panning = true;
-			if (centred) observer_panning = false;
-			double t = std::max(0.0, std::min(dt, 0.1));
-			const double omega = 2.0 / 0.25;  // critically damped spring, ~0.25 s to settle
-			double ax = observer_panning ? omega * omega * dx : 0, ay = observer_panning ? omega * omega * dy : 0;
-			observer_vx += (ax - 2 * omega * observer_vx) * t;
-			observer_vy += (ay - 2 * omega * observer_vy) * t;
-			double cap = 1.5 * std::max(view_width, view_height);  // px per second
-			double speed = std::hypot(observer_vx, observer_vy);
-			if (speed > cap) { observer_vx *= cap / speed; observer_vy *= cap / speed; }
-			observer_cx += observer_vx * t;
-			observer_cy += observer_vy * t;
-		}
-		observer_cut_pending = false;
-		observer_cx = std::max(min_cx, std::min(max_cx, observer_cx));
-		observer_cy = std::max(min_cy, std::min(max_cy, observer_cy));
-		screen_pos = xy((int)std::lround(observer_cx - view_width / 2.0), (int)std::lround(observer_cy - view_height / 2.0));
+		double tx = std::max(min_cx, std::min(max_cx, (double)observer_target.x));
+		double ty = std::max(min_cy, std::min(max_cy, (double)observer_target.y));
+		observer_cam.step(tx, ty, dt, view_width, view_height, std::max(observer_speed(), 1.0));
+		double cx = std::max(min_cx, std::min(max_cx, observer_cam.x())), cy = std::max(min_cy, std::min(max_cy, observer_cam.y()));
+		screen_pos = xy((int)std::lround(cx - view_width / 2.0), (int)std::lround(cy - view_height / 2.0));
 	}
-	bool observer_panning = false;
 
 	// ---- Graph panel ('g'): income and supply over game time ----
 	// Sampled once per game second as frames are simulated (playback, seeking and rewinds all

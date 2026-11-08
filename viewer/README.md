@@ -41,13 +41,18 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   the last 15 s with `[` / `]` or the mouse wheel over the panel. It covers the part of the game simulated so far, so seek to
   the end to see the whole game.
 - **Auto observer** (`o`): the camera goes where the action is. A 128 px interest map,
-  smoothed over game time, scores recent damage, armies that are fighting or about to
-  meet, and army size; in quiet spells, scouting workers and new buildings, so the
-  camera tours the map rather than sitting still. A shot lasts at least a couple of
-  seconds and a new scene must be clearly better, so the camera does not dart about.
-  It cuts to distant scenes like a human observer and pans smoothly to nearby ones,
-  with timing that adapts to the playback speed. Moving the camera yourself pauses it
-  for a few seconds.
+  smoothed over game time and refreshed every 4 game frames, scores recent damage, army
+  units that have already picked an enemy as their target (a second or two ahead of the
+  first damage), armies that are fighting or about to meet, and army size; in quiet spells,
+  scouting workers and new buildings, so the camera tours the map rather than sitting
+  still. A clearly bigger scene (1.3x) takes over within about half a second, a much bigger
+  one sooner; a quiet shot gives way to a fight at once, while one quiet place waits 4 s
+  before the next so a tour does not flicker. The camera moves every frame: two critically
+  damped springs in series, so a pan eases in and out without a snap, with a soft dead zone
+  (about 1-8% of a view) so wobbles of the scene's centre do not shake the picture. Pans are
+  quick, so a fight a view or two away is reached in well under a second; only scenes more
+  than 3.5 views away are cut to, as a human observer clicks the minimap. Timing speeds up
+  with the playback speed. Moving the camera yourself pauses it for a few seconds.
 - **Fog of war** (`f`, with the graphs closed): the combined vision of all players, drawn
   as Brood War does (explored ground dimmed, unexplored black, soft edges), on the
   minimap too.
@@ -254,3 +259,12 @@ cmake --build build --target openbw-observer-eval
 for s in 2 8 16; do xvfb-run -a ./build/openbw-observer-eval game.rep mpq-dir $s out-x$s.jsonl; done
 python3 viewer/observer-eval/metrics.py out-x*.jsonl
 ```
+
+The logic is in `ui/observer_camera.h` (camera springs and the shot director, tested by
+`tests/observer_camera_test.cpp`); the interest map is in `ui/ui.h`. `metrics.py` also
+reports, per fight of at least 600 hp, `lag`: game seconds from its first damage until it is
+framed (negative: the camera was already there; clipped at -3, and 10 if never framed within
+10 s), `on<=1s` the share of fights framed within a second, `still`/`maxstill` how much of
+the time the camera does not move, and `rms_acc` its acceleration. Typical results on five
+Pluto self-play replays (old to new): mean lag 4.8 to 2.4 s at 1x and 5.5 to 3.4 s at 8x;
+fights framed within 1 s 36% to 54% at 1x; camera still 87% to 55% of the time at 1x.

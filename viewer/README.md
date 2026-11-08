@@ -193,7 +193,39 @@ cmake --build build -j
 
 ```sh
 ./build/openbw-player path/to/game.rep path/to/mpq-dir
+./build/openbw-player --live path/to/game.bwlv path/to/mpq-dir   # a game as it is played
 ```
+
+## Watching a game live
+
+A LAN game (Brood War 1.16.1, two players) can be watched while it is played, from a
+capture of one player's network traffic: `viewer/live/bwlive.py` decodes the capture into a
+*live replay*, a file that grows as the game goes (format in `ui/live_stream.h`), and the
+viewer follows that file.
+
+```sh
+python3 viewer/live/bwlive.py net.pcap --map Map.scx -o game.bwlv --follow &
+./build/openbw-player --live game.bwlv path/to/mpq-dir
+```
+
+- The capture is a pcap of IPv4 UDP frames (Ethernet) on port 6112, read as it grows; with
+  `--follow` the decoder stops when `net.pcap.done` appears or a player has left and the
+  traffic has gone quiet. The map is not sent over the network (each player has it); the
+  decoder checks its size against what the host announces.
+- What the decoder relies on is in its docstring: the Storm header, the lobby messages that
+  give the names, settings and slots, the 0x48 start message (the replay's seed), how the
+  game puts players into start slots from that seed, and one turn per player per frame.
+  The game picks player colours at random and does not send them, so the colours can differ
+  from the game's replay.
+- The viewer plays the game a moment (about 0.35 s) behind its newest frame, at the rate it
+  arrives (`ui/live_pacer.h`); the timer shows `LIVE`. Pause or seek back to watch something
+  again; seeking to the end, or catching up, follows the game again. A game played faster
+  than real time (bot self-play) is shown at its own pace. When the game is over, it is an
+  ordinary replay.
+- `viewer/live/live_check.cpp` checks a live replay against the replay the game saved:
+  it simulates both and reports the first frame where they differ (optionally reading the
+  live replay in small pieces, as the viewer follows it). A replay never records its own
+  player's Leave Game, so a game its saver quit parts from it on that frame, as expected.
 
 ## Controls
 

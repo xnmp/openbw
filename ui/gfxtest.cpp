@@ -104,13 +104,24 @@ struct main_t {
 					std::swap(saved_states, new_saved_states);
 				}
 			}
+			ui.live_before_frame();
 			ui.replay_functions::next_frame();
 			for (auto& v : ui.apm) v.update(ui.st.current_frame);
 			ui.record_graph_sample();
 		};
 
-		if (!ui.is_done() || ui.st.current_frame != ui.replay_frame) {
+		ui.live_poll();
+		if (ui.live_following() && ui.st.current_frame == ui.replay_frame) {
+			// A live game: play as it arrives, a moment behind its newest frame.
+			for (int n = ui.live_step(); n > 0 && !ui.is_done(); --n) {
+				next();
+				if (clock.now() - now >= std::chrono::milliseconds(50)) break;
+			}
+			ui.replay_frame = ui.st.current_frame;
+			last_tick = now;
+		} else if (!ui.is_done() || ui.st.current_frame != ui.replay_frame) {
 			if (ui.st.current_frame != ui.replay_frame) {
+				ui.live_seeked(ui.replay_frame);
 				if (ui.st.current_frame != ui.replay_frame) {
 					auto i = saved_states.lower_bound(ui.replay_frame);
 					if (i != saved_states.begin()) --i;
@@ -150,6 +161,7 @@ struct main_t {
 						if (i % 4 == 3 && clock.now() - now >= std::chrono::milliseconds(50)) break;
 					}
 					ui.replay_frame = ui.st.current_frame;
+					ui.live_caught_up();
 				}
 			}
 		}
@@ -639,7 +651,12 @@ int main(int argc, char** argv) {
 	}
 	auto load_data_file = data_loading::data_files_directory<data_loading::data_files_loader<data_loading::mpq_file<data_loading::js_file_reader<>>>>("");
 #else
-	auto load_data_file = data_loading::data_files_directory(argc > 2 ? argv[2] : "");
+	// openbw-player <replay.rep> [data-dir], or --live <game.bwlv> [data-dir] to follow a game
+	// as it is played (viewer/live/bwlive.py writes the file).
+	bool live = argc > 2 && std::string(argv[1]) == "--live";
+	const char* replay_arg = live ? argv[2] : argc > 1 ? argv[1] : "maps/p49.rep";
+	const char* data_arg = live ? (argc > 3 ? argv[3] : "") : (argc > 2 ? argv[2] : "");
+	auto load_data_file = data_loading::data_files_directory(data_arg);
 #endif
 
 	game_player player(load_data_file);
@@ -656,9 +673,16 @@ int main(int argc, char** argv) {
 	ui.init();
 
 #ifndef EMSCRIPTEN
-	ui.load_replay_file(argc > 1 ? argv[1] : "maps/p49.rep");
-	ui.start_timeline_markers(argc > 1 ? argv[1] : "maps/p49.rep");  // seek-bar markers, in the background
-	ui.load_pluto_win_estimates(argc > 1 ? argv[1] : "maps/p49.rep");  // graph tab 6, if there is Pluto data
+	if (live) {
+		if (!ui.load_live(replay_arg)) {
+			log("not a live replay: %s\n", replay_arg);
+			return 1;
+		}
+	} else {
+		ui.load_replay_file(replay_arg);
+		ui.start_timeline_markers(replay_arg);  // seek-bar markers, in the background
+		ui.load_pluto_win_estimates(replay_arg);  // graph tab 6, if there is Pluto data
+	}
 	ui.show_hud = true;  // stats overlay on by default in the interactive player ('?' menu toggles)
 	ui.zoom = 1.5;  // interactive default, closer to Brood War's view; the saved zoom overrides it
 	ui.load_settings();  // saved choices from the '?' menu / toggle keys override the defaults
@@ -667,8 +691,9 @@ int main(int argc, char** argv) {
 	auto& wnd = ui.wnd;
 #ifndef EMSCRIPTEN
 	a_string title = "OpenBW";
+	if (live) title += " - live";
 	if (argc > 1) {
-		a_string path = argv[1];
+		a_string path = replay_arg;
 		auto slash = path.find_last_of("/\\");
 		title += " - " + (slash == a_string::npos ? path : path.substr(slash + 1));
 	}

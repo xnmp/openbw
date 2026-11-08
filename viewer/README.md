@@ -18,7 +18,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   and research, upgrade, add-on or construction progress bars. A morphing Lair, Hive,
   Greater Spire or Sunken/Spore Colony shows as the building it is becoming. Mineral fields and geysers
   show resources left, and transports show their cargo.
-  Drag-select to get a grid of health-coloured wireframes, grouped by unit type. As in Brood War, a box that
+  Drag-select to get a grid of health-coloured wireframes, grouped by unit type, with the
+  group's kills together beside the unit count. As in Brood War, a box that
   catches units leaves buildings out. Click a wireframe in the grid to select just that unit,
   `shift`-click to drop it, `ctrl`-click to keep only units of its type.
 - **Graphs** (`g`): a large panel with tabs for income (minerals and gas per minute,

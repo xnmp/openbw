@@ -3375,6 +3375,15 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+	// Whether the panel gives a unit's kills: it can kill (a weapon, interceptors, scarabs,
+	// or spells: storms, irradiate, feedback...) and is finished.
+	bool shows_kills(const unit_t* u) const {
+		const unit_t* armed = u->subunit ? u->subunit : u;
+		bool has_weapon = unit_ground_weapon(armed) || unit_air_weapon(armed) || unit_is_carrier(u) || unit_is_reaver(u);
+		bool spellcaster = ut_has_energy(u) && !ut_building(u);
+		return (has_weapon || spellcaster) && u_completed(u);
+	}
+
 	// ---- Single-unit console, laid out like Brood War's own status panel ----
 	// Under the wireframe: shields, hp, energy. Beside it: name, owner, kills, resource or
 	// supply text, then status icons from unit/cmdbtns/cmdicons.grp: armor, shields and
@@ -3601,10 +3610,8 @@ struct ui_functions: ui_util_functions {
 
 		ci.lines.push_back({stat_text((int)shown_type(u)->id + 1), {255, 255, 255}});
 		if (u->owner != 11) ci.lines.push_back({player_label(u->owner), player_rgb(u->owner)});
-		const unit_t* armed = u->subunit ? u->subunit : u;
-		bool has_weapon = unit_ground_weapon(armed) || unit_air_weapon(armed) || unit_is_carrier(u) || unit_is_reaver(u);
-		bool spellcaster = ut_has_energy(u) && !ut_building(u);  // storms, irradiate, feedback... kill too
-		if ((has_weapon || spellcaster) && u_completed(u)) {
+		const unit_t* armed = u->subunit ? u->subunit : u;  // a turret carries the weapons
+		if (shows_kills(u)) {
 			std::snprintf(buf, sizeof(buf), "Kills: %d", u->kill_count);
 			ci.lines.push_back({buf});
 		}
@@ -4419,7 +4426,20 @@ struct ui_functions: ui_util_functions {
 		char title[64];
 		if ((int)units.size() > shown) std::snprintf(title, sizeof(title), "%d units (showing %d)", (int)units.size(), shown);
 		else std::snprintf(title, sizeof(title), "%d units", (int)units.size());
-		int w = std::max(pad_x * 2 + cols * cell - 3, pad_x * 2 + (int)std::strlen(title) * cw);
+		// The group's kills together, beside the count (all selected units, shown or not).
+		char kills[32] = "";
+		{
+			int total = 0;
+			bool any = false;
+			for (const unit_t* u : units) {
+				if (!shows_kills(u)) continue;
+				any = true;
+				total += u->kill_count;
+			}
+			if (any) std::snprintf(kills, sizeof(kills), "Kills: %d", total);
+		}
+		int title_w = ((int)std::strlen(title) + (kills[0] ? 3 + (int)std::strlen(kills) : 0)) * cw;
+		int w = std::max(pad_x * 2 + cols * cell - 3, pad_x * 2 + title_w);
 		int h = pad_t + pad_b + ch + 2 + rows * cell - 3;
 		prepare_panel_surface(w, h);
 		uint32_t* buf = (uint32_t*)panel_surface->lock();
@@ -4429,6 +4449,7 @@ struct ui_functions: ui_util_functions {
 			plain_panel(buf, pitch, w, h, 200);
 		}
 		hud_text(buf, pitch, w, h, pad_x, pad_t - 2, title, ui_skin ? 214 : 246, ui_skin ? 220 : 247, ui_skin ? 222 : 250);
+		if (kills[0]) hud_text(buf, pitch, w, h, w - pad_x - (int)std::strlen(kills) * cw, pad_t - 2, kills, 230, 230, 230);
 		for (int i = 0; i != shown; ++i) {
 			unit_t* u = units[i];
 			int x = pad_x + (i % per_row) * cell, y = pad_t + ch + 2 + (i / per_row) * cell;

@@ -30,6 +30,9 @@
 #endif
 
 #include <atomic>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 #include <climits>
 #include <fstream>
 #include <thread>
@@ -6673,7 +6676,7 @@ struct ui_functions: ui_util_functions {
 			plain_panel(buf, pitch, w, h, 215);
 		}
 
-		a_string timer = format_game_time(st.current_frame) + " / " + (live_waiting() ? a_string(live.follow && !is_paused ? "LIVE" : "live") : format_game_time(replay_st.end_frame));
+		a_string timer = format_game_time(st.current_frame) + " / " + (live_waiting() ? a_string(live.follow && !is_paused ? "LIVE" : "live") + (live_stalled() ? " (waiting)" : "") : format_game_time(replay_st.end_frame));
 		if (ui_skin) hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 248, 240, 170);
 		else hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 246, 247, 250);
 		if (auto_observer) {
@@ -6833,10 +6836,12 @@ struct ui_functions: ui_util_functions {
 	struct live_state {
 		bool on = false;
 		std::string path;
-		FILE* file = nullptr;
+		std::unique_ptr<FILE, int (*)(FILE*)> file{nullptr, &std::fclose};
 		live_stream::reader reader;
 		live_pacer::pacer pacer;
 		bool follow = true;
+		double checked_t = 0;  // when the file was last checked for having been replaced
+		bool replaced = false;
 	} live;
 	static double live_seconds() {
 		return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -6849,11 +6854,11 @@ struct ui_functions: ui_util_functions {
 		if (!live.file) return;
 		std::vector<uint8_t> buf(1 << 16);
 		while (true) {
-			size_t n = std::fread(buf.data(), 1, buf.size(), live.file);
+			size_t n = std::fread(buf.data(), 1, buf.size(), live.file.get());
 			if (n) live.reader.feed(buf.data(), n);
 			if (n < buf.size()) break;
 		}
-		std::clearerr(live.file);  // at the end for now; more may come
+		std::clearerr(live.file.get());  // at the end for now; more may come
 		if (live.reader.failed()) ui::log("live: %s\n", live.reader.error().c_str());
 	}
 
@@ -6864,7 +6869,7 @@ struct ui_functions: ui_util_functions {
 		live.path = path;
 		bool said = false;
 		while (!live.reader.has_setup()) {
-			if (!live.file) live.file = std::fopen(path.c_str(), "rb");
+			if (!live.file) live.file.reset(std::fopen(path.c_str(), "rb"));
 			if (live.file) live_read();
 			if (live.reader.failed()) return false;
 			if (live.reader.has_setup()) break;
@@ -6889,9 +6894,29 @@ struct ui_functions: ui_util_functions {
 		live_read();
 		int known = live.reader.known_frame();
 		live_replay::append(replay_st, live.reader.take_actions(), known);
-		live.pacer.known(known, live_seconds());
+		double t = live_seconds();
+		live.pacer.known(known, t);
 		if (live.reader.ended()) ui::log("live: the game is over at frame %d\n", known);
+		if (live.pacer.quiet_seconds(t) > 2 && t - live.checked_t > 2) {
+			live.checked_t = t;
+			if (!live.replaced && live_file_replaced()) {
+				live.replaced = true;
+				ui::log("live: %s was replaced by another file; reopen the viewer to follow it\n", live.path.c_str());
+			}
+		}
 	}
+	// Whether the path now names a different file than the one being read (a new decode).
+	bool live_file_replaced() const {
+#ifndef _WIN32
+		struct stat a, b;
+		if (!live.file || fstat(fileno(live.file.get()), &a) != 0) return false;
+		return stat(live.path.c_str(), &b) != 0 || a.st_ino != b.st_ino || a.st_dev != b.st_dev;
+#else
+		return false;
+#endif
+	}
+	// Still being played, but nothing new has come for a while.
+	bool live_stalled() const { return live_waiting() && live.pacer.quiet_seconds(live_seconds()) > 3; }
 
 	// Before simulating a frame (see live_replay::before_frame).
 	void live_before_frame() {
@@ -6902,8 +6927,10 @@ struct ui_functions: ui_util_functions {
 	// again if that is at its newest frames, watching back otherwise.
 	void live_seeked(int frame) {
 		if (!live_waiting()) return;
-		double goal = live.pacer.goal(live_seconds());
-		live.follow = frame >= goal - live.pacer.near_frames();
+		// Landing within a couple of seek-bar pixels of the newest frame counts as the end.
+		auto area = get_replay_slider_area();
+		int ow = std::max(1, area.to.x - area.from.x);
+		live.follow = live.pacer.at_edge(frame, live_seconds(), 2.0 * replay_st.end_frame / ow);
 	}
 	// Frames to play now while following.
 	int live_step() {
@@ -6911,7 +6938,7 @@ struct ui_functions: ui_util_functions {
 	}
 	// Played back up to the game while not following: follow it from here.
 	void live_caught_up() {
-		if (live_waiting() && !live.follow && st.current_frame >= live.pacer.goal(live_seconds()) - 1) live.follow = true;
+		if (live_waiting() && !live.follow && live.pacer.at_edge(st.current_frame, live_seconds())) live.follow = true;
 	}
 	bool is_drag_selecting = false;
 	bool is_dragging_screen = false;

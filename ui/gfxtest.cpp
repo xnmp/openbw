@@ -674,7 +674,13 @@ int main(int argc, char** argv) {
 
 #ifndef EMSCRIPTEN
 	if (live) {
-		if (!ui.load_live(replay_arg)) {
+		bool ok = false;
+		try {
+			ok = ui.load_live(replay_arg);
+		} catch (const std::exception& e) {
+			log("live: can't load the game: %s\n", e.what());
+		}
+		if (!ok) {
 			log("not a live replay: %s\n", replay_arg);
 			return 1;
 		}

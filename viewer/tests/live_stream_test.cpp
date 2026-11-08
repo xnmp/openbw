@@ -211,6 +211,17 @@ int main() {
 		CHECK(q.newest() == 10);
 	}
 
+	{
+		// At the live edge, give or take: playback a moment behind counts; far behind does not
+		// unless the slack (a seek-bar pixel's worth) covers it.
+		live_pacer::pacer p;
+		CHECK(!p.at_edge(0, 0) && p.quiet_seconds(5) == 0);  // nothing known yet
+		for (int i = 0; i <= 40; ++i) p.known(i * 6, i * 0.25);  // 24 frames a second
+		double t = 10;
+		CHECK(p.at_edge(240, t) && p.at_edge(232, t) && !p.at_edge(180, t));
+		CHECK(p.at_edge(180, t, 70) && !p.at_edge(100, t, 70));
+		CHECK(p.quiet_seconds(t) == 0 && p.quiet_seconds(t + 4) == 4 && p.quiet_seconds(t - 1) == 0);
+	}
 	if (failures) { std::printf("%d failure(s)\n", failures); return 1; }
 	std::printf("live_stream: all passed\n");
 	return 0;

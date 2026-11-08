@@ -66,6 +66,14 @@ public:
 	int newest() const { return edge; }
 	// Frames within which playback counts as at the live edge.
 	double near_frames() const { return rate_ * (lag + 0.5); }
+	// Whether playback at `frame` is at the live edge at time `t`, give or take `slack` frames
+	// (e.g. what one pixel of a seek bar spans).
+	bool at_edge(int frame, double t, double slack = 0) const {
+		double g = goal(t);
+		return g >= 0 && frame >= g - std::max(near_frames(), slack);
+	}
+	// Seconds since the newest known frame last moved on (0 before anything is known).
+	double quiet_seconds(double t) const { return edge < 0 ? 0 : std::max(0.0, t - edge_t); }
 
 private:
 	double lag;

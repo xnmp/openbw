@@ -6738,24 +6738,49 @@ struct ui_functions: ui_util_functions {
 
 	// A menu button: two thin blue outlines; the default one also a brighter ring and a faint
 	// blue fill. `k`: window pixels per game pixel.
-	void menu_button(uint32_t* buf, size_t pitch, int w, int h, const rect& r, bool is_default, double k) {
-		const int lw = std::max(1, (int)std::lround(k)), gap = std::max(2, (int)std::lround(2.5 * k));
-		auto frame = [&](int x0, int y0, int x1, int y1, uint32_t c) {
-			fill_rgba(buf, pitch, w, h, x0, y0, x1 - x0, lw, c);
-			fill_rgba(buf, pitch, w, h, x0, y1 - lw, x1 - x0, lw, c);
-			fill_rgba(buf, pitch, w, h, x0, y0 + lw, lw, y1 - y0 - 2 * lw, c);
-			fill_rgba(buf, pitch, w, h, x1 - lw, y0 + lw, lw, y1 - y0 - 2 * lw, c);
-		};
-		const int x0 = r.from.x, y0 = r.from.y, x1 = r.to.x, y1 = r.to.y;
-		const uint32_t line = hud_rgba(44, 34, 172, 255);
-		if (is_default) {
-			blend_rect(buf, pitch, w, h, x0, y0, x1 - x0, y1 - y0, hud_rgba(24, 40, 110, 70));
-			const int o = lw + 1;
-			frame(x0 - o, y0 - o, x1 + o, y1 + o, hud_rgba(20, 72, 195, 255));
+	// Antialiased rounded shapes for the cards: a box filled with a vertical gradient from
+	// `top` to `bottom` (colour and alpha), and an outline `width` pixels thick.
+	void fill_rounded(uint32_t* buf, size_t pitch, int w, int h, double x0, double y0, double x1, double y1, double rad, uint32_t top, uint32_t bottom) {
+		auto ch = [](uint32_t c, int s) { return (int)((c >> s) & 255); };
+		for (int y = std::max(0, (int)std::floor(y0)); y < std::min(h, (int)std::ceil(y1)); ++y) {
+			double t = std::max(0.0, std::min(1.0, (y + 0.5 - y0) / std::max(1.0, y1 - y0)));
+			auto mix = [&](int s) { return (int)std::lround(ch(top, s) + (ch(bottom, s) - ch(top, s)) * t); };
+			const int r = mix(0), g = mix(8), b = mix(16), a = mix(24);
+			for (int x = std::max(0, (int)std::floor(x0)); x < std::min(w, (int)std::ceil(x1)); ++x) {
+				double cov = rounded_coverage(x + 0.5, y + 0.5, x0, y0, x1, y1, rad);
+				if (cov > 0) blend_px(buf, pitch, w, h, x, y, hud_rgba(r, g, b, (int)std::lround(a * cov)));
+			}
 		}
-		frame(x0, y0, x1, y1, line);
-		const int i = lw + gap;
-		if (x1 - x0 > 2 * i + 2 * lw && y1 - y0 > 2 * i + 2 * lw) frame(x0 + i, y0 + i, x1 - i, y1 - i, line);
+	}
+	void stroke_rounded(uint32_t* buf, size_t pitch, int w, int h, double x0, double y0, double x1, double y1, double rad, double width, uint32_t c) {
+		const int a = (int)(c >> 24);
+		for (int y = std::max(0, (int)std::floor(y0)); y < std::min(h, (int)std::ceil(y1)); ++y) {
+			for (int x = std::max(0, (int)std::floor(x0)); x < std::min(w, (int)std::ceil(x1)); ++x) {
+				double px = x + 0.5, py = y + 0.5;
+				double cov = rounded_coverage(px, py, x0, y0, x1, y1, rad) -
+					rounded_coverage(px, py, x0 + width, y0 + width, x1 - width, y1 - width, std::max(0.0, rad - width));
+				if (cov > 0) blend_px(buf, pitch, w, h, x, y, (c & 0xffffff) | ((uint32_t)std::lround(a * cov) << 24));
+			}
+		}
+	}
+
+	// A card button in the game's indigo: a rounded plate, lit along its top edge, with a thin
+	// blue rim. Hovered, the plate brightens and the rim glows; the default button ("Return to
+	// Game") has a brighter rim, as the game's does.
+	void menu_button(uint32_t* buf, size_t pitch, int w, int h, const rect& r, bool is_default, bool hovered, double k) {
+		const double x0 = r.from.x, y0 = r.from.y, x1 = r.to.x, y1 = r.to.y, rad = 6 * k, lw = std::max(1.0, 1.1 * k);
+		if (hovered) {
+			for (int i = 3; i >= 1; --i) {
+				double e = i * 1.2 * k;
+				stroke_rounded(buf, pitch, w, h, x0 - e, y0 - e, x1 + e, y1 + e, rad + e, 1.4 * k, hud_rgba(110, 140, 255, 26 + 18 * (3 - i)));
+			}
+		}
+		if (hovered) fill_rounded(buf, pitch, w, h, x0, y0, x1, y1, rad, hud_rgba(58, 60, 150, 235), hud_rgba(30, 30, 92, 235));
+		else fill_rounded(buf, pitch, w, h, x0, y0, x1, y1, rad, hud_rgba(38, 36, 108, 215), hud_rgba(18, 16, 58, 215));
+		// The lit top edge: a faint highlight just inside the rim, over the upper half.
+		fill_rounded(buf, pitch, w, h, x0 + lw, y0 + lw, x1 - lw, (y0 + y1) / 2, std::max(0.0, rad - lw), hud_rgba(255, 255, 255, hovered ? 34 : 22), hud_rgba(255, 255, 255, 0));
+		uint32_t rim = hovered ? hud_rgba(140, 165, 255, 255) : is_default ? hud_rgba(70, 120, 245, 255) : hud_rgba(66, 58, 190, 255);
+		stroke_rounded(buf, pitch, w, h, x0, y0, x1, y1, rad, lw, rim);
 	}
 
 	void draw_modal() {
@@ -6765,37 +6790,64 @@ struct ui_functions: ui_util_functions {
 		if (k == modal_kind::none) return;
 		auto c = modal_content(k);
 		auto l = modal_layout_of(c);
-		if (!modal_surface || modal_surface->w != l.w || modal_surface->h != l.h) {
-			modal_surface = native_window_drawing::create_rgba_surface(l.w, l.h);
+		// The card is drawn with a margin around it for its shadow; layout and hit tests use the
+		// card's own pixels (m is the margin).
+		const int m = (int)std::lround(14 * l.k);
+		const int w = l.w + 2 * m, h = l.h + 2 * m;
+		if (!modal_surface || modal_surface->w != w || modal_surface->h != h) {
+			modal_surface = native_window_drawing::create_rgba_surface(w, h);
 			modal_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
 		}
-		uint32_t* buf = (uint32_t*)modal_surface->lock();
+		uint32_t* sbuf = (uint32_t*)modal_surface->lock();
 		size_t pitch = modal_surface->pitch / 4;
-		const int w = l.w, h = l.h;
-		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(14, 10, 40, 175));  // the veil over the map
+		fill_rgba(sbuf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
+		{
+			const double cx0 = m, cy0 = m, cx1 = m + l.w, cy1 = m + l.h, rad = 12 * l.k;
+			// A soft shadow, a little below the card.
+			for (int i = 6; i >= 1; --i) {
+				double e = i * 1.6 * l.k, dy = 4 * l.k;
+				fill_rounded(sbuf, pitch, w, h, cx0 - e, cy0 - e + dy, cx1 + e, cy1 + e + dy, rad + e, hud_rgba(0, 0, 8, 16), hud_rgba(0, 0, 8, 16));
+			}
+			// The card: deep indigo glass, lighter at the top, a fine blue rim and a lit top edge.
+			fill_rounded(sbuf, pitch, w, h, cx0, cy0, cx1, cy1, rad, hud_rgba(26, 22, 70, 228), hud_rgba(9, 7, 30, 236));
+			fill_rounded(sbuf, pitch, w, h, cx0 + 1, cy0 + 1, cx1 - 1, cy0 + 40 * l.k, rad - 1, hud_rgba(130, 140, 255, 30), hud_rgba(130, 140, 255, 0));
+			stroke_rounded(sbuf, pitch, w, h, cx0, cy0, cx1, cy1, rad, std::max(1.0, 1.2 * l.k), hud_rgba(72, 70, 200, 235));
+			// A divider under the title, fading out towards both ends.
+			const int dy = l.title_y + (int)std::lround(12 * l.k) + m, dx0 = m + (int)std::lround(28 * l.k), dx1 = m + l.w - (int)std::lround(28 * l.k);
+			for (int x = dx0; x < dx1; ++x) {
+				double t = (x - dx0 + 0.5) / std::max(1, dx1 - dx0), f = 1 - std::abs(2 * t - 1);
+				blend_px(sbuf, pitch, w, h, x, dy, hud_rgba(110, 120, 240, (int)std::lround(150 * std::sqrt(f))));
+			}
+		}
+		// The card's own pixels, inside the margin.
+		uint32_t* buf = sbuf + (size_t)m * pitch + (size_t)m;
+		const int cw_ = l.w, ch_ = l.h;
+
 		// The game's text is about 77 of its pixels across "Save Game"; ours is a little
 		// smaller (66), which reads better at the viewer's window sizes.
 		tt_font::face* f = menu_font();
 		const int px = f ? f->fit("Save Game", 66 * l.k) : 0;
 		const wire_rgb yellow{235, 236, 138}, white{250, 248, 250};
-		menu_text(buf, pitch, w, h, w / 2, l.title_y, c.title, wire_rgb{220, 217, 245}, -1, white, px);
-		for (size_t i = 0; i != c.lines.size(); ++i) menu_text(buf, pitch, w, h, w / 2, l.lines_y[i], c.lines[i].text, c.lines[i].rgb, -1, white, px);
+		menu_text(buf, pitch, cw_, ch_, cw_ / 2, l.title_y, c.title, wire_rgb{220, 217, 245}, -1, white, px);
+		for (size_t i = 0; i != c.lines.size(); ++i) menu_text(buf, pitch, cw_, ch_, cw_ / 2, l.lines_y[i], c.lines[i].text, c.lines[i].rgb, -1, white, px);
 		// Window position: centred in the view, a little above the middle.
-		int ox = viewport_x + (viewport_w - w) / 2, oy = std::max(0, (window_surface->h - h) * 2 / 5);
-		modal_rect = rect{{ox, oy}, {ox + w, oy + h}};
+		int ox = viewport_x + (viewport_w - cw_) / 2, oy = std::max(0, (window_surface->h - ch_) * 2 / 5);
+		modal_rect = rect{{ox, oy}, {ox + cw_, oy + ch_}};
 		int mx = -1, my = -1;
 		if (wnd.has_mouse_focus()) wnd.get_cursor_pos(&mx, &my);
 		int hovered = modal_button_at(mx, my);
 		for (size_t b = 0; b != l.buttons.size(); ++b) {
 			const auto& g = l.buttons[b];
 			rect r{{g.x0, g.y0}, {g.x1, g.y1}};
-			menu_button(buf, pitch, w, h, r, b + 1 == l.buttons.size(), l.k);
 			const auto& btn = c.buttons[b];
 			bool hov = hovered == (int)b;
-			menu_text(buf, pitch, w, h, (g.x0 + g.x1) / 2, (g.y0 + g.y1) / 2, btn.text, hov ? white : yellow, btn.hot, white, px);
+			// Buttons draw in the whole surface (their glow reaches past the card's edge).
+			rect sr{{g.x0 + m, g.y0 + m}, {g.x1 + m, g.y1 + m}};
+			menu_button(sbuf, pitch, w, h, sr, b + 1 == l.buttons.size(), hov, l.k);
+			menu_text(buf, pitch, cw_, ch_, (g.x0 + g.x1) / 2, (g.y0 + g.y1) / 2, btn.text, hov ? white : yellow, btn.hot, white, px);
 		}
 		modal_surface->unlock();
-		modal_surface->blit(&*window_surface, ox, oy);
+		modal_surface->blit(&*window_surface, ox - m, oy - m);
 	}
 
 	void draw_replay_bar() {

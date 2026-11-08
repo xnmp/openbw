@@ -5096,10 +5096,11 @@ struct ui_functions: ui_util_functions {
 	bool show_graphs = false;
 	int graph_tab = 1;  // unit value (supply with 'r' off)
 	// Time zoom: index into graph_window_seconds; 0 = whole game. Starts at the last 5 min.
-	static constexpr int graph_window_count = 7;
-	int graph_window = 2;
+	// Steps of at most about 1.5x, so zooming in or out never jumps a long way.
+	static constexpr int graph_window_count = 14;
+	int graph_window = 5;
 	static int graph_window_seconds(int index) {
-		static const int s[graph_window_count] = {0, 600, 300, 120, 60, 30, 15};
+		static const int s[graph_window_count] = {0, 1200, 900, 600, 420, 300, 240, 180, 120, 90, 60, 45, 30, 15};
 		return s[std::max(0, std::min(graph_window_count - 1, index))];
 	}
 	void step_graph_window(int dir) {

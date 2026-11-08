@@ -275,7 +275,7 @@ python3 viewer/live/bwlive.py net.pcap --map Map.scx -o game.bwlv --follow &
 | `f` | graphs: players' difference or a line each (with the graphs closed, fog of war) |
 | `o` | auto observer on / off |
 | `l` | order lines: off, selected units, all units |
-| `[` / `]`, or the wheel over the graphs | zoom the graphs' time axis out / in |
+| `[` / `]`, or the wheel over the graphs | zoom the graphs' time axis out / in (whole game, 20, 15, 10, 7, 5, 4, 3, 2 min, 90, 60, 45, 30, 15 s) |
 | `shift tab` | two-colour mode: the two players in red and teal (again to restore) |
 | `m` | full graph panel: pin minimized in the corner / unpin (otherwise mute) |
 

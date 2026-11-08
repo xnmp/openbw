@@ -23,6 +23,7 @@
 #include "live_buffer.h"
 #include "live_replay.h"
 #include "build_order.h"
+#include "production.h"
 #include "key_chord.h"
 #include "observer_camera.h"
 #include "tt_font.h"
@@ -2907,15 +2908,23 @@ struct ui_functions: ui_util_functions {
 		return n;
 	}
 
+	// The build order and production panels sit top left, under the minimised graph when it
+	// is there (drawn first, so its rect is this frame's).
+	int top_left_panel_y() const {
+		return graphs_visible() && graph_mini() ? graph_area_window.to.y + 8 : 8;
+	}
 	std::unique_ptr<native_window_drawing::surface> build_order_surface;
+	int build_order_drawn_w = 0;  // the panel's width this frame (0: not shown)
 	void draw_build_order_panel() {
+		build_order_drawn_w = 0;
 		if (!show_build_order) return;
 		std::vector<int> players;
 		for (int i = 0; i != 8; ++i) {
 			if (st.players[i].controller == player_t::controller_occupied) players.push_back(i);
 		}
 		if (players.empty()) return;
-		const int cw = hud_font_small::cell_w, ch = hud_font_small::cell_h, hw = hud_font::cell_w, hh = hud_font::cell_h;
+		// The HUD font, as in the stats and graph panels.
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, hw = cw, hh = ch;
 		const int pad = ui_skin ? std::max(14, frame_side() + 6) : 10, pad_t = ui_skin ? std::max(10, frame_top() + 4) : 8;
 		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, gap = 3 * cw, line = ch + 2;
 		std::vector<std::vector<build_order::entry>> lists;
@@ -2930,7 +2939,8 @@ struct ui_functions: ui_util_functions {
 			longest = std::max(longest, lists.back().size());
 		}
 		int bottom = draw_ui_elements ? minimap_window_rect().from.y - 8 : window_surface->h - 8;
-		int max_rows = std::max(1, (bottom - 8 - pad_t - pad_b - hh - 4) / line);
+		const int top = top_left_panel_y();
+		int max_rows = std::max(1, (bottom - top - pad_t - pad_b - hh - 4) / line);
 		int rows = std::max(1, std::min((int)longest, max_rows));
 		int w = pad * 2 - gap;
 		for (int c : col_chars) w += c * cw + gap;
@@ -2954,9 +2964,9 @@ struct ui_functions: ui_util_functions {
 			int shown = more ? rows - 1 : (int)list.size();
 			int y = pad_t + hh + 4;
 			int done_x = x + (col_chars[i] - 6) * cw, start_x = done_x - 7 * cw;
-			small_text(buf, pitch, w, h, start_x, pad_t - 2 + (hh - ch) / 2, "start   done", 110, 116, 128);
+			hud_text(buf, pitch, w, h, start_x, pad_t - 2 + (hh - ch) / 2, "start   done", 110, 116, 128);
 			auto right = [&](int rx, int ry, const a_string& t, int r_, int g_, int b_) {
-				small_text(buf, pitch, w, h, rx + (5 - (int)t.size()) * cw, ry, t.c_str(), r_, g_, b_);
+				hud_text(buf, pitch, w, h, rx + (5 - (int)t.size()) * cw, ry, t.c_str(), r_, g_, b_);
 			};
 			for (int r = 0; r != shown; ++r) {
 				auto& e = list[r];
@@ -2965,9 +2975,9 @@ struct ui_functions: ui_util_functions {
 				int finish = e.frame + ut->build_time;  // estimated: as if never cancelled or slowed
 				char sup[8];
 				std::snprintf(sup, sizeof(sup), "%3d", e.supply);
-				small_text(buf, pitch, w, h, x, y, sup, supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
-				if (supply) small_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 125, 129, 137);
-				else small_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 232, 234, 238);
+				hud_text(buf, pitch, w, h, x, y, sup, supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
+				if (supply) hud_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 125, 129, 137);
+				else hud_text(buf, pitch, w, h, x + 5 * cw, y, building_label(e.type).c_str(), 232, 234, 238);
 				right(start_x, y, format_game_time(e.frame), supply ? 105 : 150, supply ? 110 : 158, supply ? 120 : 170);
 				// Still being built: the finish is ahead, in amber; done: as the start.
 				if (finish > st.current_frame) right(done_x, y, format_game_time(finish), supply ? 140 : 215, supply ? 128 : 180, supply ? 95 : 95);
@@ -2977,12 +2987,221 @@ struct ui_functions: ui_util_functions {
 			if (more) {
 				char m[32];
 				std::snprintf(m, sizeof(m), "+%d more", (int)list.size() - shown);
-				small_text(buf, pitch, w, h, x + 5 * cw, y, m, 150, 158, 170);
+				hud_text(buf, pitch, w, h, x + 5 * cw, y, m, 150, 158, 170);
 			}
 			x += col_chars[i] * cw + gap;
 		}
 		build_order_surface->unlock();
-		build_order_surface->blit(&*window_surface, viewport_x + 8, 8);
+		build_order_surface->blit(&*window_surface, viewport_x + 8, top);
+		build_order_drawn_w = w;
+	}
+
+	// ---- Production (Alt+M, then P) ----
+	// Each player's units, buildings, upgrades and research in progress, grouped ("Zealot x2")
+	// with the time left on the soonest and its progress, then what finished in the last game
+	// minute. Recorded every simulated frame (ui/production.h): eggs and cocoons, unfinished or
+	// morphing buildings, and finished buildings' training, research and upgrades. Interceptors
+	// and Scarabs (built inside Carriers and Reavers) are left out: ammunition, not production.
+	production::tracker production_log;
+	bool show_production = false;
+	static constexpr int production_recent_seconds = 60;
+
+	void record_production() {
+		std::vector<production::item> items;
+		for (int p = 0; p != 8; ++p) {
+			for (const unit_t* u : ptr(st.player_units[p])) {
+				const uint32_t uid = (uint32_t)get_unit_id(u).raw_value;
+				auto add = [&](production::kind k, int type, int level, int remaining, int total) {
+					production::item it;
+					it.player = p, it.what = k, it.type = type, it.level = level, it.source = uid;
+					it.remaining = remaining, it.total = std::max(1, total);
+					items.push_back(it);
+				};
+				const unit_type_t* next = !u->build_queue.empty() ? u->build_queue.front() : nullptr;
+				if (unit_is_egg(u)) {
+					if (next) add(production::kind::unit, (int)next->id, 0, u->remaining_build_time, next->build_time);
+					continue;
+				}
+				if (!ut_building(u)) continue;
+				if (!u_completed(u)) {
+					// Being built, or morphing into what is in its queue (a Lair, a Sunken Colony).
+					const unit_type_t* target = next && ut_building(next) ? next : u->unit_type;
+					add(production::kind::building, (int)target->id, 0, u->remaining_build_time, target->build_time);
+					continue;
+				}
+				// Training (an add-on being built is an unfinished building of its own).
+				if (next && !ut_building(next) && u->current_build_unit) {
+					add(production::kind::unit, (int)next->id, 0, u->current_build_unit->remaining_build_time, next->build_time);
+				}
+				if (auto* t = u->building.researching_type) {
+					add(production::kind::research, (int)t->id, 0, u->building.upgrade_research_time, t->research_time);
+				}
+				if (auto* t = u->building.upgrading_type) {
+					add(production::kind::upgrade, (int)t->id, u->building.upgrading_level, u->building.upgrade_research_time, upgrade_time_cost(p, t));
+				}
+			}
+		}
+		production_log.update(st.current_frame, std::move(items));
+	}
+
+	a_string production_label(production::kind k, int type, int level) const {
+		switch (k) {
+		case production::kind::upgrade: {
+			auto* t = get_upgrade_type((UpgradeTypes)type);
+			a_string n = t->label ? stat_text(t->label) : a_string("Upgrade");
+			return level > 1 ? n + " " + a_string(std::to_string(level).c_str()) : n;
+		}
+		case production::kind::research: {
+			auto* t = get_tech_type((TechTypes)type);
+			return t->label ? stat_text(t->label) : a_string("Research");
+		}
+		default:
+			return building_label(type);
+		}
+	}
+
+	std::unique_ptr<native_window_drawing::surface> production_surface;
+	void draw_production_panel() {
+		if (!show_production) return;
+		std::vector<int> players;
+		for (int i = 0; i != 8; ++i) {
+			if (st.players[i].controller == player_t::controller_occupied) players.push_back(i);
+		}
+		if (players.empty()) return;
+		// The HUD font, as in the stats and graph panels.
+		const int cw = hud_font::cell_w, ch = hud_font::cell_h, hw = cw, hh = ch;
+		const int pad = ui_skin ? std::max(14, frame_side() + 6) : 10, pad_t = ui_skin ? std::max(10, frame_top() + 4) : 8;
+		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, gap = 3 * cw, line = ch + 4;
+		const int window = production_recent_seconds * 1000 / 42;
+		struct row { a_string name, time; wire_rgb rgb; double progress; bool done; };
+		auto production_colour = [](production::kind k) -> wire_rgb {
+			switch (k) {
+			case production::kind::building: return {176, 200, 238};
+			case production::kind::upgrade: return {236, 214, 140};
+			case production::kind::research: return {160, 222, 172};
+			default: return {232, 234, 238};
+			}
+		};
+		std::vector<std::vector<row>> making, finished;
+		std::vector<int> col_chars;
+		for (int p : players) {
+			making.emplace_back();
+			finished.emplace_back();
+			for (auto& g : production::grouped(production_log.now(), p)) {
+				a_string n = production_label(g.what, g.type, g.level);
+				if (g.count > 1) n += " x" + a_string(std::to_string(g.count).c_str());
+				making.back().push_back({n, format_game_time(g.remaining), production_colour(g.what), g.progress, false});
+			}
+			for (auto& f : production::grouped(production_log.recent(p, st.current_frame, window))) {
+				a_string n = production_label(f.what, f.type, f.level);
+				if (f.count > 1) n += " x" + a_string(std::to_string(f.count).c_str());
+				finished.back().push_back({n, "-" + format_game_time(st.current_frame - f.newest), production_colour(f.what), 1, true});
+			}
+			int chars = std::max((int)replay_st.player_name[p].size() * hw / cw + 1, 24);
+			for (auto* list : {&making.back(), &finished.back()}) {
+				for (auto& r : *list) chars = std::max(chars, (int)r.name.size() + 2 + 6);
+			}
+			col_chars.push_back(chars + 1);
+		}
+		// Top right, under the stats panel and the frame rate, above the replay bar. A column per
+		// player; where that is too wide to clear the build order panel (top left), the players
+		// are stacked in one column instead.
+		const int top = (show_hud && hud_surface ? 8 + hud_surface->h + 4 : 8) + (show_fps ? hud_font_small::cell_h + 2 + 6 : 0);
+		const int bottom = draw_ui_elements ? replay_bar_window_rect().from.y - 8 : window_surface->h - 8;
+		const int n = (int)players.size(), head = hh + 4, block_gap = line / 2;
+		const int left_limit = viewport_x + 8 + (build_order_drawn_w ? build_order_drawn_w + 8 : 0);
+		int w_cols = pad * 2 - gap, w_stack = 0;
+		for (int c : col_chars) w_cols += c * cw + gap, w_stack = std::max(w_stack, pad * 2 + c * cw);
+		const bool stacked = n > 1 && viewport_x + viewport_w - w_cols - 8 < left_limit;
+		const int w = stacked ? w_stack : w_cols;
+		// Lines under a player's name: "In production", its rows, a gap, "Finished", its rows
+		// (each section at least one line). In production gets the room first.
+		auto caps = [](int budget, size_t nm, size_t nf) {
+			int m = std::max(1, std::min((int)nm, budget - 3 - std::min(std::max((int)nf, 1), 3)));
+			int f = std::max(1, std::min((int)nf, budget - 3 - m));
+			return std::make_pair(m, f);
+		};
+		std::vector<std::pair<int, int>> cap(n);
+		const int avail = bottom - top - pad_t - pad_b;
+		if (stacked) {
+			int budget = std::max(5, (avail - n * head - (n - 1) * block_gap) / line / n);
+			for (int k = 0; k != n; ++k) cap[k] = caps(budget, making[k].size(), finished[k].size());
+		} else {
+			size_t most_making = 1, most_finished = 1;
+			for (int k = 0; k != n; ++k) {
+				most_making = std::max(most_making, making[k].size());
+				most_finished = std::max(most_finished, finished[k].size());
+			}
+			auto c = caps(std::max(5, (avail - head) / line), most_making, most_finished);
+			for (int k = 0; k != n; ++k) cap[k] = c;  // shared, so the columns line up
+		}
+		auto block_lines = [&](int k) { return 3 + cap[k].first + cap[k].second; };
+		int h = pad_t + pad_b;
+		if (stacked) {
+			for (int k = 0; k != n; ++k) h += head + block_lines(k) * line + (k ? block_gap : 0);
+		} else {
+			h += head + block_lines(0) * line;
+		}
+		if (!production_surface || production_surface->w != w || production_surface->h != h) {
+			production_surface = native_window_drawing::create_rgba_surface(w, h);
+			production_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+		}
+		uint32_t* buf = (uint32_t*)production_surface->lock();
+		size_t pitch = production_surface->pitch / 4;
+		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
+		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) plain_panel(buf, pitch, w, h, 215);
+		int x = pad, y0 = pad_t;
+		for (int i = 0; i != n; ++i) {
+			int p = players[i];
+			auto pc = player_rgb(p);
+			a_string name = replay_st.player_name[p].empty() ? a_string("Player ") + std::to_string(p + 1).c_str() : replay_st.player_name[p];
+			hud_text(buf, pitch, w, h, x, y0 - 2, name.c_str(), pc.r, pc.g, pc.b);
+			const int col_w = (stacked ? w - pad * 2 : col_chars[i] * cw - cw), time_x = x + col_w - 6 * cw;
+			int y = y0 + head;
+			auto section = [&](const char* title, const std::vector<row>& rows, int cap) {
+				hud_text(buf, pitch, w, h, x, y, title, 120, 128, 145);
+				fill_rgba(buf, pitch, w, h, x, y + ch + 1, col_w, 1, hud_rgba(120, 128, 160, 70));
+				y += line;
+				if (rows.empty()) {
+					hud_text(buf, pitch, w, h, x + cw, y, "-", 105, 110, 120);
+					y += line;
+					return;
+				}
+				bool more = (int)rows.size() > cap;
+				int shown = more ? cap - 1 : (int)rows.size();
+				for (int r = 0; r != shown; ++r) {
+					const row& e = rows[r];
+					int dim = e.done ? 70 : 100;  // finished rows are quieter
+					hud_text(buf, pitch, w, h, x + cw, y, e.name.c_str(), e.rgb.r * dim / 100, e.rgb.g * dim / 100, e.rgb.b * dim / 100);
+					hud_text(buf, pitch, w, h, time_x + (6 - (int)e.time.size()) * cw, y, e.time.c_str(), e.done ? 120 : 215, e.done ? 126 : 180, e.done ? 138 : 95);
+					if (!e.done) {
+						// Progress of the soonest, as a thin bar under the row.
+						int bw = col_w - cw, by = y + ch + 1;
+						fill_rgba(buf, pitch, w, h, x + cw, by, bw, 2, hud_rgba(255, 255, 255, 28));
+						fill_rgba(buf, pitch, w, h, x + cw, by, (int)std::lround(bw * e.progress), 2, hud_rgba(e.rgb.r, e.rgb.g, e.rgb.b, 170));
+					}
+					y += line;
+				}
+				if (more) {
+					char m[32];
+					std::snprintf(m, sizeof(m), "+%d more", (int)rows.size() - shown);
+					hud_text(buf, pitch, w, h, x + cw, y, m, 120, 128, 145);
+					y += line;
+				}
+			};
+			section("In production", making[i], cap[i].first);
+			y = y0 + head + (1 + cap[i].first + 1) * line;
+			section("Finished, last minute", finished[i], cap[i].second);
+			if (stacked) {
+				y0 += head + block_lines(i) * line + block_gap;
+				if (i + 1 != n) fill_rgba(buf, pitch, w, h, x, y0 - block_gap / 2 - line / 2, w - pad * 2, 1, hud_rgba(150, 156, 190, 90));
+			} else {
+				x += col_chars[i] * cw + gap;
+			}
+		}
+		production_surface->unlock();
+		// Right-aligned even in a view too narrow for the stack: better over the build order than off screen.
+		production_surface->blit(&*window_surface, viewport_x + viewport_w - w - 8, top);
 	}
 
 	// While a chord waits for its second key: what it can be.
@@ -2990,7 +3209,7 @@ struct ui_functions: ui_util_functions {
 	std::unique_ptr<native_window_drawing::surface> chord_surface;
 	void draw_chord_hint() {
 		if (!chord.pending(live_seconds())) return;
-		const char* text = "Alt+M:  B build order   Esc cancel";
+		const char* text = "Alt+M:  B build order   P production   Esc cancel";
 		const int cw = hud_font_small::cell_w, ch = hud_font_small::cell_h;
 		const int w = (int)std::strlen(text) * cw + 16, h = ch + 8;
 		if (!chord_surface || chord_surface->w != w || chord_surface->h != h) {
@@ -5127,6 +5346,7 @@ struct ui_functions: ui_util_functions {
 
 	void record_graph_sample() {
 		record_build_order();
+		record_production();
 		if (st.current_frame % graph_sample_interval != 0) return;
 		size_t index = (size_t)st.current_frame / graph_sample_interval;
 		if (graph_samples.size() <= index) graph_samples.resize(index + 1);
@@ -5929,6 +6149,7 @@ struct ui_functions: ui_util_functions {
 		add("music", "Music", "", true, flag(music_enabled));
 		add("show_fps", "FPS counter", "", true, flag(show_fps));
 		add("build_order", "Build order", "Alt+M B", true, flag(show_build_order));
+		add("production", "Production", "Alt+M P", true, flag(show_production));
 		add("muted", "Mute sound", "m", true, std::make_pair(std::function<bool()>([this] { return global_volume == 0; }),
 			std::function<void()>([this] { toggle_mute(); })));
 		{
@@ -7498,6 +7719,7 @@ struct ui_functions: ui_util_functions {
 						auto r = chord.key(e.sym, alt_held(), live_seconds());
 						if (r == key_chord::result::completed) {
 							if (chord.second_key() == 'b') show_build_order = !show_build_order;
+							if (chord.second_key() == 'p') show_production = !show_production;
 							break;
 						}
 						if (r != key_chord::result::none) break;
@@ -7794,6 +8016,7 @@ struct ui_functions: ui_util_functions {
 			prof_scope.reset(new frame_profile::profile::scope(prof, "graphs"));
 			if (graphs_visible()) draw_graph_panel();
 			draw_build_order_panel();
+			draw_production_panel();
 			prof_scope.reset(new frame_profile::profile::scope(prof, "selpanel"));
 			panel_area_window = rect{};
 			if (show_selection_panel && draw_selection_panel()) {
@@ -7887,6 +8110,7 @@ struct ui_functions: ui_util_functions {
 		graph_samples.clear();
 		unit_deaths.clear();
 		build_starts.clear();
+		production_log.clear();
 		observer_damage.clear();
 		observer_last_frame = -1;
 		observer_has_target = false;

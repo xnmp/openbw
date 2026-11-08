@@ -93,6 +93,16 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   (`ui/build_order.h`). `Alt+M` begins a two-key chord
   (`ui/key_chord.h`; a hint shows what can follow; `Esc` cancels); tested by
   `viewer/tests/build_order_test.cpp`.
+- **Production** (`Alt+M`, then `p`; also in the settings menu): a column per player of what is
+  in production now (units, buildings, morphs, upgrades with their level, research), grouped
+  ("Dragoon x2") with the time left on the soonest and a bar of its progress, soonest first;
+  then what finished in the last game minute, grouped, with how long ago the latest did.
+  Buildings are blue-grey, upgrades amber, research green. A completion is an item seen with a
+  frame or two left that is gone, or followed by the next in a queue, on the next frame; one
+  that goes earlier was cancelled or killed. Seeking forgets nothing and adds no completions;
+  seeking back shows those of that time (`ui/production.h`, tested by
+  `viewer/tests/production_test.cpp`). Interceptors and Scarabs are left out (ammunition). It sits
+  beside the build order panel, and both sit under the minimised graph.
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg, Minimal; saved as `ui_theme=1..5`):
   **Minimal**, the default, uses no game art: flat dark panels with a hairline edge, neutral
   greys and one blue accent (the seek bar, progress bars, what is on in the settings menu).
@@ -269,6 +279,7 @@ python3 viewer/live/bwlive.py net.pcap --map Map.scx -o game.bwlv --follow &
 | hold `Alt` | health bars under all units while held, when `b` has them on selected units only (as in Warcraft III) |
 | `i` | toggle the selection panel |
 | `Alt+M`, `b` | toggle the build order panel |
+| `Alt+M`, `p` | toggle the production panel |
 | `g` / `esc` | toggle / close the graphs (`g` on the minimized panel restores it); `tab`, `←` / `→` or `1`-`5` (`6` with Pluto data; or click a tab) to switch |
 | `r` | graphs: resource value or supply |
 | `d` | graphs: level or rate of change (with the graphs closed, `d` slows playback) |

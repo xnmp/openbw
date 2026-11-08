@@ -102,5 +102,22 @@ class Pcap(unittest.TestCase):
             list(bwlive.PcapReader().feed(b"\0" * 24))
 
 
+class Lobby(unittest.TestCase):
+    @staticmethod
+    def turn(sent, data, src="host"):
+        head = struct.pack("<HHHHBBBB", 0, 12 + len(data), sent, 0, 2, 0, 0, 0)
+        return src, "joiner", head + data
+
+    def test_slot_updates_count_in_sent_order(self):
+        # Slot 1 becomes Random (6), then Protoss (1); the later update arrives first.
+        old = self.turn(10, bytes([0x3E, 1, 1, 6, 6, 2]))
+        new = self.turn(11, bytes([0x3E, 1, 1, 6, 1, 2]))
+        for order in ([old, new], [new, old]):
+            g = bwlive.Game()
+            for src, dst, payload in order:
+                g.message(src, dst, payload)
+            self.assertEqual(g.slots[1].race, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -30,7 +30,10 @@ players, and checked by viewer/live/live_check.cpp against the replays the games
     A message's frame is its sent number less that of the player's first 0x37 message, plus 1.
     Within a frame the game runs higher storm ids' commands first.
 Only two-player games are handled; more players or a random race stop the decoder with a
-message rather than guessing.
+message rather than guessing. A capture that starts after the lobby, or lacks part of the setup,
+stops it the same way. Messages repeated, reordered or arriving out of order are handled. A turn
+the capture lost (the game itself has it) cannot be recovered: after GAP_SECONDS of capture time
+it is played as empty with a warning, and the game shown may differ from the real one from then.
 """
 from __future__ import annotations
 
@@ -165,20 +168,41 @@ class Slot:
     force: int = 0
 
 
+# Commands OpenBW's replay player runs (actions.h read_action); it stops on any other. The
+# rest (pause, resume, latency, cheats...) change nothing it simulates, and are left out.
+OPENBW_COMMANDS = frozenset([0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x12, 0x13, 0x14, 0x15, 0x18, 0x19,
+                             0x1A, 0x1B, 0x1C, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23]
+                            + list(range(0x25, 0x37)) + [0x57, 0x58, 0x5A, 0x5C])
+GAP_SECONDS = 5.0  # a turn missing this long while later ones arrive is given up as empty
+
+
+def unwrap(last: int | None, seq16: int) -> int:
+    """A 16-bit sequence number as a running count, given the last one (nearest to it)."""
+    if last is None:
+        return seq16
+    return last + ((seq16 - last + 0x8000) & 0xFFFF) - 0x8000
+
+
 @dataclass
 class Player:
-    first_sync: int | None = None   # sent number of its first 0x37 message
+    sync_sent: dict[int, bool] = field(default_factory=dict)  # sent number -> began with 0x37
+    first_sync: int | None = None   # sent number of its first turn (frame 1)
     turns: dict[int, list[bytes]] = field(default_factory=dict)  # frame -> commands
+    pending: dict[int, bytes] = field(default_factory=dict)  # turns before first_sync is known
     last_frame: int = -1            # highest frame received
-    contiguous: int = 0             # every frame below this has been received
-    left: bool = False              # has left the game: no more turns
+    contiguous: int = 1             # every frame below this has been received (frame 0 has none)
+    blocked_since: float | None = None  # when a missing turn started holding it up
+    left_at: int | None = None      # frame of its Leave Game
+    leave: bytes = b""
 
 
 class Game:
     """Feeds on Storm messages; knows the setup once the game starts, then frames' commands."""
 
-    def __init__(self) -> None:
+    def __init__(self, say=lambda msg: None) -> None:
+        self.say = say
         self.seen: set[tuple[str, str, int, int]] = set()
+        self.seq: dict[tuple[str, str, int], int] = {}
         self.names: dict[int, str] = {}
         self.stat: list[str] = []
         self.game_name = self.map_name = self.host_name = ""
@@ -186,35 +210,45 @@ class Game:
         self.map_w = self.map_h = self.tileset = 0
         self.owners: bytes = b""
         self.slots: dict[int, Slot] = {}
+        self.slot_sent: dict[int, tuple[str, int]] = {}  # sender, sent number of each slot's update
         self.map_size: int | None = None
         self.seed: int | None = None
         self.player_bytes = b"\x08" * 8
-        self.host: str | None = None
+        self.pair: frozenset[str] | None = None  # the host and the joiner
         self.players: dict[int, Player] = {}
+        self.by_addr: dict[str, Player] = {}  # every sender's turns, from the lobby on
         self.addr_id: dict[str, int] = {}
         self.emitted = -1  # last frame handed out
+        self.now = 0.0     # capture time of the newest message
+        self.dropped: set[int] = set()
 
-    def message(self, src: str, dst: str, payload: bytes) -> None:
+    def message(self, src: str, dst: str, payload: bytes, t: float = 0.0) -> None:
         if len(payload) < 12:
             return
-        _, length, sent, _, cls, cmd, plr, flags = struct.unpack_from("<HHHHBBBB", payload)
+        _, length, sent16, _, cls, cmd, plr, flags = struct.unpack_from("<HHHHBBBB", payload)
         if flags in (1, 2):
             return  # Storm's sequence checks and resend requests: empty, and reuse a real number
+        if self.pair is not None and frozenset((src, dst)) != self.pair:
+            return  # traffic of anyone else on the port
+        self.now = max(self.now, t)
+        stream = (src, dst, cls)
+        sent = unwrap(self.seq.get(stream), sent16)
+        self.seq[stream] = max(sent, self.seq.get(stream, sent))
         key = (src, dst, cls, sent)
         if key in self.seen:
             return
         self.seen.add(key)
         data = payload[12:length]
         if cls == 0:
-            self._storm(src, cmd, plr, data)
+            self._storm(src, dst, cmd, plr, data)
         elif cls == 1:
             self._async(data)
         elif cls == 2:
             self._turn(src, plr, sent, data)
 
-    def _storm(self, src: str, cmd: int, plr: int, data: bytes) -> None:
-        if cmd == 6 and len(data) > 36:  # the host's player info
-            self.host = src
+    def _storm(self, src: str, dst: str, cmd: int, plr: int, data: bytes) -> None:
+        if cmd == 6 and len(data) > 36:  # the host's player info, to the joiner
+            self.pair = frozenset((src, dst))
             self.addr_id[src] = struct.unpack_from("<I", data, 4)[0]
             self.names[self.addr_id[src]] = data[36:].split(b"\0")[0].decode("latin-1")
         elif cmd == 7:  # the joiner's name
@@ -229,55 +263,99 @@ class Game:
         elif cmd == 9 and len(data) >= 32:
             self.settings = data[:32]
         elif cmd == 0x0B and len(data) >= 5 and self.seed is not None:
-            # A player leaves: the turn number it leaves at, and why. The game records it
-            # as that player's Leave Game command, on that frame.
-            sid = self.addr_id.get(src, plr)
-            p = self.players.get(sid)
-            if p is not None and p.first_sync is not None:
-                frame = struct.unpack_from("<I", data)[0] - p.first_sync + 1
-                if frame > self.emitted:
-                    p.turns.setdefault(frame, []).append(bytes([0x57, data[4]]))
-                    p.last_frame = max(p.last_frame, frame)
-                    p.left = True
+            # A player leaves: the turn number (its sent count) it leaves at, and why. The game
+            # records it as that player's Leave Game command, on that frame.
+            p = self.by_addr.get(src)
+            if p is None or p.left_at is not None:
+                return
+            turn = struct.unpack_from("<I", data)[0]
+            if p.first_sync is None:
+                self.say(f"warning: {src} left before its first turn was seen")
+                p.left_at = max(self.emitted + 1, 1)
+                return
+            frame = turn - p.first_sync + 1
+            if frame <= self.emitted or frame > p.last_frame + 64:
+                self.say(f"warning: {src} left at frame {frame}, outside the frames being played; not shown")
+                p.left_at = max(self.emitted + 1, p.contiguous)
+                return
+            p.left_at, p.leave = frame, bytes([0x57, data[4]])
 
     def _async(self, data: bytes) -> None:
         if data[:1] == bytes([CMD_ROOM]) and len(data) >= 19:
             self.tileset, self.map_w, self.map_h = struct.unpack_from("<HHH", data, 1)
             self.owners = data[7:19]
-        elif data[:1] == b"\x4f" and len(data) >= 8 and data[1] == 0x12:
+        elif data[:1] == b"\x4f" and len(data) >= 9 and data[1] == 0x12:
             self.map_size = struct.unpack_from("<I", data, 5)[0]
 
     def _turn(self, src: str, plr: int, sent: int, data: bytes) -> None:
+        p = self.by_addr.setdefault(src, Player())
+        p.sync_sent[sent] = data[:1] == bytes([CMD_SYNC])
         if self.seed is None:
+            if data[:1] == bytes([CMD_SYNC]):
+                p.pending[sent] = data  # a turn that overtook the start message
+                return
             if data[:1] == bytes([CMD_SEED]) and len(data) >= 13:
                 self.seed = struct.unpack_from("<I", data, 1)[0]
                 self.player_bytes = data[5:13]
-                for sid in self.storm_ids():
-                    self.players[sid] = Player()
                 return
             try:
                 lobby = split_commands(data)
             except DecodeError:
                 return  # a lobby message this doesn't know; slot updates are what matter
             for c in lobby:
-                if c[0] == CMD_SLOT:
+                # A sender's slot updates count in the order it sent them, whatever order they
+                # arrive in (sent numbers are per sender; the host sends these).
+                if c[0] != CMD_SLOT:
+                    continue
+                last = self.slot_sent.get(c[1])
+                if last is None or last[0] != src or sent >= last[1]:
                     self.slots[c[1]] = Slot(c[2], c[3], c[4], c[5])
+                    self.slot_sent[c[1]] = (src, sent)
             return
-        sid = self.addr_id.get(src, plr)
-        p = self.players.get(sid)
-        if p is None:
+        if data[:1] == bytes([CMD_SEED]):
+            self.say("warning: a second game started in this capture; only the first is decoded")
             return
+        if src not in self.addr_id:
+            self.addr_id[src] = plr
+        if not self.players:
+            for sid in self.storm_ids():
+                self.players[sid] = Player()
         if p.first_sync is None:
-            if data[:1] != bytes([CMD_SYNC]):
-                return  # keep-alives before its first turn
-            p.first_sync = sent
-        frame = sent - p.first_sync + 1
-        if frame < 0 or frame in p.turns:
+            p.pending[sent] = data
+            # Its first turn: a sync whose previous message (a keep-alive) has been seen, so a
+            # resent or reordered first turn can't shift the game by a frame.
+            firsts = [s for s, sync in p.sync_sent.items() if sync and (s - 1) in p.sync_sent and not p.sync_sent[s - 1]]
+            if not firsts:
+                return
+            p.first_sync = min(firsts)
+            pending, p.pending = p.pending, {}
+            for s, d in sorted(pending.items()):
+                if s >= p.first_sync:
+                    self._store(p, s - p.first_sync + 1, d)
             return
-        p.turns[frame] = [c for c in split_commands(data) if c[0] not in (CMD_SYNC, CMD_KEEP_ALIVE)]
+        if sent >= p.first_sync:
+            self._store(p, sent - p.first_sync + 1, data)
+
+    def _store(self, p: Player, frame: int, data: bytes) -> None:
+        if frame in p.turns or frame <= self.emitted or (p.left_at is not None and frame > p.left_at):
+            return
+        cmds = []
+        for c in split_commands(data):
+            if c[0] in (CMD_SYNC, CMD_KEEP_ALIVE):
+                continue
+            if c[0] not in OPENBW_COMMANDS:
+                if c[0] not in self.dropped:
+                    self.say(f"note: command {c[0]:#04x} has no effect in a replay; left out")
+                    self.dropped.add(c[0])
+                continue
+            cmds.append(c)
+        p.turns[frame] = cmds
         p.last_frame = max(p.last_frame, frame)
-        while p.contiguous in p.turns or p.contiguous == 0:
+        before = p.contiguous
+        while p.contiguous in p.turns or p.contiguous <= self.emitted:
             p.contiguous += 1
+        if p.contiguous != before:
+            p.blocked_since = None  # the turn it was waiting for came
 
     def storm_ids(self) -> list[int]:
         return sorted(s.storm_id for s in self.slots.values() if s.storm_id < 8 and s.status != 0)
@@ -285,21 +363,26 @@ class Game:
     def started(self) -> bool:
         return self.seed is not None
 
-    def over(self) -> bool:
-        """A player has left a two-player game: it is over for the other too."""
-        return any(p.left for p in self.players.values())
-
     def game_info(self) -> bytes:
         """The 633-byte setup section of a replay, as the game would write it."""
         if self.seed is None:
             raise DecodeError("the game has not started")
+        missing = [what for what, have in (("the game settings (Storm 9)", len(self.settings) >= 32),
+                                           ("the room's map and slots (0x4A)", len(self.owners) == 12),
+                                           ("the game's description (Storm 8)", bool(self.stat)),
+                                           ("the lobby's slots (0x3E)", bool(self.slots)))
+                   if not have]
+        if missing:
+            raise DecodeError("the capture started too late to set up the game: missing " + ", ".join(missing))
         occupied = {s.storm_id: (i, s) for i, s in self.slots.items() if s.storm_id < 8 and s.status != 0}
         if len(occupied) != 2:
             raise DecodeError(f"only two-player games are handled, this one has {len(occupied)}")
         for i, s in occupied.values():
             if s.race > 2:
                 raise DecodeError(f"lobby slot {i} has race {s.race} (random?), which can't be resolved yet")
-        start_count = sum(1 for o in self.owners if o == 6) or 2
+        start_count = sum(1 for o in self.owners if o == 6)
+        if start_count < len(occupied):
+            raise DecodeError(f"the room has {start_count} start slots for {len(occupied)} players")
         where = start_slots(self.seed, {sid: i for sid, (i, _) in occupied.items()}, start_count)
         names = dict(self.names)
         joiner = [sid for sid in occupied if sid not in names]
@@ -319,9 +402,9 @@ class Game:
         put_str(24, 24, self.host_name or names.get(0, ""))
         struct.pack_into("<HH", b, 52, self.map_w, self.map_h)
         b[56], b[57] = 1, len(occupied)
-        b[58] = int(stat[3]) if stat[3].isdigit() else 3
+        b[58] = int(stat[3]) if stat[3].isascii() and stat[3].isdigit() and int(stat[3]) <= 6 else 3
         b[59] = 1
-        b[60:64] = self.settings[:4] if len(self.settings) >= 4 else b"\x02\x00\x01\x00"
+        b[60:64] = self.settings[:4]
         try:
             struct.pack_into("<I", b, 64, int(stat[8], 16))
         except ValueError:
@@ -346,24 +429,55 @@ class Game:
             struct.pack_into("<I", b, 593 + 4 * i, i)  # colours: the game picks them at random; not sent
         return bytes(b)
 
+    def _player(self, sid: int) -> Player:
+        addr = next((a for a, i in self.addr_id.items() if i == sid), None)
+        return self.by_addr.get(addr, Player()) if addr is not None else Player()
+
     def ready_frames(self, final: bool = False) -> Iterator[tuple[int, bytes]]:
-        """Frames whose commands are all known, in order, as (frame, replay-form commands)."""
+        """Frames whose commands are all known, in order, as (frame, replay-form commands).
+        A turn missing for GAP_SECONDS of capture time while later ones arrive is given up (with
+        a warning: the game shown may differ from then on); at the end, holes are reported."""
         if not self.players:
             return
-        playing = [p for p in self.players.values() if not p.left]
-        if final or not playing:
-            upto = max(p.last_frame for p in self.players.values())
+        ps = {sid: self._player(sid) for sid in self.players}
+        bounds = []
+        for sid, p in ps.items():
+            if p.left_at is not None and p.contiguous >= p.left_at:
+                bounds.append(None)  # everything up to its leave is here: no longer holds anything up
+                continue
+            if p.last_frame >= p.contiguous and not final:
+                if p.blocked_since is None:
+                    p.blocked_since = self.now
+                elif self.now - p.blocked_since > GAP_SECONDS:
+                    self.say(f"warning: player {sid}'s turn for frame {p.contiguous} never came; played as empty")
+                    p.turns[p.contiguous] = []
+                    while p.contiguous in p.turns:
+                        p.contiguous += 1
+                    p.blocked_since = None
+            bounds.append(p.contiguous - 1)
+        ends = [max(p.last_frame, p.left_at or -1) for p in ps.values()]
+        if final:
+            upto = max(ends)
+        elif all(b is None for b in bounds):
+            upto = max(ends)
         else:
-            # Frames every player still in the game has sent (a player who left sends no more;
-            # its leave frame is already among its turns).
-            upto = min(p.contiguous - 1 for p in playing)
+            upto = min(b for b in bounds if b is not None)
         for frame in range(self.emitted + 1, upto + 1):
             out = bytearray()
-            for sid in sorted(self.players, reverse=True):
-                for c in self.players[sid].turns.pop(frame, []):
+            for sid in sorted(ps, reverse=True):
+                p = ps[sid]
+                if final and frame >= 1 and frame not in p.turns and frame <= p.last_frame:
+                    self.say(f"warning: player {sid}'s turn for frame {frame} is missing from the capture")
+                for c in p.turns.pop(frame, []):
                     out += bytes([sid]) + c
+                if p.left_at == frame and p.leave:
+                    out += bytes([sid]) + p.leave
             self.emitted = frame
             yield frame, bytes(out)
+
+    def over(self) -> bool:
+        """A player has left a two-player game: it is over for the other too."""
+        return any(p.left_at is not None for p in self.by_addr.values())
 
 
 # ---- output -------------------------------------------------------------------------------
@@ -404,7 +518,7 @@ def run(pcap: str, map_path: str, out_path: str, follow: bool, poll: float = 0.0
         idle_timeout: float = 600.0, log: BinaryIO | None = None) -> int:
     with open(map_path, "rb") as f:
         map_data = f.read()
-    game, reader = Game(), PcapReader()
+    game, reader = Game(say=lambda msg: print(f"bwlive: {msg}", file=sys.stderr, flush=True)), PcapReader()
     out = open(out_path + ".part", "wb")
     header_written, last_growth, pos = False, time.monotonic(), 0
     done_marker = pcap + ".done"
@@ -426,8 +540,14 @@ def run(pcap: str, map_path: str, out_path: str, follow: bool, poll: float = 0.0
         if data:
             pos += len(data)
             last_growth = time.monotonic()
-            for _, src, dst, payload in reader.feed(data):
-                game.message(src, dst, payload)
+            for t, src, dst, payload in reader.feed(data):
+                try:
+                    game.message(src, dst, payload, t)
+                except DecodeError:
+                    if header_written:  # a viewer follows the file: tell it the game is over
+                        out.write(end_record())
+                        out.close()
+                    raise
         if game.started() and not header_written:
             if game.map_size is not None and game.map_size != len(map_data):
                 say(f"warning: the game's map is {game.map_size} bytes, {map_path} is {len(map_data)}")

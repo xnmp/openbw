@@ -73,6 +73,8 @@ add_executable(openbw-live-stream-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DI
 target_include_directories(openbw-live-stream-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-fps-meter-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/fps_meter_test.cpp")
 target_include_directories(openbw-fps-meter-test PRIVATE "${OPENBW_DIR}/ui")
+add_executable(openbw-draw-cache-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/draw_cache_test.cpp")
+target_include_directories(openbw-draw-cache-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-tt-font-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/tt_font_test.cpp")
 target_include_directories(openbw-tt-font-test PRIVATE "${OPENBW_DIR}/ui")
 add_executable(openbw-skin-frame-test EXCLUDE_FROM_ALL "${CMAKE_CURRENT_LIST_DIR}/tests/skin_frame_test.cpp")

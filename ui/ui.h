@@ -9,6 +9,8 @@
 #include "hud_font.h"
 #include "hud_font_small.h"
 #include "fps_meter.h"
+#include "draw_cache.h"
+#include "frame_profile.h"
 #include "order_names.h"
 #include "timeline_markers.h"
 #include "pluto_win.h"
@@ -1907,6 +1909,27 @@ struct ui_functions: ui_util_functions {
 		return false;
 	}
 
+	// Every input draw_minimap_window() reads, other than the drawing code's constants. Anything
+	// new that the minimap's drawing depends on must be added here.
+	struct minimap_key {
+		int game_frame = 0;
+		unsigned state_epoch = 0;  // bumped when the game state is replaced wholesale (reset)
+		int w = 0, h = 0, frame_top = 0, frame_right = 0;
+		int screen_x = 0, screen_y = 0, view_w = 0, view_h = 0;
+		bool show_fog = false, two_colour = false, hd = false, skin = false;
+		int theme = 0, theme_level = 0, skin_stamp = 0, order_mode = 0, tileset = 0;
+		a_vector<unit_id> selection;  // the order lines of selected units
+		bool operator==(const minimap_key& o) const {
+			return game_frame == o.game_frame && state_epoch == o.state_epoch && w == o.w && h == o.h && frame_top == o.frame_top && frame_right == o.frame_right &&
+				screen_x == o.screen_x && screen_y == o.screen_y && view_w == o.view_w && view_h == o.view_h &&
+				show_fog == o.show_fog && two_colour == o.two_colour && hd == o.hd && skin == o.skin &&
+				theme == o.theme && theme_level == o.theme_level && skin_stamp == o.skin_stamp && order_mode == o.order_mode && tileset == o.tileset &&
+				selection == o.selection;
+		}
+	};
+	draw_cache::cache<minimap_key> minimap_cache;
+	unsigned state_epoch = 0;
+
 	void draw_minimap_window() {
 		rect r = minimap_window_rect();
 		const int w = r.to.x - r.from.x, h = r.to.y - r.from.y;
@@ -1916,7 +1939,23 @@ struct ui_functions: ui_util_functions {
 		if (!minimap_surface || minimap_surface->w != sw || minimap_surface->h != sh) {
 			minimap_surface = native_window_drawing::create_rgba_surface(sw, sh);
 			minimap_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+			minimap_cache.invalidate();
 		}
+		// The minimap changes only with the game state, the camera, the sizes and the settings
+		// below; between game frames (the display runs several times faster) the surface is reused.
+		minimap_key key;
+		key.game_frame = st.current_frame, key.state_epoch = state_epoch;
+		key.w = w, key.h = h, key.frame_top = frame_top, key.frame_right = frame_right;
+		key.screen_x = screen_pos.x, key.screen_y = screen_pos.y, key.view_w = (int)view_width, key.view_h = (int)view_height;
+		key.show_fog = show_fog, key.two_colour = two_colour_mode, key.hd = minimap_hd, key.skin = ui_skin;
+		key.theme = (int)active_theme, key.theme_level = ui_theme_level, key.skin_stamp = skin_stamp();
+		key.order_mode = order_lines_mode, key.tileset = (int)game_st.tileset_index;
+		key.selection = current_selection;
+		if (!minimap_cache.needs_redraw(key)) {
+			minimap_surface->blit(&*window_surface, r.from.x, r.from.y - frame_top);
+			return;
+		}
+		frame_profile::profile::scope rebuild_scope(prof, "mm_rebuild");
 		uint32_t* const surface_px = (uint32_t*)minimap_surface->lock();
 		const size_t pitch = minimap_surface->pitch / 4;
 		for (int y = 0; y != sh; ++y) std::memset(surface_px + (size_t)y * pitch, 0, (size_t)sw * 4);
@@ -2288,6 +2327,11 @@ struct ui_functions: ui_util_functions {
 	std::unique_ptr<scr::graphics> hd;
 	bool hd_tried = false;
 	std::unique_ptr<native_window_drawing::surface> hd_surface;
+	// When the window's surface stores pixels like ours, the HD canvas is drawn straight into it
+	// (at the viewport's offset) instead of into hd_surface and copied over, saving a full-frame
+	// copy every frame. hd_probe is a 1x1 surface to compare layouts with.
+	std::unique_ptr<native_window_drawing::surface> hd_probe;
+	bool hd_direct = false;
 	a_vector<uint8_t> hd_shadow;  // all zero between frames (resolve_shadows clears what it uses)
 	bool hd_shadow_clean = false;
 	scr::box hd_shadow_area;
@@ -2369,7 +2413,9 @@ struct ui_functions: ui_util_functions {
 
 	void hd_begin_frame() {
 		int w = viewport_w, h = window_height;
-		if (!hd_surface || hd_surface->w != w || hd_surface->h != h) {
+		if (!hd_probe) hd_probe = native_window_drawing::create_rgba_surface(1, 1);
+		hd_direct = window_surface && window_surface->w >= viewport_x + w && window_surface->h >= h && window_surface->same_pixel_layout(&*hd_probe);
+		if (!hd_direct && (!hd_surface || hd_surface->w != w || hd_surface->h != h)) {
 			hd_surface = native_window_drawing::create_rgba_surface(w, h);
 			hd_surface->set_blend_mode(native_window_drawing::blend_mode::none);
 		}
@@ -2378,8 +2424,13 @@ struct ui_functions: ui_util_functions {
 		hd_shadow_clean = false;
 		hd_shadow_area = {};
 		hd_list.clear();
-		hd_canvas.px = (uint32_t*)hd_surface->lock();
-		hd_canvas.pitch = hd_surface->pitch / 4;
+		if (hd_direct) {
+			hd_canvas.px = (uint32_t*)window_surface->lock() + viewport_x;
+			hd_canvas.pitch = window_surface->pitch / 4;
+		} else {
+			hd_canvas.px = (uint32_t*)hd_surface->lock();
+			hd_canvas.pitch = hd_surface->pitch / 4;
+		}
 		hd_canvas.w = w;
 		hd_canvas.h = h;
 		hd_canvas.shadow = hd_shadow.data();
@@ -2404,7 +2455,8 @@ struct ui_functions: ui_util_functions {
 	}
 
 	void hd_end_frame() {
-		hd_surface->unlock();
+		if (hd_direct) window_surface->unlock();
+		else hd_surface->unlock();
 		hd_canvas = {};
 		hd->end_frame();
 	}
@@ -2759,6 +2811,7 @@ struct ui_functions: ui_util_functions {
 	// display refresh the viewer paces itself to ("60 Hz?" when the display did not say and 60
 	// is assumed), so a low number can be told apart from a slow display.
 	fps_meter::meter frame_meter;
+	frame_profile::profile prof;  // OPENBW_PROFILE=1: per-section ms/frame on stderr
 	bool show_fps = true;
 	std::unique_ptr<native_window_drawing::surface> fps_surface;
 	void draw_fps(int top) {
@@ -2988,7 +3041,26 @@ struct ui_functions: ui_util_functions {
 	// (icon, then the number), with army and worker counts beside the race's own Marine /
 	// Zergling / Zealot and SCV / Drone / Probe icons. On the observer console's panel with
 	// the skin, a bevelled olive one without.
+	// What the stats panel shows is a function of the game state and these settings (hud_rows(),
+	// the panel's skin and sizes); it is redrawn only when one changes.
+	struct hud_key {
+		int game_frame = 0;
+		unsigned state_epoch = 0;
+		bool skin = false, two_colour = false, palette = false;
+		int theme = 0, theme_level = 0, skin_stamp = 0, tileset = 0;
+		bool operator==(const hud_key& o) const {
+			return game_frame == o.game_frame && state_epoch == o.state_epoch && skin == o.skin && two_colour == o.two_colour && palette == o.palette &&
+				theme == o.theme && theme_level == o.theme_level && skin_stamp == o.skin_stamp && tileset == o.tileset;
+		}
+	};
+	draw_cache::cache<hud_key> hud_cache;
+
 	void draw_hud() {
+		hud_key key;
+		key.game_frame = st.current_frame, key.state_epoch = state_epoch;
+		key.skin = ui_skin, key.two_colour = two_colour_mode, key.palette = (bool)palette;
+		key.theme = (int)active_theme, key.theme_level = ui_theme_level, key.skin_stamp = skin_stamp(), key.tileset = (int)game_st.tileset_index;
+		if (!hud_cache.needs_redraw(key)) return;
 		auto rows = hud_rows();
 		if (rows.empty()) return;
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h;
@@ -4134,6 +4206,7 @@ struct ui_functions: ui_util_functions {
 	// The observer minimap frame: metal along the top and right edges (the minimap sits in
 	// the bottom-left corner), rivets at the top-right. `w` x `h` is the minimap itself, at
 	// (0, minimap_frame_top()) in a buffer of (w + minimap_frame_right()) x (h + top).
+	int skin_stamp() const { return skin.themed + (skin.ok ? 1000 : 0) + (skin.framed ? 2000 : 0); }
 	int minimap_frame_top() const { return !ui_skin ? 0 : skin.framed ? frame_top() : 8; }
 	int minimap_frame_right() const { return !ui_skin ? 0 : skin.framed ? frame_side() : 11; }
 	void skin_minimap_frame(uint32_t* buf, size_t pitch, int w, int h) {
@@ -4164,6 +4237,7 @@ struct ui_functions: ui_util_functions {
 	int frame_top() const { return 0; }
 	int frame_bottom() const { return 0; }
 	int frame_side() const { return 0; }
+	int skin_stamp() const { return 0; }
 	int minimap_frame_top() const { return 0; }
 	int minimap_frame_right() const { return 0; }
 	void skin_minimap_frame(uint32_t*, size_t, int, int) {}
@@ -5517,6 +5591,23 @@ struct ui_functions: ui_util_functions {
 		}
 	}
 
+	// Every input draw_order_lines() reads; it is redrawn only when one changes.
+	struct order_lines_key {
+		int game_frame = 0;
+		unsigned state_epoch = 0;
+		int w = 0, h = 0, screen_x = 0, screen_y = 0, mode = 0;
+		double zoom = 0;
+		bool skin = false;
+		int theme = 0, theme_level = 0, skin_stamp = 0, tileset = 0;
+		a_vector<unit_id> selection;
+		bool operator==(const order_lines_key& o) const {
+			return game_frame == o.game_frame && state_epoch == o.state_epoch && w == o.w && h == o.h && screen_x == o.screen_x && screen_y == o.screen_y &&
+				mode == o.mode && zoom == o.zoom && skin == o.skin && theme == o.theme && theme_level == o.theme_level && skin_stamp == o.skin_stamp &&
+				tileset == o.tileset && selection == o.selection;
+		}
+	};
+	draw_cache::cache<order_lines_key> order_lines_cache;
+
 	void draw_order_lines() {
 		if (order_lines_mode == order_lines_off) return;
 		const int w = viewport_w, h = window_height;
@@ -5524,6 +5615,16 @@ struct ui_functions: ui_util_functions {
 		if (!order_surface || order_surface->w != w || order_surface->h != h) {
 			order_surface = native_window_drawing::create_rgba_surface(w, h);
 			order_surface->set_blend_mode(native_window_drawing::blend_mode::alpha);
+			order_lines_cache.invalidate();
+		}
+		order_lines_key key;
+		key.game_frame = st.current_frame, key.state_epoch = state_epoch;
+		key.w = w, key.h = h, key.screen_x = screen_pos.x, key.screen_y = screen_pos.y, key.mode = order_lines_mode, key.zoom = zoom;
+		key.skin = ui_skin, key.theme = (int)active_theme, key.theme_level = ui_theme_level, key.skin_stamp = skin_stamp(), key.tileset = (int)game_st.tileset_index;
+		key.selection = current_selection;
+		if (!order_lines_cache.needs_redraw(key)) {
+			order_surface->blit(&*window_surface, viewport_x, 0);
+			return;
 		}
 		uint32_t* buf = (uint32_t*)order_surface->lock();
 		const size_t pitch = order_surface->pitch / 4;
@@ -7291,6 +7392,7 @@ struct ui_functions: ui_util_functions {
 			return r;
 		};
 
+		std::unique_ptr<frame_profile::profile::scope> prof_scope(new frame_profile::profile::scope(prof, "world"));
 		uint8_t* data = (uint8_t*)indexed_surface->lock();
 #ifdef OPENBW_REMASTERED
 		// Remastered: map and sprites go to the canvas; the indexed buffer only collects
@@ -7298,26 +7400,32 @@ struct ui_functions: ui_util_functions {
 		uint8_t overlay_sentinel = 0;
 		if (hd_frame) {
 			hd_begin_frame();
+			prof_scope.reset(new frame_profile::profile::scope(prof, "w_tiles"));
 			hd_draw_tiles();
 			overlay_sentinel = hd_overlay_sentinel();
 			std::memset(data, overlay_sentinel, (size_t)indexed_surface->pitch * indexed_surface->h);
 		}
 #endif
 		if (!hd_frame) draw_tiles(data, indexed_surface->pitch);
+		prof_scope.reset(new frame_profile::profile::scope(prof, "w_sprites"));
 		hd_drawing = hd_frame;
 		draw_sprites(data, indexed_surface->pitch);
 		hd_drawing = false;
 #ifdef OPENBW_REMASTERED
 		if (hd_frame) {
+			prof_scope.reset(new frame_profile::profile::scope(prof, "w_flush"));
 			hd_flush();
 			if (show_fog) {
 				// Health bars drawn with the sprites sit under the fog, as in the classic view.
 				hd_composite_overlay(data, indexed_surface->pitch, overlay_sentinel, rect{});
 				std::memset(data, overlay_sentinel, (size_t)indexed_surface->pitch * indexed_surface->h);
+				prof_scope.reset(new frame_profile::profile::scope(prof, "w_fog"));
 				hd_draw_fog();
 			}
 		}
 #endif
+		prof_scope.reset(new frame_profile::profile::scope(prof, "w_overlay"));
+
 		if (!hd_frame) draw_fog(data, indexed_surface->pitch);
 
 		draw_callback(data, indexed_surface->pitch);
@@ -7346,11 +7454,26 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 
+		prof_scope.reset(new frame_profile::profile::scope(prof, "blit"));
 		if (wnd) {
-			if (viewport_x > 0) window_surface->fill(0, 0, 0, 255);
+			const bool direct = hd_frame && hd_direct;  // the canvas is already in the window surface
+			if (direct) {
+				// Only the pillarbox bars; the canvas covers the rest.
+				if (viewport_x > 0) {
+					uint32_t* px = (uint32_t*)window_surface->lock();
+					const size_t pitch = window_surface->pitch / 4;
+					const int right = viewport_x + viewport_w, width = window_surface->w;
+					for (int y = 0; y != window_surface->h; ++y) {
+						uint32_t* row = px + (size_t)y * pitch;
+						std::fill(row, row + viewport_x, 0xff000000u);
+						if (right < width) std::fill(row + right, row + width, 0xff000000u);
+					}
+					window_surface->unlock();
+				}
+			} else if (viewport_x > 0) window_surface->fill(0, 0, 0, 255);
 #ifdef OPENBW_REMASTERED
 			if (hd_frame) {
-				hd_surface->blit(&*window_surface, viewport_x, 0);
+				if (!direct) hd_surface->blit(&*window_surface, viewport_x, 0);
 			} else
 #endif
 			if (rgba_surface->w == viewport_w && rgba_surface->h == window_surface->h) {
@@ -7358,17 +7481,23 @@ struct ui_functions: ui_util_functions {
 			} else {
 				rgba_surface->blit_scaled(&*window_surface, viewport_x, 0, viewport_w, window_surface->h);
 			}
+			prof_scope.reset(new frame_profile::profile::scope(prof, "orders"));
 			draw_order_lines();
+			prof_scope.reset(new frame_profile::profile::scope(prof, "hud"));
 			if (show_hud) {
 				draw_hud();
 				if (hud_surface) hud_surface->blit(&*window_surface, viewport_x + viewport_w - hud_surface->w - 8, 8);  // top right
 			}
 			draw_fps(show_hud && hud_surface ? 8 + hud_surface->h + 4 : 6);
 			if (draw_ui_elements) {
+				prof_scope.reset(new frame_profile::profile::scope(prof, "minimap"));
 				draw_minimap_window();
+				prof_scope.reset(new frame_profile::profile::scope(prof, "replaybar"));
 				draw_replay_bar();
 			}
+			prof_scope.reset(new frame_profile::profile::scope(prof, "graphs"));
 			if (graphs_visible()) draw_graph_panel();
+			prof_scope.reset(new frame_profile::profile::scope(prof, "selpanel"));
 			panel_area_window = rect{};
 			if (show_selection_panel && draw_selection_panel()) {
 				// Centred, but kept between the minimap and the replay panel where they allow.
@@ -7382,11 +7511,15 @@ struct ui_functions: ui_util_functions {
 				panel_surface->blit(&*window_surface, px, py);
 				draw_panel_tip();
 			}
+			prof_scope.reset(new frame_profile::profile::scope(prof, "modal"));
 			draw_modal();
 			if (show_settings_menu) draw_settings_menu();
 			save_settings_if_changed();
+			prof_scope.reset(new frame_profile::profile::scope(prof, "present"));
 			wnd.update_surface();
 		}
+		prof_scope.reset();
+		prof.end_frame();
 	}
 
 	std::tuple<int, int, uint32_t*> get_rgba_buffer() {
@@ -7460,6 +7593,7 @@ struct ui_functions: ui_util_functions {
 		observer_has_target = false;
 		observer_visits.clear();
 		replay_frame = 0;
+		++state_epoch;
 		auto& game = *st.game;
 		st = state();
 		game = game_state();

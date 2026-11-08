@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 #include <memory>
 #include <csignal>
@@ -434,9 +435,70 @@ struct sdl_surface: surface {
 			SDL_BlitSurface(surf, nullptr, s, &r);
 		}
 	}
+	// Nearest-neighbour scaling is what SDL_BlitScaled does between same-layout surfaces, but it
+	// is slow (a per-pixel generic loop, about 40% of a classic-graphics frame). The same
+	// mapping, source = ((d * inc + inc / 2) >> 16) with inc = (source size << 16) / dest size,
+	// is done here with each source row scattered once and repeated rows copied. SDL's mapping
+	// is not documented and may differ between versions, so the first blit at each size is
+	// done by SDL and checked against ours; ours is used only after matching it exactly.
+	struct scale_state {
+		int sw = -1, sh = -1, dw = -1, dh = -1;
+		bool known = false, fast = false;
+		std::vector<int> cols, rows;
+	} scale_;
+	static void scale_map(std::vector<int>& m, int s, int d) {
+		m.resize((size_t)d);
+		const int64_t inc = ((int64_t)s << 16) / d;
+		for (int i = 0; i != d; ++i) m[(size_t)i] = (int)(((int64_t)i * inc + inc / 2) >> 16);
+	}
+	// Writes the scaled picture into `out` (rows of dw pixels, `pitch` apart).
+	void scale_into(uint32_t* out, size_t pitch) const {
+		const uint8_t* base = (const uint8_t*)surf->pixels;
+		int prev = -1;
+		for (int dy = 0; dy != scale_.dh; ++dy) {
+			uint32_t* row = out + (size_t)dy * pitch;
+			int sy = scale_.rows[(size_t)dy];
+			if (sy == prev) {
+				std::memcpy(row, row - pitch, (size_t)scale_.dw * 4);
+			} else {
+				const uint32_t* srow = (const uint32_t*)(base + (size_t)sy * surf->pitch);
+				const int* cols = scale_.cols.data();
+				for (int dx = 0; dx != scale_.dw; ++dx) row[dx] = srow[cols[dx]];
+			}
+			prev = sy;
+		}
+	}
 	virtual void blit_scaled(surface* dst, int x, int y, int w, int h) override {
 		auto* s = ((sdl_surface*)dst)->surf;
 		SDL_Rect r{x, y, w, h};
+		const bool plain = w > 0 && h > 0 && x >= 0 && y >= 0 && x + w <= s->w && y + h <= s->h && surf->w > 0 && surf->h > 0 &&
+			surf->format->BytesPerPixel == 4 && s->format->BytesPerPixel == 4 && surf->format->format == s->format->format &&
+			!SDL_MUSTLOCK(surf) && !SDL_MUSTLOCK(s) && !SDL_HasColorKey(surf);
+		if (plain) {
+			const bool same = scale_.known && scale_.sw == surf->w && scale_.sh == surf->h && scale_.dw == w && scale_.dh == h;
+			if (same && scale_.fast) {
+				scale_into((uint32_t*)((uint8_t*)s->pixels + (size_t)y * s->pitch) + x, s->pitch / 4);
+				return;
+			}
+			if (!same) {
+				scale_.sw = surf->w, scale_.sh = surf->h, scale_.dw = w, scale_.dh = h;
+				scale_.known = true;
+				scale_map(scale_.cols, surf->w, w);
+				scale_map(scale_.rows, surf->h, h);
+				SDL_BlitScaled(surf, nullptr, s, &r);
+				// Compare ours with SDL's result.
+				std::vector<uint32_t> ours((size_t)w * h);
+				scale_into(ours.data(), (size_t)w);
+				bool match = true;
+				for (int dy = 0; dy != h && match; ++dy) {
+					const uint32_t* a = (const uint32_t*)((uint8_t*)s->pixels + (size_t)(y + dy) * s->pitch) + x;
+					match = std::memcmp(a, ours.data() + (size_t)dy * w, (size_t)w * 4) == 0;
+				}
+				scale_.fast = match;
+				if (!match) log("scaled blit: SDL's mapping differs from the fast path; using SDL's\n");
+				return;
+			}
+		}
 		SDL_BlitScaled(surf, nullptr, s, &r);
 	}
 	virtual void fill(int r, int g, int b, int a) override {
@@ -444,6 +506,13 @@ struct sdl_surface: surface {
 	}
 	virtual void set_alpha(int a) override {
 		SDL_SetSurfaceAlphaMod(surf, a);
+	}
+	virtual bool same_pixel_layout(const surface* other) const override {
+		auto* o = dynamic_cast<const sdl_surface*>(other);
+		if (!o || !o->surf || !surf) return false;
+		const SDL_PixelFormat* a = surf->format;
+		const SDL_PixelFormat* b = o->surf->format;
+		return a->BytesPerPixel == 4 && b->BytesPerPixel == 4 && a->Rmask == b->Rmask && a->Gmask == b->Gmask && a->Bmask == b->Bmask && a->Amask == b->Amask;
 	}
 	virtual void set_blend_mode(blend_mode blend) override {
 		if (blend == blend_mode::none) SDL_SetSurfaceBlendMode(surf, SDL_BLENDMODE_NONE);

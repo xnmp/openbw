@@ -45,6 +45,9 @@ namespace native_window_drawing {
 		virtual void fill(int r, int g, int b, int a) = 0;
 		virtual void set_alpha(int a) = 0;
 		virtual void set_blend_mode(blend_mode blend) = 0;
+		// Whether both surfaces store pixels the same way (32 bits, same channel masks), so one's
+		// pixels may be drawn straight into the other's memory without conversion.
+		virtual bool same_pixel_layout(const surface* other) const { (void)other; return false; }
 	};
 	
 	std::unique_ptr<surface> create_rgba_surface(int width, int height);

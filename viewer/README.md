@@ -104,7 +104,8 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   buildings and morphs, upgrades and research in progress as command icons, a tile per kind
   of item: a count when there are several ("x2"), an upgrade's level in its corner, and under
   it a bar of the soonest one's progress and its time left. Then what finished in the last
-  game minute, dimmed, with how long ago the latest did. Both are in the same order: research,
+  game minute, dimmed, with how long ago the latest did. Counts and levels are in the HUD
+  font, outlined over the icon. Both are in the same order: research,
   then upgrades, then units and buildings with tech buildings first and the rest by cost (gas
   counted double), supply buildings near the end and workers last; equals soonest (or most
   recent) first. Tile edges are tinted by kind (buildings blue, upgrades amber, research
@@ -162,7 +163,7 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
   winner) with **Watch Again** (`W`) and **Exit Replay** (`X` as in the game, or `E`). `Esc`
   closes it; it shows again at the end. While it is up the camera stays put (no scrolling,
   dragging, zooming or minimap jumps); the seek bar still takes you back into the game.
-- **Paused** (`space`): a small **Game Paused** card near the top of the view with **Resume
+- **Paused** (`space`): a small **Game Paused** card in the middle of the view with **Resume
   (Space)**; it takes only clicks on itself, so the paused game can still be looked around.
 - Both cards are drawn like the game's own Game Menu (its measurements, from
   `rez/gamemenu.ui.json`, scaled to the window): the map darkened under a navy veil, buttons

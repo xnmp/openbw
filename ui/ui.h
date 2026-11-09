@@ -3207,9 +3207,9 @@ struct ui_functions: ui_util_functions {
 			for (int Y = y; Y < y + rh; ++Y) for (int X = x; X < x + rw; ++X) blend_px(buf, pitch, w, h, X, Y, c);
 		};
 		auto badge = [&](int x, int y, const char* text, int r, int g, int b) {
-			// Small font with a dark outline, over the icon's corner.
-			for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) if (dx || dy) small_text(buf, pitch, w, h, x + dx, y + dy, text, 0, 0, 0);
-			small_text(buf, pitch, w, h, x, y, text, r, g, b);
+			// The HUD font with a dark outline, over the icon's corner.
+			for (int dy = -2; dy <= 2; ++dy) for (int dx = -2; dx <= 2; ++dx) if ((dx || dy) && std::abs(dx) + std::abs(dy) <= 3) hud_text(buf, pitch, w, h, x + dx, y + dy, text, 0, 0, 0);
+			hud_text(buf, pitch, w, h, x, y, text, r, g, b);
 		};
 		auto draw_tile = [&](int x, int y, const tile& t) {
 			const wire_rgb& c = t.rgb;
@@ -3218,12 +3218,12 @@ struct ui_functions: ui_util_functions {
 			draw_cmd_icon_scaled(buf, pitch, w, h, ix, iy, t.frame, 1, icon_w, icon_h);
 			if (t.done) fill_rounded(buf, pitch, w, h, x, y, x + tile_w, y + plate_h, 5, hud_rgba(8, 9, 14, 120), hud_rgba(8, 9, 14, 120));
 			stroke_rounded(buf, pitch, w, h, x + 0.5, y + 0.5, x + tile_w - 0.5, y + plate_h - 0.5, 5, 1, hud_rgba(c.r, c.g, c.b, t.done ? 90 : 200));
-			const int sw = hud_font_small::cell_w, sh = hud_font_small::cell_h;
 			if (t.count > 1) {
+				// Bottom right, its glyphs' baseline near the plate's bottom edge.
 				a_string k = "x" + a_string(std::to_string(t.count).c_str());
-				badge(x + tile_w - 3 - (int)k.size() * sw, y + plate_h - sh, k.c_str(), 240, 240, 240);
+				badge(x + tile_w - 2 - (int)k.size() * cw, y + plate_h - ch + 2, k.c_str(), 245, 245, 245);
 			}
-			if (t.level > 0) badge(x + 3, y + 1, std::to_string(t.level).c_str(), 236, 214, 140);
+			if (t.level > 0) badge(x + 3, y - 3, std::to_string(t.level).c_str(), 236, 214, 140);
 			int by = y + plate_h + 3;
 			if (!t.done) {
 				blend_rect(x + 2, by, tile_w - 4, bar_h, hud_rgba(255, 255, 255, 30));
@@ -6962,7 +6962,7 @@ struct ui_functions: ui_util_functions {
 		if (show_settings_menu) return modal_kind::none;  // Options: the settings menu is on top
 		if (game_menu_open) return modal_kind::game_menu;
 		if (draw_ui_elements && replay_st.end_frame > 0 && st.current_frame >= replay_st.end_frame && !end_card_dismissed && !live_waiting()) return modal_kind::end_of_replay;
-		// Paused: a small card near the top, out of the way of what was paused on.
+		// Paused: a small card in the middle of the view.
 		if (draw_ui_elements && replay_st.end_frame > 0 && is_paused) return modal_kind::paused;
 		return modal_kind::none;
 	}
@@ -7210,10 +7210,10 @@ struct ui_functions: ui_util_functions {
 		const wire_rgb yellow{235, 236, 138}, white{250, 248, 250};
 		menu_text(buf, pitch, cw_, ch_, cw_ / 2, l.title_y, c.title, wire_rgb{220, 217, 245}, -1, white, px);
 		for (size_t i = 0; i != c.lines.size(); ++i) menu_text(buf, pitch, cw_, ch_, cw_ / 2, l.lines_y[i], c.lines[i].text, c.lines[i].rgb, -1, white, px);
-		// Window position: centred in the view, a little above the middle; the pause card
-		// nearer the top, so the paused game stays in view.
+		// Window position: centred in the view, a little above the middle; the pause card in
+		// the middle.
 		int ox = viewport_x + (viewport_w - cw_) / 2, oy = std::max(0, (window_surface->h - ch_) * 2 / 5);
-		if (k == modal_kind::paused) oy = std::max(m, window_surface->h / 8);
+		if (k == modal_kind::paused) oy = std::max(0, (window_surface->h - ch_) / 2);
 		modal_rect = rect{{ox, oy}, {ox + cw_, oy + ch_}};
 		int mx = -1, my = -1;
 		if (wnd.has_mouse_focus()) wnd.get_cursor_pos(&mx, &my);

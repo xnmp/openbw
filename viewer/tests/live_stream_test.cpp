@@ -152,6 +152,38 @@ int main() {
 		live_buffer::queue z(-3);
 		CHECK(z.hold(10, 10, true) && z.hold(10, 21, true) && !z.hold(10, 22, true));
 	}
+	{
+		// The shown edge: the newest frame while the game is played...
+		live_buffer::edge e;
+		CHECK(e.shown(0) == -1);
+		for (int k = 0; k <= 20; ++k) e.arrived(k * 0.5, k * 20);  // 40 frames a second for 10 s
+		CHECK(e.shown(10) == 400 && e.shown(99) == 400 && !e.ended());
+		CHECK(e.rate() > 39 && e.rate() < 41);
+		// ... then, once it is over, carrying on at that rate, so it does not look finished.
+		e.end(10);
+		CHECK(e.ended());
+		CHECK(e.shown(10) == 400 && e.shown(11) > 439 && e.shown(11) < 441 && e.shown(70) > 2790);
+		e.arrived(12, 900);  // nothing arrives after the end
+		e.end(50);           // and the first end counts
+		CHECK(e.shown(11) > 439 && e.shown(11) < 441);
+		CHECK(e.shown(5) == 400);  // never behind the real end
+		// A decoder catching up (thousands of frames at once) is not a rate to keep.
+		live_buffer::edge burst;
+		burst.arrived(0, 0);
+		burst.arrived(1.5, 20000);
+		burst.end(1.5);
+		CHECK(burst.rate() <= 3000.0 / 42 + 1e-9 && burst.shown(2.5) <= 20000 + 3000.0 / 42 + 1e-6);
+		// Ended before any rate is known (opened on a finished game): the slowest rate, 1x.
+		live_buffer::edge late;
+		late.arrived(0, 5000);
+		late.end(0);
+		CHECK(late.shown(42) > 5999 && late.shown(42) < 6001);
+		// Old samples age out of the rate: a slower recent pace is what counts.
+		live_buffer::edge slow;
+		for (int k = 0; k <= 10; ++k) slow.arrived(k, k * 70);            // 70 f/s
+		for (int k = 11; k <= 30; ++k) slow.arrived(k, 700 + (k - 10) * 30);  // then 30 f/s
+		CHECK(slow.rate() > 29 && slow.rate() < 31);
+	}
 	if (failures) { std::printf("%d failure(s)\n", failures); return 1; }
 	std::printf("live_stream: all passed\n");
 	return 0;

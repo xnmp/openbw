@@ -18,13 +18,25 @@ static item zealot(uint32_t gateway, int remaining, int player = 0) {
 
 int main() {
 	{
-		// Grouping: one row per (kind, type, level), counted, soonest first, per player.
+		// Grouping: one row per (kind, type, level), counted, per player; research, then
+		// upgrades, then the rest, each soonest first.
 		std::vector<item> items = {zealot(1, 300), zealot(2, 120), zealot(3, 50, 1)};
 		item ups;
 		ups.what = kind::upgrade, ups.type = 1, ups.level = 2, ups.source = 9, ups.remaining = 60, ups.total = 4000;
 		items.push_back(ups);
+		item tech;
+		tech.what = kind::research, tech.type = 7, tech.source = 10, tech.remaining = 900, tech.total = 1200;
+		items.push_back(tech);
+		item cannon = zealot(11, 10);  // finishing soonest of all, but not research or an upgrade
+		cannon.what = kind::building, cannon.type = 162;
+		items.push_back(cannon);
+		auto all = production::grouped(items, 0);
+		CHECK(all.size() == 4);
+		CHECK(all[0].what == kind::research && all[1].what == kind::upgrade);
+		CHECK(all[2].what == kind::building && all[3].type == 65);  // the rest, soonest first
+		// Without the research and the building: the upgrade, then the Zealots.
+		items.erase(items.end() - 2, items.end());
 		auto g = production::grouped(items, 0);
-		CHECK(g.size() == 2);
 		CHECK(g[0].what == kind::upgrade && g[0].level == 2 && g[0].remaining == 60);
 		CHECK(g[1].type == 65 && g[1].count == 2 && g[1].remaining == 120 && g[1].progress > 0.79 && g[1].progress < 0.81);
 		CHECK(production::grouped(items, 1).size() == 1 && production::grouped(items, 5).empty());
@@ -76,16 +88,44 @@ int main() {
 		CHECK(t.recent(0, 1000, 1000).empty() && t.now().empty());
 	}
 	{
-		// Completions grouped: one row per (kind, type, level), counted, newest group first.
+		// Completions grouped: one row per (kind, type, level), counted; research, then upgrades,
+		// then the rest, each newest first.
 		using production::finished;
 		std::vector<finished> done = {{100, 0, kind::unit, 64, 0}, {130, 0, kind::unit, 64, 0}, {120, 0, kind::building, 156, 0},
 			{90, 0, kind::upgrade, 1, 1}, {95, 0, kind::upgrade, 1, 2}};
 		auto g = production::grouped(done);
 		CHECK(g.size() == 4);
-		CHECK(g[0].type == 64 && g[0].count == 2 && g[0].newest == 130);
-		CHECK(g[1].what == kind::building && g[1].newest == 120);
-		CHECK(g[2].level == 2 && g[3].level == 1);  // levels are distinct rows
+		CHECK(g[0].what == kind::upgrade && g[0].level == 2 && g[1].level == 1);  // levels are distinct rows
+		CHECK(g[2].type == 64 && g[2].count == 2 && g[2].newest == 130);
+		CHECK(g[3].what == kind::building && g[3].newest == 120);
+		done.push_back({10, 0, kind::research, 5, 0});  // the oldest, yet first
+		CHECK(production::grouped(done)[0].what == kind::research);
 		CHECK(production::grouped(std::vector<finished>{}).empty());
+	}
+	{
+		// Among units and buildings, priority (the viewer's: tech and expensive first, workers
+		// last) comes before time; research and upgrades still lead whatever their priority.
+		auto mk = [](kind k, int type, int remaining, int priority) {
+			item i;
+			i.what = k, i.type = type, i.source = (uint32_t)type, i.remaining = remaining, i.total = 1000, i.priority = priority;
+			return i;
+		};
+		std::vector<item> items = {mk(kind::unit, 7, 5, -1000),       // a worker, nearly done
+			mk(kind::building, 109, 10, 0),                            // a Supply Depot
+			mk(kind::building, 116, 800, 700),                         // a Science Facility
+			mk(kind::unit, 0, 300, 100), mk(kind::unit, 0 + 1000, 20, 100),  // two cheap units
+			mk(kind::upgrade, 3, 900, -5000)};
+		auto g = production::grouped(items, 0);
+		CHECK(g.size() == 6);
+		CHECK(g[0].what == kind::upgrade && g[1].type == 116);
+		CHECK(g[2].type == 1000 && g[3].type == 0);  // equal priority: soonest first
+		CHECK(g[4].type == 109 && g[5].type == 7);   // supply, then the worker, last
+		// Completions keep the priority they were made with.
+		production::tracker t;
+		t.update(1, {mk(kind::unit, 7, 1, -1000), mk(kind::building, 116, 1, 700)});
+		t.update(2, {});
+		auto f = production::grouped(t.recent(0, 2, 100));
+		CHECK(f.size() == 2 && f[0].type == 116 && f[0].priority == 700 && f[1].type == 7);
 	}
 	if (failures) { std::printf("%d failure(s)\n", failures); return 1; }
 	std::printf("production: all passed\n");

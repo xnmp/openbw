@@ -103,15 +103,18 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **Production** (`Alt+M`, then `p`; also in the settings menu): each player's units,
   buildings and morphs, upgrades and research in progress as command icons, a tile per kind
   of item: a count when there are several ("x2"), an upgrade's level in its corner, and under
-  it a bar of the soonest one's progress and its time left; soonest first. Then what finished
-  in the last game minute, dimmed, with how long ago the latest did. Tile edges are tinted by
-  kind (buildings blue, upgrades amber, research green); hovering a tile names it. A
-  completion is an item seen with a frame or two left that is gone, or followed by the next in
-  a queue, on the next frame; one that goes earlier was cancelled or killed. Seeking adds no
-  completions (`ui/production.h`, tested by `viewer/tests/production_test.cpp`).
-  Interceptors and Scarabs are left out (ammunition). It sits top right under the stats
-  panel, a column per player, or the players stacked where the view is too narrow beside the
-  build order panel; both use the HUD font.
+  it a bar of the soonest one's progress and its time left. Then what finished in the last
+  game minute, dimmed, with how long ago the latest did. Both are in the same order: research,
+  then upgrades, then units and buildings with tech buildings first and the rest by cost (gas
+  counted double), supply buildings near the end and workers last; equals soonest (or most
+  recent) first. Tile edges are tinted by kind (buildings blue, upgrades amber, research
+  green); hovering a tile names it. A completion is an item seen with a frame or two left
+  that is gone, or followed by the next in a queue, on the next frame; one that goes earlier
+  was cancelled or killed. Seeking adds no completions (`ui/production.h`, tested by
+  `viewer/tests/production_test.cpp`). Interceptors and Scarabs are left out (ammunition).
+  It sits top left under the minimised graph, the build order panel beside it; a column per
+  player, or the players stacked where both panels would not fit side by side. Both use the
+  HUD font.
 - **UI theme** (settings menu: auto, Terran, Protoss, Zerg, Minimal; saved as `ui_theme=1..5`):
   **Minimal**, the default, uses no game art: flat dark panels with a hairline edge, neutral
   greys and one blue accent (the seek bar, progress bars, what is on in the settings menu).
@@ -157,7 +160,10 @@ A desktop (SDL2) replay viewer built on [OpenBW](https://github.com/OpenBW/openb
 - **End of replay**: when playback reaches the end, a card gives each player's result
   (victorious, defeated, dropped; a player left standing after the others left is the
   winner) with **Watch Again** (`W`) and **Exit Replay** (`X` as in the game, or `E`). `Esc`
-  closes it; it shows again at the end.
+  closes it; it shows again at the end. While it is up the camera stays put (no scrolling,
+  dragging, zooming or minimap jumps); the seek bar still takes you back into the game.
+- **Paused** (`space`): a small **Game Paused** card near the top of the view with **Resume
+  (Space)**; it takes only clicks on itself, so the paused game can still be looked around.
 - Both cards are drawn like the game's own Game Menu (its measurements, from
   `rez/gamemenu.ui.json`, scaled to the window): the map darkened under a navy veil, buttons
   outlined twice in blue, yellow labels with the hotkey letter in white, the default button
@@ -258,8 +264,12 @@ python3 viewer/live/bwlive.py net.pcap --map Map.scx -o game.bwlv --follow &
   the newest frame, otherwise grey with how far behind (`LIVE -1:23`). Pause, rewind or seek as
   in a replay; `End` or a click on the badge goes live (and resumes). Self-play usually gets
   ahead of 1x; the speed keys catch up too. If playback reaches the newest frame, it waits
-  (`LIVE (waiting)`) until about half a second more has arrived. When the game is over, it is
-  an ordinary replay.
+  (`LIVE (waiting)`) until about half a second more has arrived. When the game is over it
+  does not say so until playback gets there (no spoilers): the badge stays, and the clock,
+  the "behind" time and the seek bar run on to an edge that keeps moving at the pace the game
+  was arriving (`live_buffer::edge`, tested); nor does the viewer log it, and
+  `scripts/watch_pluto_live.sh` keeps the decoder's messages in a log file. Once playback
+  reaches the real end, the end card shows as for any replay.
 - `viewer/live/live_check.cpp` checks a live replay against the replay the game saved:
   it simulates both and reports the first frame where they differ (optionally reading the
   live replay in small pieces, as the viewer follows it). A replay never records its own

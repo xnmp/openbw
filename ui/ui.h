@@ -2914,13 +2914,15 @@ struct ui_functions: ui_util_functions {
 		return graphs_visible() && graph_mini() ? graph_area_window.to.y + 8 : 8;
 	}
 	std::unique_ptr<native_window_drawing::surface> build_order_surface;
-	int build_order_drawn_w = 0;  // the panel's width this frame (0: not shown)
+	int build_order_drawn_w = 0;  // the panel's width as last drawn (0: not shown)
 	struct production_tip { rect r; a_string text; };  // a hover label's area, window pixels
 	a_vector<production_tip> build_order_tips;  // window pixels: each row's icon, named on hover
 	void draw_build_order_panel() {
-		build_order_drawn_w = 0;
 		build_order_tips.clear();
-		if (!show_build_order) return;
+		if (!show_build_order) {
+			build_order_drawn_w = 0;
+			return;
+		}
 		std::vector<int> players;
 		for (int i = 0; i != 8; ++i) {
 			if (st.players[i].controller == player_t::controller_occupied) players.push_back(i);
@@ -2928,7 +2930,7 @@ struct ui_functions: ui_util_functions {
 		if (players.empty()) return;
 		// The HUD font, as in the stats and graph panels; a command icon for each building.
 		const int cw = hud_font::cell_w, ch = hud_font::cell_h, hh = ch;
-		const int icon_h = ch + 3, icon_w = icon_h * 36 / 34, line = icon_h + 3;
+		const int icon_h = ch + 9, icon_w = icon_h * 36 / 34, line = icon_h + 3;
 		const int pad = ui_skin ? std::max(14, frame_side() + 6) : 10, pad_t = ui_skin ? std::max(10, frame_top() + 4) : 8;
 		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, gap = 3 * cw;
 		// Supply, icon, start, then (estimated) finish.
@@ -2958,7 +2960,8 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = build_order_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) plain_panel(buf, pitch, w, h, 215);
-		const int ox = viewport_x + 8;
+		// Top left, beside the production panel when that is shown.
+		const int ox = viewport_x + 8 + (production_drawn_w ? production_drawn_w + 8 : 0);
 		int x = pad;
 		for (size_t i = 0; i != players.size(); ++i) {
 			int p = players[i];
@@ -3041,6 +3044,7 @@ struct ui_functions: ui_util_functions {
 					production::item it;
 					it.player = p, it.what = k, it.type = type, it.level = level, it.source = uid;
 					it.remaining = remaining, it.total = std::max(1, total);
+					it.priority = production_priority(k, type);
 					items.push_back(it);
 				};
 				const unit_type_t* next = !u->build_queue.empty() ? u->build_queue.front() : nullptr;
@@ -3068,6 +3072,18 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 		production_log.update(st.current_frame, std::move(items));
+	}
+
+	// Order among units and buildings in the production panel (higher first): tech buildings
+	// (as the auto observer counts them) ahead of everything, then by cost (gas counted
+	// double), so a Science Facility or a Carrier leads and a Zealot trails; supply buildings
+	// below everything that is not a worker, and workers last.
+	int production_priority(production::kind k, int type) const {
+		if (k != production::kind::unit && k != production::kind::building) return 0;
+		const unit_type_t* t = get_unit_type((UnitTypes)type);
+		if (ut_worker(t)) return -1000;
+		if (unit_is_supply_type(t)) return -500;
+		return t->mineral_cost + 2 * t->gas_cost + (observer_tech_weight(t) > 0 ? 1000 : 0);
 	}
 
 	a_string production_label(production::kind k, int type, int level) const {
@@ -3100,8 +3116,10 @@ struct ui_functions: ui_util_functions {
 	// a count when there are several, its level for an upgrade, the soonest one's progress and
 	// time left under it), then what finished in the last game minute (dimmed, how long ago).
 	// Hovering a tile names it. A column per player, or stacked where the view is narrow.
+	int production_drawn_w = 0;  // the panel's width this frame (0: not shown)
 	void draw_production_panel() {
 		production_tips.clear();
+		production_drawn_w = 0;
 		if (!show_production) return;
 		std::vector<int> players;
 		for (int i = 0; i != 8; ++i) {
@@ -3113,7 +3131,7 @@ struct ui_functions: ui_util_functions {
 		const int pad = ui_skin ? std::max(14, frame_side() + 6) : 10, pad_t = ui_skin ? std::max(10, frame_top() + 4) : 8;
 		const int pad_b = ui_skin ? std::max(10, frame_bottom() + 4) : 8, line = ch + 4;
 		// A tile: the icon (36 x 34) on a plate, a progress bar, the time under it.
-		const int icon_w = 36, icon_h = 34, tile_w = std::max(icon_w + 12, 5 * cw + 2), plate_h = icon_h + 6;
+		const int icon_w = 44, icon_h = 41, tile_w = std::max(icon_w + 10, 5 * cw + 2), plate_h = icon_h + 5;
 		const int bar_h = 3, tile_h = plate_h + 3 + bar_h + 1 + ch, tile_gap = 6, per_row = 6;
 		const int col_w = per_row * tile_w + (per_row - 1) * tile_gap, gap = 3 * cw;
 		const int window = production_recent_seconds * 1000 / 42;
@@ -3140,12 +3158,16 @@ struct ui_functions: ui_util_functions {
 			}
 		}
 		// Top right, under the stats panel and the frame rate, above the replay bar.
-		const int top = (show_hud && hud_surface ? 8 + hud_surface->h + 4 : 8) + (show_fps ? hud_font_small::cell_h + 2 + 6 : 0);
-		const int bottom = draw_ui_elements ? replay_bar_window_rect().from.y - 8 : window_surface->h - 8;
+		// Top left, under the minimised graph, above the minimap; the build order panel goes
+		// beside it.
+		const int top = top_left_panel_y();
+		const int bottom = draw_ui_elements ? minimap_window_rect().from.y - 8 : window_surface->h - 8;
 		const int n = (int)players.size(), head = hh + 4, block_gap = line / 2;
-		const int left_limit = viewport_x + 8 + (build_order_drawn_w ? build_order_drawn_w + 8 : 0);
 		const int w_cols = pad * 2 + n * col_w + (n - 1) * gap, w_stack = pad * 2 + col_w;
-		const bool stacked = n > 1 && viewport_x + viewport_w - w_cols - 8 < left_limit;
+		// Stacked when a column per player would leave no room for the build order panel
+		// beside it (its width as last drawn).
+		const int room = viewport_w - 16 - (show_build_order && build_order_drawn_w ? build_order_drawn_w + 8 : 0);
+		const bool stacked = n > 1 && w_cols > room;
 		const int w = stacked ? w_stack : w_cols;
 		auto rows_of = [&](size_t count) { return std::max(1, ((int)count + per_row - 1) / per_row); };
 		// Rows of tiles for each section: production up to two, finished one, fewer when short
@@ -3180,7 +3202,7 @@ struct ui_functions: ui_util_functions {
 		size_t pitch = production_surface->pitch / 4;
 		fill_rgba(buf, pitch, w, h, 0, 0, w, h, hud_rgba(0, 0, 0, 0));
 		if (!skin_panel(buf, pitch, w, h, 0, 0, w, h)) plain_panel(buf, pitch, w, h, 215);
-		const int ox = viewport_x + viewport_w - w - 8;  // right-aligned: better over the build order than off screen
+		const int ox = viewport_x + 8;
 		auto blend_rect = [&](int x, int y, int rw, int rh, uint32_t c) {
 			for (int Y = y; Y < y + rh; ++Y) for (int X = x; X < x + rw; ++X) blend_px(buf, pitch, w, h, X, Y, c);
 		};
@@ -3255,6 +3277,7 @@ struct ui_functions: ui_util_functions {
 		}
 		production_surface->unlock();
 		production_surface->blit(&*window_surface, ox, top);
+		production_drawn_w = w;
 		draw_hover_tip(production_tips);
 	}
 
@@ -6585,7 +6608,7 @@ struct ui_functions: ui_util_functions {
 		if (!over && !is_moving_replay_slider) return -1;
 		int bw = std::max(1, bar.to.x - bar.from.x);
 		int x = std::max(0, std::min(bw, mx - bar.from.x));
-		return (int)((int64_t)x * replay_st.end_frame / bw);
+		return (int)((int64_t)x * shown_end_frame() / bw);
 	}
 
 	// ---- Seek-bar markers ----
@@ -6925,7 +6948,7 @@ struct ui_functions: ui_util_functions {
 	//   Esc or a seek back closes it; it shows again at the end.
 	struct modal_line { a_string text; wire_rgb rgb; };
 	struct modal_card { a_string title; a_vector<modal_line> lines; std::vector<modal_layout::button> buttons; };
-	enum class modal_kind { none, game_menu, end_of_replay };
+	enum class modal_kind { none, game_menu, end_of_replay, paused };
 	enum { menu_button_options, menu_button_exit, menu_button_return };
 	enum { end_button_again, end_button_exit };
 
@@ -6939,9 +6962,14 @@ struct ui_functions: ui_util_functions {
 		if (show_settings_menu) return modal_kind::none;  // Options: the settings menu is on top
 		if (game_menu_open) return modal_kind::game_menu;
 		if (draw_ui_elements && replay_st.end_frame > 0 && st.current_frame >= replay_st.end_frame && !end_card_dismissed && !live_waiting()) return modal_kind::end_of_replay;
+		// Paused: a small card near the top, out of the way of what was paused on.
+		if (draw_ui_elements && replay_st.end_frame > 0 && is_paused) return modal_kind::paused;
 		return modal_kind::none;
 	}
 	bool end_card_shown() const { return active_modal() == modal_kind::end_of_replay; }
+	// The camera stays put while the end card is up (no scrolling, dragging, zooming or
+	// minimap jumps behind it); the seek bar still works, to go back into the game.
+	bool camera_locked() const { return end_card_shown(); }
 
 	void open_game_menu() {
 		if (game_menu_open) return;
@@ -6987,6 +7015,9 @@ struct ui_functions: ui_util_functions {
 				c.lines.push_back({name + "  " + replay_result::label(o), rgb});
 			}
 			c.buttons = {{"Watch Again", 0, "w"}, {"Exit Replay", 1, "xe"}};
+		} else if (k == modal_kind::paused) {
+			c.title = "Game Paused";
+			c.buttons = {{"Resume (Space)", -1, " "}};
 		}
 		return c;
 	}
@@ -7011,6 +7042,8 @@ struct ui_functions: ui_util_functions {
 				replay_frame = 0;
 				is_paused = false;
 			} else if (b == end_button_exit) exit_replay();
+		} else if (k == modal_kind::paused) {
+			is_paused = false;
 		}
 	}
 
@@ -7177,8 +7210,10 @@ struct ui_functions: ui_util_functions {
 		const wire_rgb yellow{235, 236, 138}, white{250, 248, 250};
 		menu_text(buf, pitch, cw_, ch_, cw_ / 2, l.title_y, c.title, wire_rgb{220, 217, 245}, -1, white, px);
 		for (size_t i = 0; i != c.lines.size(); ++i) menu_text(buf, pitch, cw_, ch_, cw_ / 2, l.lines_y[i], c.lines[i].text, c.lines[i].rgb, -1, white, px);
-		// Window position: centred in the view, a little above the middle.
+		// Window position: centred in the view, a little above the middle; the pause card
+		// nearer the top, so the paused game stays in view.
 		int ox = viewport_x + (viewport_w - cw_) / 2, oy = std::max(0, (window_surface->h - ch_) * 2 / 5);
+		if (k == modal_kind::paused) oy = std::max(m, window_surface->h / 8);
 		modal_rect = rect{{ox, oy}, {ox + cw_, oy + ch_}};
 		int mx = -1, my = -1;
 		if (wnd.has_mouse_focus()) wnd.get_cursor_pos(&mx, &my);
@@ -7219,12 +7254,13 @@ struct ui_functions: ui_util_functions {
 
 		a_string speed = speed_label();
 		const int speed_x = w - pad_x - (int)speed.size() * cw;
-		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(replay_st.end_frame);
+		const int bar_end = std::max(1, shown_end_frame());  // the live edge in a live game
+		a_string timer = format_game_time(st.current_frame) + " / " + format_game_time(bar_end);
 		if (ui_skin) hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 248, 240, 170);
 		else hud_text(buf, pitch, w, h, lx, pad - 2, timer.c_str(), 246, 247, 250);
 		int after_timer = lx + ((int)timer.size() + 2) * cw;
 		live_badge_window = rect{};
-		if (live_waiting()) {
+		if (live_presented()) {
 			// A live game, as streams show it: a red LIVE at the newest frames; grey, with how
 			// far behind, otherwise. Clicking it (or End) goes live.
 			bool at_edge = live_at_edge();
@@ -7232,7 +7268,7 @@ struct ui_functions: ui_util_functions {
 			fill_rgba(buf, pitch, w, h, bx, by + (ch - dot) / 2, dot, dot, at_edge ? hud_rgba(235, 45, 45, 255) : hud_rgba(130, 130, 130, 255));
 			int tx0 = bx + dot + cw / 2;
 			// The longest wording that fits before the speed label.
-			a_string behind = "-" + format_game_time(replay_st.end_frame - st.current_frame);
+			a_string behind = "-" + format_game_time(bar_end - st.current_frame);
 			std::vector<a_string> wordings = at_edge ? std::vector<a_string>{live_stalled() ? "LIVE (waiting)" : "LIVE", "LIVE"}
 			                                         : std::vector<a_string>{"LIVE  " + behind, "LIVE " + behind, behind};
 			a_string label = wordings.back();
@@ -7250,15 +7286,20 @@ struct ui_functions: ui_util_functions {
 		}
 		if (auto_observer) {
 			bool held = clock.now() < observer_manual_until;
-			hud_text(buf, pitch, w, h, after_timer, pad - 2, held ? "AUTO (manual)" : "AUTO", held ? 150 : 120, held ? 150 : 220, held ? 150 : 255);
+			// The longest wording that fits before the speed label (a long LIVE "behind" time
+			// comes first), or none.
+			const char* label = held ? "AUTO (manual)" : "AUTO";
+			if (after_timer + ((int)std::strlen(label) + 1) * cw > speed_x) label = "AUTO";
+			if (after_timer + 5 * cw <= speed_x)
+				hud_text(buf, pitch, w, h, after_timer, pad - 2, label, held ? 150 : 120, held ? 150 : 220, held ? 150 : 255);
 		}
 		if (is_paused) hud_text(buf, pitch, w, h, speed_x, pad - 2, speed.c_str(), 255, 190, 70);
 		else hud_text(buf, pitch, w, h, speed_x, pad - 2, speed.c_str(), 150, 230, 110);
 
 		// Track: segmented like the in-game bars
 		int tx = lx, ty = pad + ch + 4;
-		draw_bw_bar(buf, pitch, w, h, tx, ty, bw, bh, (double)std::min(st.current_frame, replay_st.end_frame) / replay_st.end_frame, 3);
-		auto frame_x = [&](int frame) { return tx + 2 + (int)((int64_t)(bw - 4) * std::max(0, std::min(frame, replay_st.end_frame)) / replay_st.end_frame); };
+		draw_bw_bar(buf, pitch, w, h, tx, ty, bw, bh, (double)std::min(st.current_frame, bar_end) / bar_end, 3);
+		auto frame_x = [&](int frame) { return tx + 2 + (int)((int64_t)(bw - 4) * std::max(0, std::min(frame, bar_end)) / bar_end); };
 		int fx = frame_x(st.current_frame);
 		if (replay_frame != st.current_frame) {  // seek target while catching up
 			int sx = frame_x(replay_frame);
@@ -7407,6 +7448,7 @@ struct ui_functions: ui_util_functions {
 		std::unique_ptr<FILE, int (*)(FILE*)> file{nullptr, &std::fclose};
 		live_stream::reader reader;
 		live_buffer::queue queue;
+		live_buffer::edge edge;  // the live edge as shown: it does not stop when the game does
 		int newest = -1;         // newest known frame
 		double newest_t = 0;     // when it last moved on
 		double checked_t = 0;  // when the file was last checked for having been replaced
@@ -7452,6 +7494,7 @@ struct ui_functions: ui_util_functions {
 			live_replay::scenario_chk(live.reader.map()));
 		load_replay(data_loading::data_reader_le(raw.data(), raw.data() + raw.size()));
 		live_known(known, live_seconds());
+		if (live.reader.ended()) live.edge.end(live_seconds());
 		ui::log("live: %s, %d frames so far\n", replay_st.map_name, known + 1);
 		return true;
 	}
@@ -7464,7 +7507,8 @@ struct ui_functions: ui_util_functions {
 		live_replay::append(replay_st, live.reader.take_actions(), known);
 		double t = live_seconds();
 		live_known(known, t);
-		if (live.reader.ended()) ui::log("live: the game is over at frame %d\n", known);
+		// Not logged: the terminal would give the ending away (see live_presented).
+		if (live.reader.ended()) live.edge.end(t);
 		if (t - live.newest_t > 2 && t - live.checked_t > 2) {
 			live.checked_t = t;
 			if (!live.replaced && live_file_replaced()) {
@@ -7475,6 +7519,18 @@ struct ui_functions: ui_util_functions {
 	}
 	void live_known(int frame, double t) {
 		if (frame > live.newest) live.newest = frame, live.newest_t = t;
+		live.edge.arrived(t, frame);
+	}
+	// Shown as live: still being played, or over but not yet watched to its end. A finished
+	// game looks unfinished until then (no spoilers): the LIVE badge stays, and the clock,
+	// the "behind" time and the seek bar run to an edge that keeps moving (live_buffer::edge).
+	bool live_presented() const {
+		return live.on && !live.reader.failed() && (live_waiting() || st.current_frame < replay_st.end_frame);
+	}
+	// The end of the game as shown: the replay's end, or in a live game the shown live edge.
+	int shown_end_frame() const {
+		if (!live_presented()) return replay_st.end_frame;
+		return std::max(replay_st.end_frame, (int)live.edge.shown(live_seconds()));
 	}
 	// Whether the path now names a different file than the one being read (a new decode).
 	bool live_file_replaced() const {
@@ -7490,10 +7546,10 @@ struct ui_functions: ui_util_functions {
 	bool live_stalled() const { return live_waiting() && live.queue.waiting_for_more(); }
 	// Within 5 s of the newest frame: watching live rather than behind. (Self-play runs faster than
 	// 1x, so playing at 1x drifts behind by a second or so each second.)
-	bool live_at_edge() const { return replay_st.end_frame - st.current_frame <= 5 * 1000 / 42; }
+	bool live_at_edge() const { return shown_end_frame() - st.current_frame <= 5 * 1000 / 42; }
 	// Jump to the newest frames and play, as a stream's "go live" (End, or the LIVE badge).
 	void go_live() {
-		if (!live_waiting()) return;
+		if (!live_presented()) return;
 		replay_frame = std::max(0, replay_st.end_frame - 12);  // half a second queued
 		is_paused = false;
 	}
@@ -7661,6 +7717,7 @@ struct ui_functions: ui_util_functions {
 		};
 
 		auto check_move_minimap = [&](auto& e) {
+			if (camera_locked()) return;
 			if (e.mouse_x >= minimap_area.from.x && e.mouse_x < minimap_area.to.x) {
 				if (e.mouse_y >= minimap_area.from.y && e.mouse_y < minimap_area.to.y) {
 					is_moving_minimap = true;
@@ -7673,7 +7730,8 @@ struct ui_functions: ui_util_functions {
 			(void)mouse_y;
 			int ow = std::max(1, replay_slider_area.to.x - replay_slider_area.from.x);
 			int x = std::max(0, std::min(ow, mouse_x - replay_slider_area.from.x));
-			replay_frame = (int)((int64_t)x * replay_st.end_frame / ow);
+			// Past a finished live game's end (the shown edge runs on): its end.
+			replay_frame = std::min(replay_st.end_frame, (int)((int64_t)x * shown_end_frame() / ow));
 		};
 
 		auto check_move_replay_slider = [&](auto& e) {
@@ -7754,6 +7812,7 @@ struct ui_functions: ui_util_functions {
 					continue;
 				}
 				if (e.type == native_window::event_t::type_mouse_wheel) {
+					if (camera_locked()) continue;
 					// mouse_x/y are window pixels here (the anchor), not logical ones.
 					step_zoom(e.wheel_y > 0 ? +1 : -1, std::max(0, std::min(viewport_w - 1, e.mouse_x - viewport_x)), e.mouse_y);
 					continue;
@@ -7805,7 +7864,7 @@ struct ui_functions: ui_util_functions {
 							drag_select_to_x = e.mouse_x;
 							drag_select_to_y = e.mouse_y;
 						}
-					} else if (e.button == 3) {
+					} else if (e.button == 3 && !camera_locked()) {
 						is_dragging_screen = true;
 						drag_screen_pos = screen_pos + xy((fp16::integer(e.mouse_x) / view_scale).integer_part(), (fp16::integer(e.mouse_y) / view_scale).integer_part());
 					}
@@ -7819,7 +7878,7 @@ struct ui_functions: ui_util_functions {
 							drag_select_to_y = e.mouse_y;
 						}
 					} else if (e.button_state & 4) {
-						if (is_dragging_screen) {
+						if (is_dragging_screen && !camera_locked()) {
 							screen_pos = drag_screen_pos - xy((fp16::integer(e.mouse_x) / view_scale).integer_part(), (fp16::integer(e.mouse_y) / view_scale).integer_part());
 							//screen_pos -= xy((fp16::integer(e.mouse_x - drag_screen_x) / view_scale).integer_part(), (fp16::integer(e.mouse_y - drag_screen_y) / view_scale).integer_part());
 						}
@@ -7862,9 +7921,9 @@ struct ui_functions: ui_util_functions {
 						// SDLK_KP_MINUS / SDLK_KP_PLUS / SDLK_KP_EQUALS
 						bool minus = e.sym == '-' || e.sym == 0x40000056;
 						bool plus = e.sym == '=' || e.sym == '+' || e.sym == 0x40000057 || e.sym == 0x40000067;
-						if (ctrl && minus) step_zoom(-1);
-						else if (ctrl && plus) step_zoom(+1);
-						else if (ctrl && e.sym == '0') set_zoom(1.0);
+						if (ctrl && minus && !camera_locked()) step_zoom(-1);
+						else if (ctrl && plus && !camera_locked()) step_zoom(+1);
+						else if (ctrl && e.sym == '0' && !camera_locked()) set_zoom(1.0);
 						else if (minus) step_speed(false);
 						else if (plus) step_speed(true);
 					}
@@ -7964,7 +8023,7 @@ struct ui_functions: ui_util_functions {
 			if (elapsed > scroll_step * 20) elapsed = scroll_step * 20;
 			last_input_poll = now;
 			int dx = 0, dy = 0;
-			if (!is_drag_selecting) {
+			if (!is_drag_selecting && !camera_locked()) {
 				if (wnd.get_key_state(81)) ++dy;
 				else if (wnd.get_key_state(82)) --dy;
 				// With the full graph pane open, left/right switch its tabs instead.
@@ -8141,8 +8200,8 @@ struct ui_functions: ui_util_functions {
 			}
 			prof_scope.reset(new frame_profile::profile::scope(prof, "graphs"));
 			if (graphs_visible()) draw_graph_panel();
-			draw_build_order_panel();
 			draw_production_panel();
+			draw_build_order_panel();
 			prof_scope.reset(new frame_profile::profile::scope(prof, "selpanel"));
 			panel_area_window = rect{};
 			if (show_selection_panel && draw_selection_panel()) {

@@ -29,6 +29,8 @@ struct item {
 	uint32_t source = 0; // what makes it (a building, an egg): with what/type/level, identifies it
 	int remaining = 0;   // frames left
 	int total = 1;       // frames it takes in all
+	int priority = 0;    // display order among units and buildings: higher first (the viewer's
+	                     // choice: tech and expensive things ahead, workers last)
 };
 
 // Items of one kind shown as one row: "Zealot x2", soonest done first.
@@ -38,6 +40,7 @@ struct group {
 	int count = 0;
 	int remaining = 0;  // the soonest
 	double progress = 0;  // of the soonest, 0..1
+	int priority = 0;
 };
 
 struct finished {
@@ -45,9 +48,25 @@ struct finished {
 	int player = 0;
 	kind what = kind::unit;
 	int type = 0, level = 0;
+	int priority = 0;
 };
 
-// In-progress items grouped by (kind, type, level), soonest finishing first, for one player.
+// Display order of the kinds: research first, then upgrades, then units and buildings.
+inline int kind_rank(kind k) {
+	return k == kind::research ? 0 : k == kind::upgrade ? 1 : 2;
+}
+// Whether `a` is listed before `b` by kind, then priority (higher first); ties are left to the
+// caller (time).
+template <typename T>
+inline int compare_rank(const T& a, const T& b) {
+	int ra = kind_rank(a.what), rb = kind_rank(b.what);
+	if (ra != rb) return ra < rb ? -1 : 1;
+	if (a.priority != b.priority) return a.priority > b.priority ? -1 : 1;
+	return 0;
+}
+
+// In-progress items grouped by (kind, type, level) for one player: research, then upgrades,
+// then the rest by priority (compare_rank), each soonest finishing first.
 inline std::vector<group> grouped(const std::vector<item>& items, int player) {
 	std::map<std::tuple<int, int, int>, group> g;
 	for (const item& it : items) {
@@ -57,34 +76,41 @@ inline std::vector<group> grouped(const std::vector<item>& items, int player) {
 		int rem = std::max(0, it.remaining);
 		double prog = it.total > 0 ? std::max(0.0, std::min(1.0, 1.0 - (double)rem / it.total)) : 0;
 		if (e.count == 0 || rem < e.remaining) e.remaining = rem, e.progress = prog;
-		e.what = it.what, e.type = it.type, e.level = it.level;
+		e.what = it.what, e.type = it.type, e.level = it.level, e.priority = it.priority;
 		++e.count;
 	}
 	std::vector<group> out;
 	for (auto& v : g) out.push_back(v.second);
-	std::stable_sort(out.begin(), out.end(), [](const group& a, const group& b) { return a.remaining < b.remaining; });
+	std::stable_sort(out.begin(), out.end(), [](const group& a, const group& b) {
+		int c = compare_rank(a, b);
+		return c ? c < 0 : a.remaining < b.remaining;
+	});
 	return out;
 }
 
-// Completions grouped by (kind, type, level): "Probe x5", the newest frame of each, newest
-// group first.
+// Completions grouped by (kind, type, level): "Probe x5", the newest frame of each; research,
+// then upgrades, then the rest by priority (compare_rank), each newest first.
 struct finished_group {
 	kind what = kind::unit;
 	int type = 0, level = 0;
 	int count = 0;
 	int newest = 0;  // frame of the latest
+	int priority = 0;
 };
 inline std::vector<finished_group> grouped(const std::vector<finished>& done) {
 	std::map<std::tuple<int, int, int>, finished_group> g;
 	for (const finished& f : done) {
 		finished_group& e = g[std::make_tuple((int)f.what, f.type, f.level)];
 		if (e.count == 0 || f.frame > e.newest) e.newest = f.frame;
-		e.what = f.what, e.type = f.type, e.level = f.level;
+		e.what = f.what, e.type = f.type, e.level = f.level, e.priority = f.priority;
 		++e.count;
 	}
 	std::vector<finished_group> out;
 	for (auto& v : g) out.push_back(v.second);
-	std::stable_sort(out.begin(), out.end(), [](const finished_group& a, const finished_group& b) { return a.newest > b.newest; });
+	std::stable_sort(out.begin(), out.end(), [](const finished_group& a, const finished_group& b) {
+		int c = compare_rank(a, b);
+		return c ? c < 0 : a.newest > b.newest;
+	});
 	return out;
 }
 
@@ -98,7 +124,7 @@ public:
 				// Still the same item if it is there counting down; one there with more time left is
 				// the next in a queue, begun as this one finished.
 				bool still = std::any_of(items.begin(), items.end(), [&](const item& now) { return same(was, now) && now.remaining <= was.remaining; });
-				if (!still) add({frame, was.player, was.what, was.type, was.level}, was.source);
+				if (!still) add({frame, was.player, was.what, was.type, was.level, was.priority}, was.source);
 			}
 		}
 		current = std::move(items);
